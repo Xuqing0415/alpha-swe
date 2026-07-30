@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+*.pyo
+*.db
+*.log
+logs/
+test_workspace/
+test_output.txt
+safe.txt
+report.txt
+test_memory.db
+.idea/
+.vscode/
+*.egg-info/
+dist/
+build/
