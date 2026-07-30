@@ -1,0 +1,56 @@
+{
+  "skills": {
+    "python": {
+      "version": "1.0.0",
+      "priority": 10,
+      "triggers": ["python", "py", "django", "flask", "fastapi", "pytest", ".py"],
+      "exclude_triggers": [],
+      "requires": [],
+      "description": "Python 开发规范与最佳实践"
+    },
+    "react": {
+      "version": "1.0.0",
+      "priority": 8,
+      "triggers": ["react", "jsx", "javascript", "component", "前端", "frontend", ".jsx", ".tsx"],
+      "exclude_triggers": [],
+      "requires": [],
+      "description": "React 前端开发规范"
+    },
+    "django": {
+      "version": "1.0.0",
+      "priority": 9,
+      "triggers": ["django", "orm", "model", "migration", "manage.py", "wsgi"],
+      "exclude_triggers": [],
+      "requires": ["python"],
+      "description": "Django 后端开发规范"
+    },
+    "git": {
+      "version": "1.0.0",
+      "priority": 5,
+      "triggers": ["git", "commit", "branch", "merge", "pr", "pull request", "push", ".git"],
+      "exclude_triggers": [],
+      "requires": [],
+      "description": "Git 版本控制操作规范"
+    },
+    "docker": {
+      "version": "1.0.0",
+      "priority": 5,
+      "triggers": ["docker", "container", "image", "compose", "Dockerfile"],
+      "exclude_triggers": [],
+      "requires": [],
+      "description": "Docker 容器化操作规范"
+    },
+    "testing": {
+      "version": "1.0.0",
+      "priority": 6,
+      "triggers": ["test", "pytest", "jest", "unittest", "测试", "coverage"],
+      "exclude_triggers": [],
+      "requires": [],
+      "description": "测试框架与策略"
+    }
+  },
+  "global": {
+    "max_skills_per_request": 3,
+    "default_priority": 1
+  }
+}

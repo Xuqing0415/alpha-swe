@@ -1,23 +1,21 @@
-"""第七关：Terminal UI 可视化仪表盘
-使用 rich 库搭建实时仪表盘：
-- 左侧：当前 Step Number、Loop 状态（思考中/执行中/解析中）
-- 右侧：Token 消耗、最后一次 Tool Call 参数/返回值（截断）
+"""第七关：Terminal UI 可视化仪表盘（解耦版）
+通过 EventBus 消费事件，UI 线程永不阻塞 Worker 核心逻辑。
 """
 from __future__ import annotations
 import logging
-import time
 import threading
+import queue as std_queue
 from typing import Optional, Dict, Any
+
+from event_bus import event_bus, AgentEvent
 
 logger = logging.getLogger("alpha-swe.terminal_ui")
 
 try:
     from rich.console import Console
-    from rich.layout import Layout
     from rich.panel import Panel
-    from rich.live import Live
-    from rich.table import Table
     from rich.text import Text
+    from rich.table import Table
     from rich import box
     HAS_RICH = True
 except ImportError:
@@ -25,7 +23,7 @@ except ImportError:
 
 
 class TerminalUI:
-    """Rich 终端仪表盘"""
+    """Rich 终端仪表盘（事件驱动，解耦版）"""
 
     def __init__(self, refresh_rate: int = 4):
         if not HAS_RICH:
@@ -35,7 +33,9 @@ class TerminalUI:
 
         self.console = Console()
         self.refresh_rate = refresh_rate
-        self.live: Optional[Live] = None
+        self.live = None
+        self._running = False
+        self._ui_thread = None
 
         # 仪表盘数据
         self.data = {
@@ -55,14 +55,32 @@ class TerminalUI:
             "compression_count": 0,
             "memory_entities": 0,
             "bg_tasks": 0,
+            "queue_depth": 0,
+            "retry_count": 0,
+            "trace_id": "",
         }
         self._lock = threading.Lock()
 
     def start(self):
-        """启动仪表盘"""
+        """启动 UI 线程（独立于 Worker）"""
         if not HAS_RICH:
             return
+
+        self._running = True
+        self._ui_thread = threading.Thread(target=self._ui_loop, daemon=True)
+        self._ui_thread.start()
+        logger.info("Terminal UI 已启动（事件驱动模式）")
+
+    def stop(self):
+        """停止 UI"""
+        self._running = False
+        if self._ui_thread:
+            self._ui_thread.join(timeout=2.0)
+
+    def _ui_loop(self):
+        """UI 主循环：消费事件 -> 刷新布局（永不阻塞 Worker）"""
         import rich.live
+
         self.live = rich.live.Live(
             self._render(),
             console=self.console,
@@ -71,30 +89,92 @@ class TerminalUI:
         )
         self.live.start()
 
-    def stop(self):
-        """停止仪表盘"""
-        if self.live:
-            self.live.stop()
+        while self._running:
+            # 非阻塞消费事件
+            try:
+                event = event_bus.consume(timeout=0.05)
+                if event:
+                    self._handle_event(event)
+            except std_queue.Empty:
+                pass
 
-    def update(self, **kwargs):
-        """更新仪表盘数据"""
+            self.live.update(self._render())
+
+        self.live.stop()
+
+    def _handle_event(self, event: AgentEvent):
+        """处理事件，更新仪表盘数据"""
         with self._lock:
-            self.data.update(kwargs)
+            etype = event.event_type
+            data = event.data
 
-    def update_status(self, status: str):
-        """更新状态"""
-        colors = {
-            "idle": "white",
-            "thinking": "yellow",
-            "executing": "cyan",
-            "parsing": "magenta",
-            "done": "green",
-            "error": "red"
-        }
-        self.update(
-            status=status,
-            status_color=colors.get(status, "white")
-        )
+            if etype == "step_start":
+                self.data["step"] = f"{data.get('step_index', 0) + 1}/{data.get('total_steps', 0)}"
+                self.data["status"] = "executing"
+                self.data["status_color"] = "cyan"
+                self.data["current_action"] = data.get("description", "")[:50]
+
+            elif etype == "step_end":
+                self.data["status"] = "parsing"
+                self.data["status_color"] = "magenta"
+
+            elif etype == "tool_call":
+                params_str = str(data.get("params", {}))
+                self.data["last_tool_call"] = params_str[:100]
+                self.data["status"] = "executing"
+                self.data["status_color"] = "cyan"
+
+            elif etype == "tool_result":
+                result_str = str(data.get("output", ""))
+                self.data["last_tool_result"] = result_str[:100]
+                if data.get("success"):
+                    self.data["errors"] = self.data["errors"][-4:]  # keep last 4
+                else:
+                    self.data["errors"].append(data.get("error", "unknown")[:80])
+
+            elif etype == "error":
+                self.data["errors"].append(data.get("message", "unknown")[:80])
+                self.data["status"] = "error"
+                self.data["status_color"] = "red"
+
+            elif etype == "compress":
+                self.data["compression_count"] = data.get("count", self.data["compression_count"])
+                self.data["watermark"] = f"压缩 #{data.get('count', 0)}"
+
+            elif etype == "status":
+                colors = {"idle": "white", "thinking": "yellow", "executing": "cyan",
+                          "parsing": "magenta", "done": "green", "error": "red"}
+                s = data.get("status", "idle")
+                self.data["status"] = s
+                self.data["status_color"] = colors.get(s, "white")
+
+            elif etype == "token_update":
+                self.data["token_used"] = data.get("used", 0)
+                self.data["token_limit"] = data.get("limit", 100000)
+                pct = data.get("percent", 0)
+                self.data["token_percent"] = f"{pct:.1f}%"
+
+            elif etype == "sandbox_violation":
+                self.data["sandbox_violations"] = data.get("count", self.data["sandbox_violations"] + 1)
+
+            elif etype == "memory_update":
+                self.data["memory_entities"] = data.get("count", 0)
+
+            elif etype == "bg_task":
+                self.data["bg_tasks"] = data.get("active", 0)
+
+            elif etype == "retry":
+                self.data["retry_count"] = data.get("count", self.data["retry_count"] + 1)
+
+            elif etype == "trace":
+                self.data["trace_id"] = data.get("trace_id", "")[:8]
+
+            # 通用：计划栈
+            if "plan_stack" in data:
+                self.data["plan_stack"] = data["plan_stack"]
+
+            # 队列深度
+            self.data["queue_depth"] = event_bus.size()
 
     def _render(self):
         """渲染布局"""
@@ -120,7 +200,6 @@ class TerminalUI:
         return layout
 
     def _render_status(self) -> Panel:
-        """渲染状态面板"""
         d = self.data
         status_text = Text()
         status_text.append("Alpha-SWE 状态\n", style="bold underline")
@@ -128,10 +207,11 @@ class TerminalUI:
         status_text.append(f"\n状态: ", style="white")
         status_text.append(d["status"], style=f"bold {d['status_color']}")
         status_text.append(f"\n当前操作: {d['current_action']}")
+        if d.get("trace_id"):
+            status_text.append(f"\nTrace: {d['trace_id']}")
         return Panel(status_text, title="Loop 状态", border_style="cyan")
 
     def _render_plan(self) -> Panel:
-        """渲染计划栈"""
         d = self.data
         plan_text = Text("计划栈:\n", style="bold")
         if d["plan_stack"]:
@@ -143,7 +223,6 @@ class TerminalUI:
         return Panel(plan_text, title="当前计划栈", border_style="yellow")
 
     def _render_errors(self) -> Panel:
-        """渲染错误面板"""
         d = self.data
         err_text = Text("", style="red")
         if d["errors"]:
@@ -154,12 +233,9 @@ class TerminalUI:
         return Panel(err_text, title="错误日志", border_style="red")
 
     def _render_tokens(self) -> Panel:
-        """渲染 Token 消耗"""
         d = self.data
         token_text = Text()
         token_text.append("Token 消耗\n", style="bold underline")
-
-        # 进度条
         bar_len = 30
         percent = 0
         try:
@@ -169,54 +245,47 @@ class TerminalUI:
         filled = int(bar_len * percent / 100)
         bar = "█" * filled + "░" * (bar_len - filled)
         token_text.append(f"\n[{bar}] {d['token_percent']}")
-
         token_text.append(f"\n已用: {d['token_used']:,} / {d['token_limit']:,}")
-
-        # 水位线
         watermark = d.get("watermark", "")
         if watermark:
             token_text.append(f"\n水位: {watermark}")
-
         return Panel(token_text, title="Token 消耗", border_style="green")
 
     def _render_tool_call(self) -> Panel:
-        """渲染最后一次工具调用"""
         d = self.data
         tool_text = Text()
         tool_text.append("最后一次 Tool Call\n", style="bold underline")
-
         if d["last_tool_call"]:
-            params_str = str(d["last_tool_call"])
-            if len(params_str) > 100:
-                params_str = params_str[:50] + "..." + params_str[-50:]
-            tool_text.append(f"\n参数: {params_str}")
-
+            s = str(d["last_tool_call"])
+            if len(s) > 100:
+                s = s[:50] + "..." + s[-50:]
+            tool_text.append(f"\n参数: {s}")
         if d["last_tool_result"]:
-            result_str = str(d["last_tool_result"])
-            if len(result_str) > 100:
-                result_str = result_str[:50] + "..." + result_str[-50:]
-            tool_text.append(f"\n结果: {result_str}")
-
+            s = str(d["last_tool_result"])
+            if len(s) > 100:
+                s = s[:50] + "..." + s[-50:]
+            tool_text.append(f"\n结果: {s}")
         return Panel(tool_text, title="Tool Call", border_style="blue")
 
     def _render_stats(self) -> Panel:
-        """渲染统计面板"""
         d = self.data
         stats_text = Text()
         stats_text.append(f"沙箱拦截: {d['sandbox_violations']}")
         stats_text.append(f"\n压缩次数: {d['compression_count']}")
         stats_text.append(f"\n记忆实体: {d['memory_entities']}")
         stats_text.append(f"\n后台任务: {d['bg_tasks']}")
+        stats_text.append(f"\n重试次数: {d['retry_count']}")
+        stats_text.append(f"\n队列深度: {d['queue_depth']}")
         return Panel(stats_text, title="统计数据", border_style="magenta")
 
     def render_ascii(self) -> str:
-        """ASCII 文本布局（当 rich 不可用时）"""
         d = self.data
         lines = [
             "=" * 70,
             "  Alpha-SWE Terminal Dashboard",
             "=" * 70,
             f"  Step: {d['step']}  |  Status: {d['status']}  |  Action: {d['current_action']}",
+            f"  Trace: {d.get('trace_id', 'N/A')}",
             "-" * 70,
             f"  Token: {d['token_used']:,}/{d['token_limit']:,} ({d['token_percent']})",
             f"  Watermark: {d.get('watermark', 'N/A')}",
@@ -226,8 +295,9 @@ class TerminalUI:
             f"  Plan Stack: {d['plan_stack'][-3:] if d['plan_stack'] else 'N/A'}",
             f"  Errors: {d['errors'][-2:] if d['errors'] else 'None'}",
             "-" * 70,
-            f"  Sandbox Violations: {d['sandbox_violations']} | Compressions: {d['compression_count']}",
-            f"  Memory Entities: {d['memory_entities']} | BG Tasks: {d['bg_tasks']}",
+            f"  Sandbox: {d['sandbox_violations']} | Compression: {d['compression_count']}",
+            f"  Memory: {d['memory_entities']} | BG Tasks: {d['bg_tasks']} | Retries: {d['retry_count']}",
+            f"  Queue Depth: {d['queue_depth']}",
             "=" * 70,
         ]
         return "\n".join(lines)

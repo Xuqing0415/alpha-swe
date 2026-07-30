@@ -1,13 +1,17 @@
 """第六关：Sandbox 环境控制（安全围栏）
 所有 file_write 和 terminal_execute 必须通过 Sandbox 检查：
-- 文件操作：禁止写入系统目录
-- 终端执行：自动追加工作目录前缀，禁止 sudo 等危险命令
+- 文件操作：禁止写入系统目录 + 路径遍历防护
+- 终端执行：自动追加工作目录前缀，禁止 sudo/rm -rf/chmod 777/dd/mkfs 等危险命令
 """
 import os
+import re
 import logging
 from typing import Tuple, List
 
 logger = logging.getLogger("alpha-swe.sandbox")
+
+# 路径遍历模式
+PATH_TRAVERSAL_PATTERN = re.compile(r'(?:\.\./|\.\.\\)')
 
 
 class Sandbox:
@@ -24,16 +28,32 @@ class Sandbox:
         "~/.ssh", "~/.gnupg", "~/.aws",
     ]
 
-    # 默认禁止的命令关键词
+    # 默认禁止的命令关键词（增强版）
     DEFAULT_BLOCKED_COMMANDS = [
-        "sudo", "su ", "rm -rf /", "rm -rf --no-preserve-root",
-        "mkfs", "mke2fs", "dd if=", "dd of=",
-        ":(){ :|:& };:",  # fork bomb
-        "chmod 777 /", "chown -R",
-        "> /dev/sda", "> /dev/hda",
-        "shutdown", "reboot", "halt", "poweroff",
-        "wget", "curl",  # 如需网络访问可移除
+        # 权限提升
+        "sudo", "su ",
+        # 危险删除
+        "rm -rf /", "rm -rf --no-preserve-root", "rm -rf ~",
+        # 格式化
+        "mkfs", "mke2fs", "mkswap",
+        # 磁盘操作
+        "dd if=", "dd of=", "fdisk", "parted",
+        # fork bomb
+        ":(){ :|:& };:",
+        # 权限修改
+        "chmod 777", "chmod -R 777", "chmod 7777", "chown -R",
+        # 写入设备
+        "> /dev/sda", "> /dev/hda", "> /dev/sd",
+        # 系统控制
+        "shutdown", "reboot", "halt", "poweroff", "init 0", "init 6",
+        # 网络（按需开放）
+        "wget", "curl",
+        # 代码执行
         "eval", "exec",
+        # 进程注入
+        "ptrace", "strace",
+        # 内核模块
+        "modprobe", "insmod", "rmmod",
     ]
 
     def __init__(self, workspace: str = "/tmp/workspace",
@@ -57,14 +77,19 @@ class Sandbox:
             return True, ""
 
     def _check_file_ops(self, params: dict) -> Tuple[bool, str]:
-        """检查文件操作"""
+        """检查文件操作（含路径遍历防护）"""
         action = params.get("action", "")
         path = params.get("path", "")
 
         if not path:
             return True, ""
 
-        abs_path = os.path.abspath(path)
+        # 路径遍历检测
+        if PATH_TRAVERSAL_PATTERN.search(path):
+            self._log_violation("file_ops", f"路径遍历攻击: {path}")
+            return False, f"禁止路径遍历: {path}"
+
+        abs_path = os.path.normpath(os.path.abspath(path))
 
         # 读操作宽松
         if action == "read":
@@ -74,18 +99,22 @@ class Sandbox:
         if action in ("write", "append"):
             # 检查是否在禁止路径列表中
             for blocked in self.blocked_paths:
-                blocked_abs = os.path.abspath(blocked)
+                blocked_abs = os.path.normpath(os.path.abspath(blocked))
                 if abs_path.startswith(blocked_abs):
                     self._log_violation("file_ops", f"写入 {abs_path} 被拦截（禁止路径: {blocked}）")
                     return False, f"禁止写入系统目录: {blocked}"
 
             # 检查是否在允许路径中
             if self.allowed_paths:
+                in_allowed = False
                 for allowed in self.allowed_paths:
-                    if abs_path.startswith(allowed):
-                        return True, ""
-                self._log_violation("file_ops", f"写入 {abs_path} 不在白名单中")
-                return False, f"路径不在白名单中: {abs_path}"
+                    allowed_abs = os.path.normpath(os.path.abspath(allowed))
+                    if abs_path.startswith(allowed_abs):
+                        in_allowed = True
+                        break
+                if not in_allowed:
+                    self._log_violation("file_ops", f"写入 {abs_path} 不在白名单中")
+                    return False, f"路径不在白名单中: {abs_path}"
 
         return True, ""
 

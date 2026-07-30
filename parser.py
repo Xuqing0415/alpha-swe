@@ -1,8 +1,8 @@
-"""输出解析器——从 LLM 响应中提取结构化操作"""
+"""输出解析器——从 LLM 响应中提取结构化操作 + 实体提取"""
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Optional, Any
+from typing import Optional, Any, List
 
 
 @dataclass
@@ -13,6 +13,8 @@ class ParsedAction:
     params: dict = field(default_factory=dict)
     content: str = ""
     raw: str = ""
+    # 从工具输出中提取的实体
+    entities: List[dict] = field(default_factory=list)
 
 
 class Parser:
@@ -20,6 +22,22 @@ class Parser:
 
     # 占位符标记（第五关：压缩摘要）
     COMPRESSED_PLACEHOLDER = "[COMPRESSED_SUMMARY]"
+
+    # 实体提取规则（轻量级，不调用 LLM）
+    ENTITY_RULES = [
+        # 文件路径提取
+        (re.compile(r'(?:^|\s)(\.?/?[\w./-]+\.\w{1,5})\b', re.MULTILINE), "file"),
+        # 类名提取
+        (re.compile(r'class\s+(\w+)'), "class"),
+        # 函数名提取
+        (re.compile(r'def\s+(\w+)'), "function"),
+        # import 模块提取
+        (re.compile(r'(?:import|from)\s+(\w+)'), "module"),
+        # 错误类型提取
+        (re.compile(r'(\w+Error)\b'), "error_type"),
+        # find/ls 输出中的路径
+        (re.compile(r'^\.?/([\w/.-]+)$', re.MULTILINE), "file"),
+    ]
 
     def parse(self, llm_output: str) -> ParsedAction:
         """解析 LLM 输出"""
@@ -50,6 +68,46 @@ class Parser:
             content=raw,
             raw=raw
         )
+
+    def extract_entities(self, text: str, max_per_type: int = 5) -> List[dict]:
+        """从工具输出中提取实体（轻量级规则，不调用 LLM）"""
+        entities = []
+        seen = set()
+
+        for pattern, etype in self.ENTITY_RULES:
+            matches = pattern.findall(text)
+            for m in matches:
+                if isinstance(m, tuple):
+                    m = m[0]
+                m = m.strip()
+                if m and m not in seen and len(m) < 200:
+                    seen.add(m)
+                    entities.append({"type": etype, "name": m})
+                    if len([e for e in entities if e["type"] == etype]) >= max_per_type:
+                        break
+
+        return entities
+
+    def parse_tool_output(self, tool_name: str, output: str) -> List[dict]:
+        """根据工具类型智能提取实体"""
+        entities = self.extract_entities(output)
+
+        # 针对特定工具做优化
+        if tool_name == "terminal_execute":
+            if "find" in output.lower() or "ls" in output.lower():
+                # 提取文件列表中的每一行
+                lines = output.strip().split("\n")
+                for line in lines:
+                    line = line.strip()
+                    if line and not line.startswith(".") and "." in line:
+                        entities.append({"type": "file", "name": line[:100]})
+
+        elif tool_name == "file_ops":
+            # 代码文件，提取更多语言结构
+            extra = self.extract_entities(output, max_per_type=10)
+            entities.extend(extra)
+
+        return entities
 
     def _extract_json(self, text: str) -> Optional[str]:
         """提取 JSON 块"""
