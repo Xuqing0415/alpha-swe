@@ -1,0 +1,48 @@
+# Alpha-SWE MCP 配置文件
+# 用户可自由开关工具、配置记忆/沙箱参数
+
+tools:
+  terminal_execute:
+    enabled: true
+    timeout: 30
+  file_ops:
+    enabled: true
+  file_search:
+    enabled: true
+  git:
+    enabled: false
+  jira:
+    enabled: false
+
+memory:
+  db_path: "memory.db"
+  max_entities: 1000
+  auto_compact_rounds: 5
+
+sandbox:
+  workspace: "/tmp/workspace"
+  allowed_paths: []
+  blocked_paths:
+    - "/etc"
+    - "/sys"
+    - "/proc"
+    - "/boot"
+    - "/root"
+    - "C:\\Windows"
+    - "C:\\Windows\\System32"
+  block_commands:
+    - "sudo"
+    - "rm -rf /"
+    - "mkfs"
+    - "dd if="
+
+agent:
+  max_rounds: 30
+  token_threshold: 0.8
+  max_token_limit: 100000
+  keep_recent_rounds: 3
+
+ui:
+  enabled: true
+  theme: "dark"
+  refresh_rate_ms: 100
