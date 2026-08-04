@@ -1,6 +1,6 @@
 """第六关：Sandbox 环境控制（安全围栏）
 所有 file_write 和 terminal_execute 必须通过 Sandbox 检查：
-- 文件操作：禁止写入系统目录 + 路径遍历防护
+- 文件操作：禁止写入系统目录 + 路径遍历防护 + 相对路径锚定到工作区
 - 终端执行：自动追加工作目录前缀，禁止 sudo/rm -rf/chmod 777/dd/mkfs 等危险命令
 """
 import os
@@ -61,6 +61,7 @@ class Sandbox:
                  blocked_paths: List[str] = None,
                  block_commands: List[str] = None):
         self.workspace = os.path.abspath(workspace)
+        os.makedirs(self.workspace, exist_ok=True)
         self.allowed_paths = [os.path.abspath(p) for p in (allowed_paths or [])]
         self.blocked_paths = [os.path.abspath(p) for p in (blocked_paths or self.DEFAULT_BLOCKED_PATHS)]
         self.blocked_commands = block_commands or self.DEFAULT_BLOCKED_COMMANDS
@@ -76,6 +77,12 @@ class Sandbox:
         else:
             return True, ""
 
+    def resolve_path(self, path: str) -> str:
+        """将相对路径解析到沙箱工作区内，绝对路径保持原样"""
+        if os.path.isabs(path):
+            return os.path.normpath(os.path.abspath(path))
+        return os.path.normpath(os.path.join(self.workspace, path))
+
     def _check_file_ops(self, params: dict) -> Tuple[bool, str]:
         """检查文件操作（含路径遍历防护）"""
         action = params.get("action", "")
@@ -89,7 +96,9 @@ class Sandbox:
             self._log_violation("file_ops", f"路径遍历攻击: {path}")
             return False, f"禁止路径遍历: {path}"
 
-        abs_path = os.path.normpath(os.path.abspath(path))
+        # 相对路径统一锚定到沙箱工作区
+        params["path"] = self.resolve_path(path)
+        abs_path = params["path"]
 
         # 读操作宽松
         if action == "read":
@@ -129,9 +138,10 @@ class Sandbox:
                 self._log_violation("terminal_execute", f"命令包含禁止关键词: {blocked}")
                 return False, f"禁止执行危险命令（包含: {blocked}）"
 
-        # 自动追加工作目录前缀（如果命令没有指定 cd）
-        if not command.strip().startswith("cd ") and "cd " not in command:
-            # 在 Windows 上使用 PowerShell 风格
+        # 非空命令且未显式 cd 时，自动追加工作目录前缀
+        stripped = command.strip()
+        if stripped and not stripped.startswith("cd "):
+            # Windows 使用 PowerShell（; 分隔），Unix 使用 bash（&& 分隔）
             if os.name == "nt":
                 params["command"] = f"cd {self.workspace}; {command}"
             else:

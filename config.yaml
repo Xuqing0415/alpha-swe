@@ -20,7 +20,7 @@ memory:
   auto_compact_rounds: 5
 
 sandbox:
-  workspace: "/tmp/workspace"
+  workspace: "./test_workspace"
   allowed_paths: []
   blocked_paths:
     - "/etc"

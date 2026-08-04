@@ -2,9 +2,10 @@
 解析 config.yaml，用户可自由开关工具、配置记忆/沙箱参数。
 """
 import os
+import copy
 import logging
 import json
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 
 logger = logging.getLogger("alpha-swe.mcp_config")
 
@@ -28,7 +29,7 @@ DEFAULT_CONFIG = {
         "auto_compact_rounds": 5
     },
     "sandbox": {
-        "workspace": "/tmp/workspace",
+        "workspace": "./test_workspace",
         "allowed_paths": [],
         "blocked_paths": [
             "/etc", "/sys", "/proc", "/boot", "/root",
@@ -118,13 +119,13 @@ class MCPConfigLoader:
             logger.error(f"保存默认配置失败: {e}")
 
     def load(self) -> dict:
-        """获取当前配置"""
-        return self.config
+        """获取当前配置（返回副本，避免调用方篡改共享配置）"""
+        return copy.deepcopy(self.config)
 
     def reload(self) -> dict:
         """重新加载配置"""
         self._load()
-        return self.config
+        return copy.deepcopy(self.config)
 
     def is_tool_enabled(self, tool_name: str) -> bool:
         """检查工具是否启用"""
