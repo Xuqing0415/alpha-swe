@@ -1,6 +1,6 @@
 """Prompt 构建器——拼接 System Prompt + 上下文 + 工具描述 + 记忆注入"""
 import json
-from typing import List, Optional
+from typing import List
 
 
 class Prompter:
@@ -11,9 +11,9 @@ class Prompter:
 {tools_desc}
 
 请按以下格式响应：
-- 如果需要使用工具，输出 JSON: {{"tool": "tool_name", "params": {{...}}}}
-- 如果是最终答案，输出: {{"final_answer": "你的回答"}}
-- 如果是思考，输出: {{"think": "你的思考内容"}}
+- 如果需要使用工具，输出 JSON: {"tool": "tool_name", "params": {...}}
+- 如果是最终答案，输出: {"final_answer": "你的回答"}
+- 如果是思考，输出: {"think": "你的思考内容"}
 
 请始终用中文回复用户。"""
 
@@ -31,8 +31,9 @@ class Prompter:
             f"- {t.name}: {t.description}" for t in self.tools
         )
 
+        # 使用 replace 而非 format()，避免自定义 prompt 中含未转义 {} 时抛 KeyError
         parts = [
-            self.system_prompt.format(tools_desc=tools_desc),
+            self.system_prompt.replace("{tools_desc}", tools_desc),
         ]
 
         # 注入技能上下文（第四关）

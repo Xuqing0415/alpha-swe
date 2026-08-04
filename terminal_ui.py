@@ -1,11 +1,9 @@
 """第七关：Terminal UI 可视化仪表盘（解耦版）
 通过 EventBus 消费事件，UI 线程永不阻塞 Worker 核心逻辑。
 """
-from __future__ import annotations
 import logging
 import threading
 import queue as std_queue
-from typing import Optional, Dict, Any
 
 from event_bus import event_bus, AgentEvent
 
@@ -15,8 +13,6 @@ try:
     from rich.console import Console
     from rich.panel import Panel
     from rich.text import Text
-    from rich.table import Table
-    from rich import box
     HAS_RICH = True
 except ImportError:
     HAS_RICH = False
@@ -26,18 +22,16 @@ class TerminalUI:
     """Rich 终端仪表盘（事件驱动，解耦版）"""
 
     def __init__(self, refresh_rate: int = 4):
-        if not HAS_RICH:
-            logger.warning("rich 未安装，Terminal UI 不可用。请执行: pip install rich")
-            self.console = None
-            return
-
-        self.console = Console()
         self.refresh_rate = refresh_rate
+        self.console = Console() if HAS_RICH else None
         self.live = None
         self._running = False
         self._ui_thread = None
 
-        # 仪表盘数据
+        if not HAS_RICH:
+            logger.warning("rich 未安装，Terminal UI 不可用。请执行: pip install rich")
+
+        # 仪表盘数据（无 rich 时也初始化，保证 update()/update_status() 安全）
         self.data = {
             "step": "0/0",
             "status": "idle",
@@ -60,6 +54,21 @@ class TerminalUI:
             "trace_id": "",
         }
         self._lock = threading.Lock()
+
+    def update_status(self, status: str):
+        """更新状态（线程安全；无 rich 时为安全的空操作）"""
+        colors = {"idle": "white", "thinking": "yellow", "executing": "cyan",
+                  "parsing": "magenta", "done": "green", "error": "red"}
+        with self._lock:
+            self.data["status"] = status
+            self.data["status_color"] = colors.get(status, "white")
+
+    def update(self, **kwargs):
+        """更新仪表盘字段（线程安全；无 rich 时为安全的空操作）"""
+        with self._lock:
+            for key, value in kwargs.items():
+                if key in self.data:
+                    self.data[key] = value
 
     def start(self):
         """启动 UI 线程（独立于 Worker）"""
@@ -89,18 +98,19 @@ class TerminalUI:
         )
         self.live.start()
 
-        while self._running:
-            # 非阻塞消费事件
-            try:
-                event = event_bus.consume(timeout=0.05)
-                if event:
-                    self._handle_event(event)
-            except std_queue.Empty:
-                pass
+        try:
+            while self._running:
+                # 非阻塞消费事件
+                try:
+                    event = event_bus.consume(timeout=0.05)
+                    if event:
+                        self._handle_event(event)
+                except std_queue.Empty:
+                    pass
 
-            self.live.update(self._render())
-
-        self.live.stop()
+                self.live.update(self._render())
+        finally:
+            self.live.stop()
 
     def _handle_event(self, event: AgentEvent):
         """处理事件，更新仪表盘数据"""
