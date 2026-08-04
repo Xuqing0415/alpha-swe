@@ -4,6 +4,8 @@ import re
 from dataclasses import dataclass, field
 from typing import List, Optional
 
+import platform_cmds
+
 
 @dataclass
 class TaskStep:
@@ -50,12 +52,13 @@ class TaskScheduler:
         steps = []
         sid = 1
 
-        # 检测 "src/ 下所有 .js 文件" 或 "找出 console.log" 模式
-        if ("src" in user_prompt.lower() and ".js" in user_prompt) or \
+        # 检测 "src/ 下所有 .ts/.js 文件" 或 "找出 console.log" 模式
+        if ("src" in user_prompt.lower() and (".ts" in user_prompt or ".js" in user_prompt)) or \
            ("console.log" in user_prompt.lower() or "console" in user_prompt.lower()):
             # 排除 node_modules
-            exclude = "--exclude-dir=node_modules" if "node_modules" in user_prompt else ""
-            cmd = f"grep -rn 'console\\.log' . {exclude} --include='*.js' 2>nul | head -50"
+            cmd = platform_cmds.search_console_log(
+                exclude_node_modules="node_modules" in user_prompt
+            )
             if "find" in user_prompt.lower() or "搜索" in user_prompt or "找出" in user_prompt:
                 steps.append(TaskStep(sid, "terminal_execute", "搜索 console.log", {"command": cmd}))
                 sid += 1
@@ -63,22 +66,29 @@ class TaskScheduler:
         if "report" in user_prompt.lower() or "生成" in user_prompt:
             steps.append(TaskStep(sid, "file_ops", "生成报告", {
                 "action": "write", "path": "report.txt",
-                "content": "# Console.log 分析报告\n\n"
+                "content": "# Console.log 分析报告\n\n{{search_results}}"
             }))
             sid += 1
 
         # 通用搜索
         if not steps:
             if "find" in user_prompt.lower() or "搜索" in user_prompt or "找出" in user_prompt:
-                cmd_match = re.search(r'find\s+[^"\']+', user_prompt)
-                cmd = cmd_match.group(0) if cmd_match else "find . -type f"
-                steps.append(TaskStep(sid, "terminal_execute", "搜索文件", {"command": cmd}))
+                steps.append(TaskStep(sid, "terminal_execute", "搜索文件",
+                                      {"command": platform_cmds.list_all_files()}))
                 sid += 1
 
-        # 检测读取文件
+        # 检测读取文件：仅当提示词中出现明确的文件路径时才生成读步骤，
+        # 避免读取名为 "auto" 的无效文件
         if "read" in user_prompt.lower() or "读取" in user_prompt or "cat" in user_prompt.lower():
-            steps.append(TaskStep(sid, "file_ops", "读取文件", {"action": "read", "path": "auto"}))
-            sid += 1
+            path_match = re.search(
+                r'([\w./\\-]+\.(?:py|ts|js|jsx|tsx|txt|yaml|yml|json|md|csv|ini|cfg|toml))',
+                user_prompt
+            )
+            if path_match:
+                steps.append(TaskStep(sid, "file_ops", "读取文件", {
+                    "action": "read", "path": path_match.group(1)
+                }))
+                sid += 1
 
         # 检测写入文件
         if ("write" in user_prompt.lower() or "写入" in user_prompt or "生成" in user_prompt or "report" in user_prompt.lower()) and \
@@ -88,14 +98,16 @@ class TaskScheduler:
 
         # 检测终端命令
         if "ls" in user_prompt.lower() or "list" in user_prompt.lower():
-            steps.append(TaskStep(sid, "terminal_execute", "列出目录", {"command": "ls -la"}))
+            steps.append(TaskStep(sid, "terminal_execute", "列出目录",
+                                  {"command": platform_cmds.list_dir()}))
             sid += 1
 
         # 如果没有任何匹配，至少添加一个思考步骤
         if not steps:
             steps.append(TaskStep(sid, "think", "分析用户意图", {"user_prompt": user_prompt}))
             sid += 1
-            steps.append(TaskStep(sid, "terminal_execute", "执行搜索", {"command": "find . -type f -name '*.py' | head -20"}))
+            steps.append(TaskStep(sid, "terminal_execute", "执行搜索",
+                                  {"command": platform_cmds.find_files((".py",))}))
 
         return steps
 

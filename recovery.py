@@ -1,24 +1,38 @@
 """错误恢复机制：重试3次 + fallback策略 + 全局异常捕获 + 崩溃自动重启"""
+import os
 import time
 import logging
 import traceback
 from typing import Callable, Optional, Any
 from functools import wraps
+
+import platform_cmds
 from tools.base import ToolResult
 
 logger = logging.getLogger("alpha-swe.recovery")
 
-# 工具 fallback 策略映射
+# 工具 fallback 策略映射（值为处理函数 key，命令按平台动态生成）
 FALLBACK_STRATEGIES = {
     "terminal_execute": {
-        "grep": "find . -type f -name '*.py' | head -20",
-        "find": "dir /s /b" if __import__('os').name == 'nt' else "ls -la",
-        "pip install": "pip install --user",
+        "grep": "find_python",
+        "find": "list_files",
+        "pip install": "pip_install_user",
     },
     "file_ops": {
-        "read": "terminal_execute",  # 读失败 -> 改用 cat
+        "read": "terminal_execute",  # 读失败 -> 改用终端搜索
     }
 }
+
+
+def _fallback_command(key: str, **params) -> Optional[str]:
+    """根据平台生成 fallback 命令"""
+    if key == "find_python":
+        return platform_cmds.find_files((".py",))
+    if key == "list_files":
+        return platform_cmds.list_all_files()
+    if key == "pip_install_user":
+        return "pip install --user" if os.name != "nt" else "python -m pip install --user"
+    return None
 
 
 class RetryConfig:
@@ -86,9 +100,10 @@ class ErrorRecovery:
 
         if tool_name == "terminal_execute":
             cmd = params.get("command", "")
-            for keyword, fallback_cmd in strategies.items():
+            for keyword, handler in strategies.items():
                 if keyword in cmd.lower():
-                    if isinstance(fallback_cmd, str):
+                    fallback_cmd = _fallback_command(handler)
+                    if fallback_cmd:
                         logger.info(f"Fallback: {keyword} -> {fallback_cmd}")
                         self.fallback_count += 1
                         return {"action": "terminal_execute",
@@ -99,12 +114,11 @@ class ErrorRecovery:
             if "不存在" in str(error) or "No such file" in str(error):
                 path = params.get("path", "")
                 if path:
-                    import os
                     filename = os.path.basename(path)
                     logger.info(f"Fallback: 文件不存在 -> 搜索 {filename}")
                     self.fallback_count += 1
                     return {"action": "terminal_execute",
-                            "params": {"command": f"find . -name '{filename}' -type f 2>nul"}}
+                            "params": {"command": platform_cmds.search_file(filename)}}
 
         return None
 

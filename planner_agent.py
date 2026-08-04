@@ -1,7 +1,11 @@
 """第二关：Planner Agent——只输出 JSON 计划，不执行具体代码"""
-import json
 import logging
-from typing import List, Dict, Optional
+import os
+import re
+import datetime
+from typing import List, Optional
+
+import platform_cmds
 
 logger = logging.getLogger("alpha-swe.planner")
 
@@ -45,7 +49,7 @@ class PlannerAgent:
         self.plan_history.append({
             "prompt": user_prompt,
             "plan": plan,
-            "timestamp": __import__('datetime').datetime.now().isoformat()
+            "timestamp": datetime.datetime.now().isoformat()
         })
 
         logger.info(f"[Planner] 规划结果: {len(plan)} 个任务")
@@ -68,7 +72,7 @@ class PlannerAgent:
                 return {
                     "action": "terminal_execute",
                     "description": f"搜索文件（原路径: {path}）",
-                    "params": {"command": f"find . -name '{path.split('/')[-1]}' -type f 2>/dev/null"}
+                    "params": {"command": platform_cmds.search_file(os.path.basename(path))}
                 }
 
         if action == "terminal_execute":
@@ -79,7 +83,7 @@ class PlannerAgent:
                 return {
                     "action": "terminal_execute",
                     "description": f"替代命令（原命令: {cmd}）",
-                    "params": {"command": f"find . -type f -readable 2>/dev/null | head -20"}
+                    "params": {"command": platform_cmds.find_readable_files()}
                 }
 
         return None
@@ -89,21 +93,20 @@ class PlannerAgent:
         plan = []
 
         if "read" in user_prompt.lower() or "读取" in user_prompt:
-            # 提取文件模式
-            import re
-            patterns = re.findall(r'\.\w+', user_prompt)
-            ext = patterns[0] if patterns else ".txt"
+            # 提取文件扩展名
+            patterns = re.findall(r'\.(\w+)', user_prompt)
+            ext = "." + (patterns[0] if patterns else "txt")
             plan.append({
                 "action": "terminal_execute",
                 "description": f"搜索{ext}文件",
-                "params": {"command": f"find . -name '*{ext}' -type f 2>/dev/null | head -20"}
+                "params": {"command": platform_cmds.find_files((ext,))}
             })
 
         if "console.log" in user_prompt.lower() or "console" in user_prompt.lower():
             plan.append({
                 "action": "terminal_execute",
                 "description": "搜索 console.log 调用",
-                "params": {"command": "grep -rn 'console\\.log' . --include='*.js' --exclude-dir=node_modules 2>/dev/null | head -50"}
+                "params": {"command": platform_cmds.search_console_log(exclude_node_modules=True)}
             })
 
         if "report" in user_prompt.lower() or "生成" in user_prompt:
@@ -117,7 +120,7 @@ class PlannerAgent:
             plan.append({
                 "action": "terminal_execute",
                 "description": "探索工作目录",
-                "params": {"command": "ls -la && find . -type f -name '*.py' -o -name '*.js' | head -20"}
+                "params": {"command": platform_cmds.list_dir()}
             })
 
         return plan

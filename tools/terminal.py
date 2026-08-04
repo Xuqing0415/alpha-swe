@@ -1,4 +1,5 @@
 """终端命令执行工具"""
+import os
 import subprocess
 import time
 from .base import BaseTool, ToolResult
@@ -11,10 +12,19 @@ class TerminalTool(BaseTool):
     def execute(self, command: str, timeout: int = 30, **kwargs) -> ToolResult:
         start = time.time()
         try:
-            result = subprocess.run(
-                command, shell=True, capture_output=True, text=True,
-                timeout=timeout, cwd=kwargs.get("cwd")
-            )
+            # Windows 使用 PowerShell（shell=False，避免 cmd 引号转义问题）；
+            # Unix/Linux 使用系统 shell。
+            if os.name == "nt":
+                result = subprocess.run(
+                    ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+                    capture_output=True, text=True, timeout=timeout,
+                    cwd=kwargs.get("cwd")
+                )
+            else:
+                result = subprocess.run(
+                    command, shell=True, capture_output=True, text=True,
+                    timeout=timeout, cwd=kwargs.get("cwd")
+                )
             elapsed = (time.time() - start) * 1000
             if result.returncode == 0:
                 return ToolResult(
