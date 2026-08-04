@@ -5,7 +5,6 @@ import uuid
 import threading
 import os
 from datetime import datetime
-from typing import Optional
 
 
 class TraceContext(threading.local):
@@ -34,13 +33,15 @@ def get_span_id() -> str:
 
 
 class JSONLinesHandler(logging.Handler):
-    """JSON Lines 格式日志处理器"""
+    """JSON Lines 格式日志处理器（常驻文件句柄，避免每条日志都打开/关闭文件）"""
 
     def __init__(self, log_dir: str = "./logs", filename: str = None):
         super().__init__()
         os.makedirs(log_dir, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.log_file = os.path.join(log_dir, filename or f"structured_{timestamp}.jsonl")
+        self._lock = threading.Lock()
+        self._stream = open(self.log_file, "a", encoding="utf-8")
 
     def emit(self, record: logging.LogRecord):
         entry = {
@@ -56,13 +57,24 @@ class JSONLinesHandler(logging.Handler):
         if record.exc_info and record.exc_info[1]:
             entry["exception"] = str(record.exc_info[1])
 
-        with open(self.log_file, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        with self._lock:
+            self._stream.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            self._stream.flush()
+
+    def close(self):
+        stream = getattr(self, "_stream", None)
+        if stream is not None:
+            with self._lock:
+                stream.close()
+        super().close()
 
 
 def setup_structured_logging(log_dir: str = "./logs", console: bool = True):
-    """配置结构化日志"""
+    """配置结构化日志（幂等：重复调用不会叠加 handler）"""
+    global _configured_log_file
     root = logging.getLogger()
+    if any(isinstance(h, JSONLinesHandler) for h in root.handlers):
+        return _configured_log_file or ""
     root.setLevel(logging.DEBUG)
 
     # JSON Lines 文件处理器
@@ -84,4 +96,8 @@ def setup_structured_logging(log_dir: str = "./logs", console: bool = True):
     # 生成初始 trace
     new_trace()
 
+    _configured_log_file = json_handler.log_file
     return json_handler.log_file
+
+
+_configured_log_file: str = ""

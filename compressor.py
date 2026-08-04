@@ -8,7 +8,7 @@
 import json
 import re
 import logging
-from typing import List, Dict, Optional
+from typing import List
 
 logger = logging.getLogger("alpha-swe.compressor")
 
@@ -82,8 +82,6 @@ class ContextCompressor:
 
     def _simple_compress(self, old_history: List[dict]) -> str:
         """简单压缩（不调用 LLM）"""
-        lines = ["[COMPRESSED_SUMMARY] 以下为历史轮次摘要:"]
-
         actions = []
         errors = []
         critical_errors = []
@@ -108,7 +106,7 @@ class ContextCompressor:
             found = re.findall(r'([\w/.-]+\.\w{1,5})', str(result))
             files.extend(found[:3])
 
-        parts = [f"执行了 {len(old_history)} 个步骤:"]
+        parts = ["[COMPRESSED_SUMMARY] 以下为历史轮次摘要:", f"执行了 {len(old_history)} 个步骤:"]
         parts.extend(actions[-10:])
 
         if critical_errors:

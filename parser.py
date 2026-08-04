@@ -2,7 +2,7 @@
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Optional, Any, List
+from typing import Optional, List
 
 
 @dataclass
@@ -73,6 +73,7 @@ class Parser:
         """从工具输出中提取实体（轻量级规则，不调用 LLM）"""
         entities = []
         seen = set()
+        type_counts = {}
 
         for pattern, etype in self.ENTITY_RULES:
             matches = pattern.findall(text)
@@ -83,7 +84,8 @@ class Parser:
                 if m and m not in seen and len(m) < 200:
                     seen.add(m)
                     entities.append({"type": etype, "name": m})
-                    if len([e for e in entities if e["type"] == etype]) >= max_per_type:
+                    type_counts[etype] = type_counts.get(etype, 0) + 1
+                    if type_counts[etype] >= max_per_type:
                         break
 
         return entities
@@ -116,11 +118,30 @@ class Parser:
         if m:
             return m.group(1).strip()
 
-        # 尝试匹配 { ... }
-        m = re.search(r'\{[\s\S]*\}', text)
-        if m:
-            return m.group(0).strip()
-
+        # 尝试匹配 { ... }（括号配对，避免贪婪匹配跨多个 JSON 对象）
+        start = text.find("{")
+        if start != -1:
+            depth = 0
+            in_str = False
+            escaped = False
+            for i in range(start, len(text)):
+                ch = text[i]
+                if in_str:
+                    if escaped:
+                        escaped = False
+                    elif ch == "\\":
+                        escaped = True
+                    elif ch == '"':
+                        in_str = False
+                    continue
+                if ch == '"':
+                    in_str = True
+                elif ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        return text[start:i + 1].strip()
         return None
 
     def _parse_json(self, data: dict, raw: str) -> ParsedAction:
