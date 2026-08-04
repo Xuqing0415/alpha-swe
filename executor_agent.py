@@ -1,7 +1,5 @@
 """第二关：Executor Agent——只负责根据 Planner 指令执行具体操作"""
-import json
 import logging
-from typing import Dict, Optional
 
 logger = logging.getLogger("alpha-swe.executor_agent")
 

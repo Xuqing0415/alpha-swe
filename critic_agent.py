@@ -3,8 +3,8 @@
 """
 import json
 import logging
-from typing import Optional, Dict, Any
-from dataclasses import dataclass, field
+from typing import Optional
+from dataclasses import dataclass
 
 logger = logging.getLogger("alpha-swe.critic")
 
@@ -33,15 +33,6 @@ class CriticVerdict:
 
 class CriticAgent:
     """评审员 Agent——验证执行结果"""
-
-    # 快速检查规则（不调用 LLM）
-    QUICK_CHECKS = [
-        ("empty_output", "输出为空"),
-        ("permission_denied", "权限被拒绝"),
-        ("file_not_found", "文件不存在"),
-        ("syntax_error", "语法错误"),
-        ("timeout", "执行超时"),
-    ]
 
     def __init__(self, llm_call=None):
         self.llm_call = llm_call
@@ -115,6 +106,15 @@ class CriticAgent:
                 confidence=0.85,
                 reason=f"命令不可用: {error}",
                 suggestion="使用跨平台兼容命令或检查环境"
+            )
+
+        # 执行超时
+        if "timeout" in error or "timed out" in error or "超时" in error:
+            return CriticVerdict(
+                verdict="retry",
+                confidence=0.8,
+                reason=f"执行超时: {error}",
+                suggestion="增加超时时间或改用更快的命令"
             )
 
         return None

@@ -1,7 +1,6 @@
 """基准工具基类"""
 from dataclasses import dataclass, field
-from typing import Optional, Any
-import time
+from typing import Optional
 
 
 @dataclass

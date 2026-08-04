@@ -1,7 +1,7 @@
 """工具执行器——注册工具并执行，集成沙箱拦截"""
 import json
 import logging
-from typing import Dict, Optional, Any
+from typing import Dict
 from tools.base import BaseTool, ToolResult
 from tools.terminal import TerminalTool
 from tools.file_tool import FileTool
