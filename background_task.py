@@ -5,9 +5,7 @@ import threading
 import time
 import uuid
 import logging
-import signal
-import os
-from concurrent.futures import ThreadPoolExecutor, Future, TimeoutError as FutureTimeoutError
+from concurrent.futures import ThreadPoolExecutor, Future
 from typing import Dict, Optional, Callable, Any
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -20,7 +18,7 @@ class BackgroundTask:
     """后台任务"""
     task_id: str
     name: str
-    future: Future
+    future: Optional[Future] = None
     status: str = "running"  # running/completed/failed/timeout/cancelled
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     result: Any = None
@@ -48,15 +46,20 @@ class BackgroundTaskManager:
     def submit(self, fn: Callable, task_name: str = "", timeout: float = None) -> str:
         """提交后台任务，返回 task_id"""
         task_id = str(uuid.uuid4())[:8]
-        future = self.executor.submit(self._wrapped_execute, task_id, fn)
         task = BackgroundTask(
             task_id=task_id,
             name=task_name or f"task_{task_id}",
-            future=future,
             timeout=timeout or self.default_timeout
         )
+        # 先注册再提交，避免瞬时完成的任务丢失状态更新（竞态）
         with self._lock:
             self.tasks[task_id] = task
+        try:
+            task.future = self.executor.submit(self._wrapped_execute, task_id, fn)
+        except Exception:
+            with self._lock:
+                self.tasks.pop(task_id, None)
+            raise
 
         logger.info(f"[Background] Task {task_id} submitted: {task.name} (timeout={task.timeout}s)")
         return task_id
@@ -92,6 +95,8 @@ class BackgroundTaskManager:
             if not task:
                 return None
 
+        if task.future is None:
+            return None
         try:
             return task.future.result(timeout=timeout)
         except Exception:
@@ -126,7 +131,8 @@ class BackgroundTaskManager:
         with self._lock:
             task = self.tasks.get(task_id)
             if task:
-                task.future.cancel()
+                if task.future is not None:
+                    task.future.cancel()
                 task.status = "cancelled"
                 return True
         return False
