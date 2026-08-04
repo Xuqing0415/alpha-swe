@@ -1,15 +1,13 @@
 """主执行循环——集成所有七层模块 + EventBus 事件发布 + 错误恢复 + Critic 验证"""
 import json
 import logging
-import time
-import os
 import re
-from typing import List, Optional, Dict, Any
+from typing import List, Dict, Any
 from dataclasses import dataclass, field
 
 from scheduler import TaskScheduler, TaskStep
 from prompter import Prompter
-from parser import Parser, ParsedAction
+from parser import Parser
 from executor import Executor
 from memory_bank import MemoryBank
 from background_task import BackgroundTaskManager
@@ -17,10 +15,11 @@ from plugin_loader import PluginLoader
 from compressor import ContextCompressor
 from sandbox import Sandbox
 from mcp_config import MCPConfigLoader
-from event_bus import publish_event, event_bus
+from event_bus import publish_event
 from recovery import ErrorRecovery, RetryConfig
-from critic_agent import CriticAgent, CriticVerdict
-from structured_log import new_trace, get_trace_id
+from critic_agent import CriticAgent
+from structured_log import new_trace
+from tools.base import ToolResult
 
 logger = logging.getLogger("alpha-swe.loop")
 
@@ -48,14 +47,15 @@ class Loop:
         self.mcp_loader = MCPConfigLoader(config_path)
         self.mcp_config = self.mcp_loader.load()
 
-        # 第六关：沙箱
+        # 第六关：沙箱（工作目录从配置读取，默认回退到测试工作区）
+        sandbox_config = self.mcp_config.get("sandbox", {})
         self.sandbox = Sandbox(
-            workspace="/tmp/workspace",
-            allowed_paths=self.mcp_config.get("sandbox", {}).get("allowed_paths", []),
-            blocked_paths=self.mcp_config.get("sandbox", {}).get("blocked_paths", [
+            workspace=sandbox_config.get("workspace", "./test_workspace"),
+            allowed_paths=sandbox_config.get("allowed_paths", []),
+            blocked_paths=sandbox_config.get("blocked_paths", [
                 "/etc", "/sys", "/proc", "/boot", "/root", "C:\\Windows", "C:\\System32"
             ]),
-            block_commands=self.mcp_config.get("sandbox", {}).get("block_commands", [
+            block_commands=sandbox_config.get("block_commands", [
                 "sudo", "rm -rf /", "mkfs", "dd if=", ":(){ :|:& };:"
             ])
         )
@@ -164,11 +164,15 @@ class Loop:
             # 第一关：存储关键实体到记忆（使用 Parser 提取）
             self._store_to_memory(step, result)
 
-            # 记录历史
+            # 记录历史（成功时保存输出文本，便于报告回填与压缩摘要）
+            if result and result.success:
+                result_text = str(result.output)[:500]
+            else:
+                result_text = str(result)[:500] if result else ""
             self.state.history.append({
                 "step": step.description,
                 "action": step.action,
-                "result": str(result)[:500] if result else ""
+                "result": result_text
             })
 
             if result and result.success:
@@ -210,8 +214,11 @@ class Loop:
         """带错误恢复和 Critic 验证的步骤执行"""
         retry_count = 0
         max_critic_retries = 3
+        max_total_attempts = 6  # 限制 Critic 重试 x Recovery 重试的叠加放大
 
-        while retry_count <= max_critic_retries:
+        attempts = 0
+        while retry_count <= max_critic_retries and attempts < max_total_attempts:
+            attempts += 1
             # 尝试执行
             try:
                 result = self._execute_step(step, user_prompt)
@@ -219,9 +226,7 @@ class Loop:
                 logger.error(f"步骤执行异常: {e}", exc_info=True)
                 publish_event("error", step_id=step.step_id, error=str(e),
                               error_type="exception")
-                result = type('ToolResult', (), {
-                    'success': False, 'output': '', 'error': str(e)
-                })()
+                result = ToolResult(success=False, output="", error=str(e))
 
             # Critic 验证
             task_info = {
@@ -268,10 +273,8 @@ class Loop:
                 logger.warning(f"[Critic] 回退: {verdict.reason}")
                 publish_event("step_revert", step_id=step.step_id,
                               reason=verdict.reason)
-                return type('ToolResult', (), {
-                    'success': False, 'output': '',
-                    'error': f"Critic 回退: {verdict.reason}"
-                })()
+                return ToolResult(success=False, output="",
+                                   error=f"Critic 回退: {verdict.reason}")
 
         return result
 
@@ -298,6 +301,19 @@ class Loop:
             self.state.status = "executing"
             publish_event("tool_call", tool=parsed.tool_name,
                           params=parsed.params, step_id=step.step_id)
+
+            # 报告占位符回填：把之前成功步骤的输出写入 report
+            if parsed.tool_name == "file_ops" and parsed.params.get("action") == "write":
+                content = parsed.params.get("content", "")
+                if "{{search_results}}" in content:
+                    findings = "\n".join(
+                        str(h.get("result", "")).strip()
+                        for h in self.state.history
+                        if h.get("result") and "error" not in str(h.get("result")).lower()
+                    )
+                    parsed.params["content"] = content.replace(
+                        "{{search_results}}", findings or "（未找到结果）"
+                    )
 
             # 第三关：检查是否是后台任务
             if self._is_long_running(parsed.tool_name, parsed.params):
@@ -350,14 +366,10 @@ class Loop:
                     )
                 except Exception as e2:
                     logger.error(f"Fallback 也失败: {e2}")
-                    return type('ToolResult', (), {
-                        'success': False, 'output': '',
-                        'error': f"Fallback 失败: {e2}"
-                    })()
-            return type('ToolResult', (), {
-                'success': False, 'output': '',
-                'error': f"工具执行失败: {tool_name}"
-            })()
+                    return ToolResult(success=False, output="",
+                                       error=f"Fallback 失败: {e2}")
+            return ToolResult(success=False, output="",
+                               error=f"工具执行失败: {tool_name}")
 
     def _is_long_running(self, tool_name: str, params: dict) -> bool:
         """判断是否是需要后台执行的耗时操作"""

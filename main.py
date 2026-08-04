@@ -16,6 +16,7 @@ import os
 import json
 import logging
 import argparse
+import time
 from datetime import datetime
 
 # 确保项目根目录在 path 中
@@ -46,50 +47,74 @@ def create_test_workspace(base_dir: str = "./test_workspace"):
     """创建测试工作区（用于验收场景）"""
     os.makedirs(base_dir, exist_ok=True)
 
-    # 创建 src 目录和 JS 文件
+    # 创建 src 目录和 TypeScript 文件
     src_dir = os.path.join(base_dir, "src")
     os.makedirs(src_dir, exist_ok=True)
 
-    js_files = {
-        "app.js": """
+    ts_files = {
+        "app.ts": """
 // Main application
 console.log("App started");
-function init() {
+
+function init(): void {
     console.log("Initializing...");
     console.log("App ready");
 }
+
+init();
 """,
-        "utils.js": """
+        "utils.ts": """
 // Utility functions
 console.log("Utils loaded");
-function formatDate(date) {
-    console.log("Formatting date:", date);
-    return date.toISOString();
+
+function formatDate(date: Date): string {
+    const iso = date.toISOString();
+    console.log("Formatting date:", iso);
+    return iso;
 }
 """,
-        "components/header.js": """
+        "components/header.ts": """
 // Header component
 console.log("Header mounted");
-function renderHeader() {
+
+function renderHeader(): string {
     console.log("Rendering header");
     return "<header>App</header>";
 }
 """,
-        "components/footer.js": """
+        "components/footer.ts": """
 // Footer component
 console.log("Footer mounted");
-function renderFooter() {
+
+function renderFooter(): string {
     console.log("Rendering footer");
     return "<footer>2024</footer>";
 }
 """
     }
 
-    for filepath, content in js_files.items():
+    for filepath, content in ts_files.items():
         full_path = os.path.join(src_dir, filepath)
         os.makedirs(os.path.dirname(full_path), exist_ok=True)
         with open(full_path, "w", encoding="utf-8") as f:
             f.write(content.strip())
+
+    # 创建 TypeScript 编译配置
+    with open(os.path.join(base_dir, "tsconfig.json"), "w", encoding="utf-8") as f:
+        json.dump({
+            "compilerOptions": {
+                "target": "ES2020",
+                "module": "commonjs",
+                "strict": True,
+                "outDir": "dist",
+                "rootDir": "src",
+                "esModuleInterop": True,
+                "skipLibCheck": True,
+                "forceConsistentCasingInFileNames": True,
+                "noEmitOnError": True
+            },
+            "include": ["src/**/*.ts"]
+        }, f, ensure_ascii=False, indent=2)
 
     # 创建 node_modules（模拟）
     nm_dir = os.path.join(base_dir, "node_modules")
@@ -101,7 +126,7 @@ function renderFooter() {
 
     # 创建 README
     with open(os.path.join(base_dir, "README.md"), "w") as f:
-        f.write("# Test Project\nThis is a test project for Alpha-SWE.")
+        f.write("# Test Project\nThis is a test project for Alpha-SWE (TypeScript).\n\n- Source: src/**/*.ts\n- Build: npm run build (tsc)")
 
     logger = logging.getLogger("alpha-swe")
     logger.info(f"测试工作区已创建: {base_dir}")
@@ -128,9 +153,12 @@ def main():
     logger = setup_logging()
     logger.info("=== Alpha-SWE Agent 启动 ===")
 
-    # 创建测试工作区
+    # 创建测试工作区（仅创建工作区且无其他指令时直接退出）
     if args.create_workspace:
         create_test_workspace()
+        if not args.prompt and not args.interactive:
+            logger.info("测试工作区已就绪，未提供指令，退出")
+            return
 
     # 初始化 Loop（集成所有七层）
     loop = Loop(config_path=args.config, skills_dir="./skills")
@@ -143,7 +171,7 @@ def main():
     # 默认验收场景
     if not args.prompt and not args.interactive:
         if args.mode == "demo":
-            args.prompt = "请帮我读取 src/ 下所有 .js 文件，找出所有的 console.log，并生成一个 report.txt，但注意不要读取 node_modules"
+            args.prompt = "请帮我读取 src/ 下所有 .ts 文件，找出所有的 console.log，并生成一个 report.txt，但注意不要读取 node_modules"
         else:
             args.prompt = "请帮我列出当前目录的所有文件，找出 Python 文件并统计行数"
 
@@ -232,11 +260,12 @@ def main():
             time.sleep(0.5)  # 让用户看到最终状态
             ui.stop()
 
-        # 持久化记忆
-        loop.memory.persist()
+        # 持久化记忆（Loop 初始化失败时不执行）
+        if 'loop' in locals():
+            loop.memory.persist()
+            loop.memory.close()
         logger.info("=== Alpha-SWE Agent 关闭 ===")
 
 
 if __name__ == "__main__":
-    import time
     main()
