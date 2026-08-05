@@ -119,7 +119,7 @@ class TerminalUI:
             data = event.data
 
             if etype == "step_start":
-                self.data["step"] = f"{data.get('step_index', 0) + 1}/{data.get('total_steps', 0)}"
+                self.data["step"] = f"{data.get('step_index', 0)}/{data.get('total_steps', 0)}"
                 self.data["status"] = "executing"
                 self.data["status_color"] = "cyan"
                 self.data["current_action"] = data.get("description", "")[:50]
@@ -143,7 +143,8 @@ class TerminalUI:
                     self.data["errors"].append(data.get("error", "unknown")[:80])
 
             elif etype == "error":
-                self.data["errors"].append(data.get("message", "unknown")[:80])
+                msg = data.get("error") or data.get("message") or "unknown"
+                self.data["errors"].append(str(msg)[:80])
                 self.data["status"] = "error"
                 self.data["status_color"] = "red"
 

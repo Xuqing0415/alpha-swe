@@ -143,9 +143,9 @@ class Sandbox:
         if stripped and not stripped.startswith("cd "):
             # Windows 使用 PowerShell（; 分隔），Unix 使用 bash（&& 分隔）
             if os.name == "nt":
-                params["command"] = f"cd {self.workspace}; {command}"
+                params["command"] = f'cd "{self.workspace}"; {command}'
             else:
-                params["command"] = f"cd {self.workspace} && {command}"
+                params["command"] = f'cd "{self.workspace}" && {command}'
 
         return True, ""
 
