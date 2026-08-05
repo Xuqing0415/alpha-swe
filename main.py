@@ -239,7 +239,7 @@ def main():
             print(f"\n--- 统计信息 ---")
             print(f"总轮次: {loop.state.round_count}")
             print(f"总步骤: {loop.state.total_steps}")
-            print(f"完成步骤: {sum(1 for h in loop.state.history if 'error' not in str(h).lower())}")
+            print(f"完成步骤: {loop.state.completed_steps}")
             mem_stats = loop.memory.get_stats()
             print(f"记忆实体: {mem_stats['total_entities']}")
             print(f"沙箱拦截: {loop.sandbox.violation_count}")
@@ -264,6 +264,7 @@ def main():
         if 'loop' in locals():
             loop.memory.persist()
             loop.memory.close()
+            loop.bg_manager.shutdown(wait=False)
         logger.info("=== Alpha-SWE Agent 关闭 ===")
 
 

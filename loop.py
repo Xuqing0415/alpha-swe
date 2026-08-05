@@ -29,6 +29,7 @@ class LoopState:
     """循环状态"""
     step_index: int = 0
     total_steps: int = 0
+    completed_steps: int = 0
     round_count: int = 0
     user_prompt: str = ""
     history: List[dict] = field(default_factory=list)
@@ -165,8 +166,9 @@ class Loop:
             self._store_to_memory(step, result)
 
             # 记录历史（成功时保存输出文本，便于报告回填与压缩摘要）
-            if result and result.success:
-                result_text = str(result.output)[:500]
+            if result and getattr(result, "success", False):
+                self.state.completed_steps += 1
+                result_text = str(getattr(result, "output", ""))[:500]
             else:
                 result_text = str(result)[:500] if result else ""
             self.state.history.append({
@@ -175,9 +177,9 @@ class Loop:
                 "result": result_text
             })
 
-            if result and result.success:
+            if result and getattr(result, "success", False):
                 step.status = "done"
-                step.result = str(result.output)[:1000]
+                step.result = str(getattr(result, "output", ""))[:1000]
                 publish_event("step_done", step_id=step.step_id,
                               description=step.description)
             else:
@@ -236,9 +238,9 @@ class Loop:
                 "params": step.params
             }
             result_info = {
-                "success": result.success if result else False,
-                "output": str(result.output)[:500] if result else "",
-                "error": str(result.error) if result else "",
+                "success": getattr(result, "success", False),
+                "output": str(getattr(result, "output", ""))[:500] if result else "",
+                "error": str(getattr(result, "error", "")) if result else "",
                 "retry_count": retry_count
             }
 
@@ -394,7 +396,8 @@ class Loop:
                     f"({estimated_tokens / limit * 100:.1f}%)，触发紧急压缩"
                 )
                 publish_event("compress", before=estimated_tokens,
-                              threshold=limit * self.TOKEN_THRESHOLD)
+                              threshold=limit * self.TOKEN_THRESHOLD,
+                              count=self.compressor.compression_count)
                 compressed = self.compressor.compress(self.state.history)
                 self.prompter.set_compressed(compressed)
                 after = self.prompter.estimate_tokens(compressed)
@@ -404,9 +407,9 @@ class Loop:
 
     def _store_to_memory(self, step: TaskStep, result: Any):
         """第一关：将关键信息存入记忆（使用 Parser 实体提取）"""
-        if result and result.success:
+        if result and getattr(result, "success", False):
             # 使用 Parser 的轻量级规则提取实体（零 LLM 调用）
-            entities = self.parser.extract_entities(str(result.output))
+            entities = self.parser.extract_entities(str(getattr(result, "output", "")))
             for e in entities:
                 self.memory.add_entity(
                     e["type"], e["name"],
