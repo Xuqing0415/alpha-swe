@@ -40,7 +40,7 @@ class Executor:
 
     def execute(self, action: str, params: dict = None) -> ToolResult:
         """执行工具调用，经过沙箱拦截"""
-        params = params or {}
+        params = dict(params or {})  # 复制，避免沙箱检查修改调用方字典
         tool_name = action
 
         # 第七关：MCP 配置控制

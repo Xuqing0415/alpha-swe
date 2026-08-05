@@ -180,11 +180,35 @@ class Parser:
             )
 
     def _extract_params(self, text: str) -> dict:
-        """从文本中提取 params"""
-        m = re.search(r'"params"\s*:\s*(\{[^}]+\})', text)
-        if m:
-            try:
-                return json.loads(m.group(1))
-            except json.JSONDecodeError:
-                pass
+        """从文本中提取 params（括号配对扫描，支持嵌套 JSON）"""
+        m = re.search(r'"params"\s*:', text)
+        if not m:
+            return {}
+        brace = text.find("{", m.end())
+        if brace == -1:
+            return {}
+        depth = 0
+        in_str = False
+        escaped = False
+        for i in range(brace, len(text)):
+            ch = text[i]
+            if in_str:
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == '"':
+                    in_str = False
+                continue
+            if ch == '"':
+                in_str = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(text[brace:i + 1])
+                    except json.JSONDecodeError:
+                        return {}
         return {}
