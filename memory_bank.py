@@ -19,6 +19,7 @@ class MemoryBank:
         self.db_path = db_path
         self.max_entities = max_entities
         self._pending_entities: List[dict] = []  # 批量写入缓冲
+        self._closed = False
         # 常驻连接（check_same_thread=False + 锁），避免每次操作都新建/关闭连接
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
@@ -82,6 +83,9 @@ class MemoryBank:
 
     def _flush(self):
         """批量写入待处理实体"""
+        if self._closed:
+            self._pending_entities.clear()
+            return
         if not self._pending_entities:
             return
         with self._lock:
@@ -97,6 +101,18 @@ class MemoryBank:
                 ]
             )
             self._conn.commit()
+            # 限制记忆库规模：超过 max_entities 时淘汰访问最少/最旧的实体
+            if self.max_entities > 0:
+                total = self._conn.execute("SELECT COUNT(*) FROM entities").fetchone()[0]
+                excess = total - self.max_entities
+                if excess > 0:
+                    self._conn.execute(
+                        """DELETE FROM entities WHERE id IN (
+                            SELECT id FROM entities ORDER BY access_count ASC, last_access ASC LIMIT ?
+                        )""",
+                        (excess,)
+                    )
+                    self._conn.commit()
         logger.debug(f"刷新 {len(self._pending_entities)} 条记忆")
         self._pending_entities.clear()
 
@@ -105,12 +121,16 @@ class MemoryBank:
         self._flush()
 
     def close(self):
-        """关闭数据库连接"""
+        """关闭数据库连接（幂等：重复调用安全）"""
         with self._lock:
-            self._conn.close()
+            if not self._closed:
+                self._conn.close()
+                self._closed = True
 
     def get_context(self, query: str, limit: int = 10) -> str:
         """检索相关记忆，返回压缩摘要"""
+        if self._closed:
+            return ""
         self._flush()
         with self._lock:
             # 基于关键词匹配（中文按连续词串切分，避免整句作为单个关键词）
@@ -136,8 +156,8 @@ class MemoryBank:
         if not rows:
             return ""
 
-        # 更新访问计数
-        self._increment_access([r[1] for r in rows])
+        # 更新访问计数（按 (entity_type, name) 精确定位，避免跨类型误更新）
+        self._increment_access([(r[0], r[1]) for r in rows])
 
         # 构建压缩摘要
         lines = ["[记忆摘要] 以下为历史关键实体:"]
@@ -150,20 +170,24 @@ class MemoryBank:
 
         return "\n".join(lines)
 
-    def _increment_access(self, names: List[str]):
-        """增加访问计数"""
-        if not names:
+    def _increment_access(self, rows: List[tuple]):
+        """增加访问计数（按 entity_type + name 精确定位）"""
+        if not rows:
             return
         with self._lock:
+            if self._conn is None or self._closed:
+                return
             self._ensure_tables(self._conn)
             self._conn.executemany(
-                "UPDATE entities SET access_count = access_count + 1, last_access = ? WHERE name = ?",
-                [(datetime.now().isoformat(), name) for name in names]
+                "UPDATE entities SET access_count = access_count + 1, last_access = ? WHERE entity_type = ? AND name = ?",
+                [(datetime.now().isoformat(), etype, name) for etype, name in rows]
             )
             self._conn.commit()
 
     def compact(self) -> str:
         """触发生成压缩快照（当对话轮次 > 5 时触发）"""
+        if self._closed:
+            return ""
         self._flush()
         with self._lock:
             # 获取所有实体
@@ -199,6 +223,8 @@ class MemoryBank:
 
     def get_stats(self) -> dict:
         """获取记忆统计"""
+        if self._closed:
+            return {"total_entities": 0, "type_distribution": {}, "snapshots": 0}
         self._flush()
         with self._lock:
             total = self._conn.execute("SELECT COUNT(*) FROM entities").fetchone()[0]
