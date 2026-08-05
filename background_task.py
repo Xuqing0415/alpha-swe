@@ -115,6 +115,12 @@ class BackgroundTaskManager:
                     if task:
                         logger.error(f"[Background] Task {task_id} failed: {task.error}")
                 return None
+            elif status in ("timeout", "cancelled"):
+                with self._lock:
+                    task = self.tasks.get(task_id)
+                    detail = task.error if task and task.error else status
+                logger.warning(f"[Background] Task {task_id} {status}: {detail}")
+                return None
             elif status is None:
                 logger.warning(f"[Background] Task {task_id} not found")
                 return None
@@ -171,7 +177,7 @@ class BackgroundTaskManager:
                     elapsed = now - task.start_time
                     if elapsed > task.timeout:
                         # 尝试取消 Future
-                        cancelled = task.future.cancel()
+                        cancelled = task.future.cancel() if task.future is not None else False
                         task.status = "timeout"
                         task.error = f"任务超时 ({elapsed:.0f}s > {task.timeout}s)"
                         logger.warning(
