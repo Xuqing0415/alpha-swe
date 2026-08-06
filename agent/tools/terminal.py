@@ -1,7 +1,8 @@
-"""异步终端工具 —— 对应设计第 6 节 Terminal。
+﻿"""异步终端工具 —— 对应设计第 6 节 Terminal。
 
 - 异步子进程，实时读取 stdout/stderr；
 - 支持超时终止（terminate -> kill）；
+- 支持 output_callback 实时转发每一行（TUI 终端窗格用）；
 - Windows 走 PowerShell，Unix 走 /bin/sh，保证跨平台。
 """
 from __future__ import annotations
@@ -38,6 +39,7 @@ class TerminalTool(Tool):
         command = str(params.get("command", "")).strip()
         timeout = float(params.get("timeout", self.default_timeout))
         start = time.time()
+        callback = context.output_callback
 
         if not command:
             return ToolResult(success=False, error="命令为空", elapsed_ms=0.0)
@@ -56,8 +58,27 @@ class TerminalTool(Tool):
             return ToolResult(success=False, error=f"启动进程失败: {e}",
                               elapsed_ms=(time.time() - start) * 1000)
 
+        async def _read_stream(stream) -> str:
+            # 逐行读取；配置了 output_callback 时实时转发，同时收集完整输出
+            chunks: List[str] = []
+            while True:
+                try:
+                    line = await stream.readline()
+                except (asyncio.LimitOverrunError, ValueError, OSError):
+                    break
+                if not line:
+                    break
+                text = line.decode("utf-8", errors="replace")
+                chunks.append(text)
+                if callback is not None:
+                    callback(text.rstrip("\n"))
+            return "".join(chunks)
+
         try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            out_task = asyncio.create_task(_read_stream(proc.stdout))
+            err_task = asyncio.create_task(_read_stream(proc.stderr))
+            await asyncio.wait_for(asyncio.gather(out_task, err_task), timeout=timeout)
+            await asyncio.wait_for(proc.wait(), timeout=timeout)
         except asyncio.TimeoutError:
             proc.terminate()
             try:
@@ -72,8 +93,8 @@ class TerminalTool(Tool):
                 elapsed_ms=(time.time() - start) * 1000,
             )
 
-        out = stdout.decode("utf-8", errors="replace").strip()
-        err = stderr.decode("utf-8", errors="replace").strip()
+        out = (await out_task).strip()
+        err = (await err_task).strip()
         elapsed = (time.time() - start) * 1000
 
         if proc.returncode == 0:

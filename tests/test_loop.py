@@ -119,6 +119,24 @@ async def test_interrupt_injects_high_priority_task(ws_tmp):
 
 
 @pytest.mark.asyncio
+async def test_pause_resume_suspends_loop(ws_tmp):
+    cfg = make_config(ws_tmp)
+    llm = GatedLLM('{"final_answer": "完成"}')
+    loop = AgentLoop(config=cfg, llm=llm, planner=StubPlanner())
+    run_task = asyncio.create_task(loop.run("暂停测试"))
+    await llm.first_call.wait()          # 等第一个 LLM 调用挂起
+    assert not loop.paused
+    loop.pause()
+    assert loop.paused
+    loop.resume()
+    assert not loop.paused
+    llm.gate.set()                        # 放行
+    result = await run_task
+    assert result.ok
+    assert result.final_answer == "完成"
+
+
+@pytest.mark.asyncio
 async def test_memory_remembered_on_completion(ws_tmp):
     cfg = make_config(ws_tmp)
     llm = ScriptedLLM('{"final_answer": "完成"}')

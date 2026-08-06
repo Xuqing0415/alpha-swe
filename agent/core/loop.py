@@ -13,7 +13,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from agent.config import AppConfig, load_config, load_mcp_config
 from agent.context.manager import ContextManager
@@ -71,11 +71,16 @@ class AgentLoop:
         scheduler: Optional[Scheduler] = None,
         summarizer: Optional[ExperienceSummarizer] = None,
         mcp_manager: Optional[MCPManager] = None,
+        output_callback: Optional[Callable[[str], None]] = None,
     ):
         self.config = config or load_config()
         self.state = StateMachine()
         self.cancel_event = asyncio.Event()
         self.events: List[Dict[str, Any]] = []
+        self._subscribers: List[Callable[[Dict[str, Any]], None]] = []
+        self._output_callback = output_callback
+        self._pause_event = asyncio.Event()
+        self._pause_event.set()  # 默认运行态；pause() 后清空
 
         # 组件装配（缺省即用默认实现，便于测试注入）
         self.llm = llm or build_llm(self.config.llm)
@@ -119,10 +124,32 @@ class AgentLoop:
         return manager
 
     # ---- 事件 ----
+    def subscribe(self, callback: Callable[[Dict[str, Any]], None]) -> None:
+        """注册实时事件回调（TUI/观测面板用）。callback 在事件循环内被同步调用。"""
+        self._subscribers.append(callback)
+
     def _emit(self, event_type: str, **data: Any) -> None:
         record = {"type": event_type, "data": data}
         self.events.append(record)
+        for callback in list(self._subscribers):
+            try:
+                callback(record)
+            except Exception:
+                logger.exception("事件回调执行失败: %s", event_type)
         logger.info("[event] %s %s", event_type, data)
+
+    # ---- 暂停/恢复 ----
+    def pause(self) -> None:
+        """暂停主循环：下一个 checkpoint 处挂起（TUI Ctrl+P）。"""
+        self._pause_event.clear()
+
+    def resume(self) -> None:
+        """恢复主循环。"""
+        self._pause_event.set()
+
+    @property
+    def paused(self) -> bool:
+        return not self._pause_event.is_set()
 
     # ---- 中断 ----
     def interrupt(self, prompt: str) -> Task:
@@ -233,6 +260,7 @@ class AgentLoop:
                             task_id=task.id,
                             instruction=task.instruction,
                             interrupt_event=self.cancel_event,
+                            output_callback=self._output_callback,
                         ),
                     )
                     obs = self._summarize_observation(parsed.tool_name, result)
@@ -283,6 +311,8 @@ class AgentLoop:
             if prompt:
                 task.history.append({"role": "user", "content": f"[用户中断] {prompt}"})
             raise TaskInterrupted()
+        if not self._pause_event.is_set():
+            await self._pause_event.wait()  # 暂停挂起，直到 resume()
         await asyncio.sleep(0)  # 让出事件循环
 
     def _upstream_tasks(self, task: Task) -> List[Task]:

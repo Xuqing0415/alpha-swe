@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 
 @dataclass
@@ -19,6 +19,8 @@ class ExecutionContext:
     instruction: str = ""
     env: Dict[str, str] = field(default_factory=dict)
     interrupt_event: Optional[object] = None  # asyncio.Event
+    # 实时输出回调（TUI 终端窗格用）：收到一行 stdout/stderr 即调用
+    output_callback: Optional[Callable[[str], None]] = None
 
 
 @dataclass

@@ -44,7 +44,7 @@ loop.py, scheduler.py, ... 旧版七层原型（保留，作为对照参考）
 | 11 上下文压缩 | `agent/context/manager.py` | 基础版（长输出截断 + 阶段摘要） |
 | 12 沙箱 | `agent/sandbox/policy.py` | 路径锚定/危险命令拦截；Docker 容器隔离预留 |
 | 13 MCP | `agent/mcp/`（client/manager/tool）+ `config/mcp.yaml` | 已实现（stdio/sse 客户端、握手、工具合并、资源订阅注入 Prompt） |
-| 14 可观测性 | `AgentLoop.events`、`structured_log.py` | 事件流已内置；TUI/OTel 面板待接入 |
+| 14 可观测性 | `tui/`（Textual 三栏）+ `AgentLoop.subscribe()` + 终端实时输出回调 | 已实现（思维流/终端流/状态栏/Ctrl+I 中断/Ctrl+P 暂停）；Web 面板与 OTel 导出待接入 |
 
 ## 长期记忆（第 7 节）
 
@@ -84,11 +84,28 @@ python -X utf8 examples/quick_demo.py
   终端/文件工具将路由到容器内执行；当前由 `agent/sandbox/policy.py` 提供
   进程级防护作为默认兜底。
 
+## Textual TUI（第 14.1 节）
+
+```bash
+python -m tui "分析当前项目结构并给出改进建议"
+python -m tui --config config/agent.yaml "修复失败的测试"
+```
+
+- **左栏**：思维流（思考 / 工具调用 / 任务事件，颜色区分，自动滚动）；
+- **右栏**：终端原始输出流（`TerminalTool` 逐行实时转发）；
+- **底部状态栏**：当前任务、按状态统计、轮次、token 估算、耗时、运行/暂停；
+- **Ctrl+I** 注入高优先级指令（打断当前循环），**Ctrl+P** 暂停/继续，
+  **Ctrl+L** 清空终端，**Tab** 切换窗格，**q / Ctrl+C** 退出。
+
+实现要点：`AgentLoop.subscribe()` 实时事件订阅、`ExecutionContext.output_callback`
+把命令输出逐行转发给右栏、Textual worker 在事件循环内跑 Agent 主循环
+（`tui/bridge.py`、`tui/app.py`）。
+
 ## 路线图（按设计文档顺序深化）
 
 1. ~~MCP 客户端（`mcp` Python SDK）初始化握手、工具合并与资源订阅~~（已完成，见 `agent/mcp/` 与第 13 节）；
 2. ~~长期记忆升级为 Chroma/Qdrant 向量检索 + 自动经验摘要写入~~（已完成，见上节）；
 3. 多 Agent 协作（Orchestrator/Worker + 黑板）与 Critic 仲裁；
 4. Docker 沙箱完整生命周期（网络隔离、资源限制、快照/回滚）；
-5. Textual TUI 三栏布局 + WebSocket 事件订阅；
+5. ~~Textual TUI 三栏布局~~（已完成，见 `tui/` 与第 14 节）+ WebSocket 事件订阅（待接入）；
 6. OpenTelemetry 追踪导出与结构化 JSON 日志。
