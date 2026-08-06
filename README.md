@@ -198,7 +198,35 @@ python -X utf8 scripts/analyze_decisions.py
 决策点覆盖：`llm.provider`（系统提示风格）、`llm.temperature`（解析器宽松度）、
 `sandbox.network_enabled`（容器网络模式 / 网络命令拦截）、`context.max_tokens` 与 `compression_threshold`（压缩触发）、
 `context.compression_method`（summary / vector_retrieval）、`memory.backend`（记忆后端 / 检索跳过）、
-`planner.*`（拆分阈值 / 子任务上限 / 串并行）、`agent.*`（循环上限 / 工具并行 / 确认与自动批准）。
+`planner.*`（拆分阈值 / 子任务上限 / 串并行）、`agent.*`（循环上限 / 工具并行 / 确认与自动批准、
+追踪/档案/指标开关 `trace_enabled` / `archive_enabled` / `metrics_enabled`）。
+
+## 可观测性与 TUI 交互升级（阶段七 / 阶段八）
+
+### 分布式追踪（`agent/observability/trace.py`）
+- OTel 风格 `Span` / `Tracer`：`run -> task -> llm/tool` 调用链（父子 span_id），
+  结束后导出 JSONL 到 `agent.trace_dir`（默认 `./logs/traces`；`trace_enabled: false` 时零成本跳过）。
+- 每次 `AgentLoop.run()` 生成 `run` 根 span；每个任务、每次 LLM 调用、每个工具调用各生成一个 span，
+  记录耗时、状态、错误与关键属性（token、轮次、参数摘要）。
+
+### 实时指标（`agent/observability/metrics.py`）
+- `MetricsRegistry` 计数/采样：token 用量与速率、工具调用与成功率、LLM 调用、
+  压缩/重试/中断次数、任务完成/失败、当前阶段与轮次；`alerts()` 按阈值告警
+  （token 速率过快、连续失败 ≥3 次、轮次逼近上限），供 TUI 监控视图渲染。
+
+### 会话档案与回放（`agent/observability/archive.py`）
+- `SessionArchive.write()` 把事件 + span + 决策日志 + 指标 + 结果打包为单个 JSON
+  （`agent.session_archive_dir`，默认 `./logs/sessions`；`archive_enabled` 控制）。
+- `SessionReplay` 按时间戳合并排序生成时间线，支持单步回放；CLI 用法：
+  `python -m tui --replay logs/sessions/session_xxx.json`
+
+### TUI 多视图与用户干预（`tui/app.py`）
+- `f` 键轮换左栏视图：思维流 / 任务树（状态图标 + 依赖）/ 监控（指标 + 告警）/ 文件变更（写操作渲染类 diff）。
+- 高风险工具确认弹窗：命中 `agent.require_confirmation` 时弹出，支持
+  `y`（批准一次）/ `a`（批准所有同类，写回 `loop._approve_rules`）/ `n`（拒绝）/
+  `m:{"path":"..."}`（修改参数后执行）；确认回调契约见 `tui/bridge.py` 的 `_on_confirmation`。
+
+验证见 `tests/test_observability.py` 与 `tests/test_tui.py`。
 
 ## 接入真实模型与 MCP
 
@@ -218,11 +246,14 @@ python -m tui "分析当前项目结构并给出改进建议"
 python -m tui --config config/agent.yaml "修复失败的测试"
 ```
 
-- **左栏**：思维流（思考 / 工具调用 / 任务事件，颜色区分，自动滚动）；
+- **左栏**（`f` 键轮换多视图）：思维流（思考/工具调用/任务事件，颜色区分）、任务树、
+  监控（token/工具/成功率 + 告警）、文件变更（写操作类 diff）；
 - **右栏**：终端原始输出流（`TerminalTool` 逐行实时转发）；
 - **底部状态栏**：当前任务、按状态统计、轮次、token 估算、耗时、运行/暂停；
 - **Ctrl+I** 注入高优先级指令（打断当前循环），**Ctrl+P** 暂停/继续，
-  **Ctrl+L** 清空终端，**Tab** 切换窗格，**q / Ctrl+C** 退出。
+  **Ctrl+L** 清空终端，**Tab** 切换窗格，**q / Ctrl+C** 退出；
+- 高风险操作（命中 `agent.require_confirmation`）弹出确认框：批准一次 / 批准所有同类 /
+  拒绝 / 修改参数后执行；会话结束后可用 `--replay` 按时间线回放档案。
 
 实现要点：`AgentLoop.subscribe()` 实时事件订阅、`ExecutionContext.output_callback`
 把命令输出逐行转发给右栏、Textual worker 在事件循环内跑 Agent 主循环
@@ -237,4 +268,7 @@ python -m tui --config config/agent.yaml "修复失败的测试"
 4. ~~Docker 沙箱完整生命周期（网络隔离、资源限制、快照/回滚）~~（已完成，见 `agent/sandbox/docker_sandbox.py`）；工具层安全加固（网络细粒度策略/假网络/受保护路径/审计回滚/资源熔断）已完成（阶段五）；
 5. ~~MCP 生态打通（断连重连/降级、资源缓存 TTL、自研 TS 服务器）~~（已完成，阶段六，见 `agent/mcp/manager.py` 与 `mcp-servers/`）；
 6. ~~Textual TUI 三栏布局~~（已完成，见 `tui/` 与第 14 节）+ WebSocket 事件订阅（待接入）；
-6. OpenTelemetry 追踪导出与结构化 JSON 日志。
+7. ~~可观测性：分布式追踪 / 实时指标 / 会话档案与回放~~（已完成，阶段七，见 `agent/observability/`）；
+8. ~~TUI 交互升级：多视图 / 确认弹窗 / 修改参数后执行 / 回放 CLI~~（已完成，阶段八，见 `tui/`）；
+9. Web 观测面板（React + WebSocket 甘特图/火焰图，可选，见设计第 14.4 节）；
+10. OpenTelemetry 导出到 Jaeger 与结构化 JSON 日志。
