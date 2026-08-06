@@ -30,6 +30,9 @@ def resolve_workspace_path(workspace: str, path: str) -> Path:
     return resolved
 
 
+WRITE_ACTIONS = {"write", "append", "edit", "delete", "rm"}
+
+
 class FileIOTool(Tool):
     name = "file_ops"
     description = "沙箱内的文件读写操作: read/write/append/search"
@@ -44,6 +47,10 @@ class FileIOTool(Tool):
         "required": ["action", "path"],
     }
 
+    def __init__(self, workspace: str = "", read_only: bool = False):
+        self.workspace = workspace
+        self.read_only = read_only
+
     async def execute(self, params: Dict[str, Any], context: ExecutionContext) -> ToolResult:
         action = str(params.get("action", ""))
         path = str(params.get("path", ""))
@@ -51,6 +58,12 @@ class FileIOTool(Tool):
 
         if not path:
             return ToolResult(success=False, error="缺少 path 参数", elapsed_ms=0.0)
+        if self.read_only and action in WRITE_ACTIONS:
+            return ToolResult(
+                success=False,
+                error=f"只读角色禁止写操作: {action}",
+                elapsed_ms=0.0,
+            )
         if TRAVERSAL_PATTERN.search(path):
             return ToolResult(success=False, error=f"禁止路径穿越: {path}", elapsed_ms=0.0)
 

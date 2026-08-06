@@ -15,6 +15,17 @@ from typing import Any, Dict, List
 from agent.tools.base import ExecutionContext, Tool, ToolResult
 
 
+# 只读角色允许的命令白名单（首词匹配，basename）
+READ_ONLY_COMMANDS = {
+    "cat", "ls", "dir", "grep", "find", "head", "tail", "wc", "file", "diff",
+    "stat", "sort", "uniq", "type", "echo", "pwd", "whoami",
+    "git",  # 只读子命令在 _read_only_ok 中进一步限制
+    "Get-Content", "Get-ChildItem", "Select-String", "Measure-Object",
+}
+# 只读角色禁止的 shell 元字符（管道/重定向/连接符可能产生写效果）
+READ_ONLY_BLOCKED_META = (";", "&&", "||", "|", ">", "<", "2>", "`", "$(")
+
+
 class TerminalTool(Tool):
     name = "terminal_execute"
     description = "在沙箱工作目录执行 shell 命令并返回输出（支持超时终止）"
@@ -27,8 +38,26 @@ class TerminalTool(Tool):
         "required": ["command"],
     }
 
-    def __init__(self, default_timeout: float = 30.0):
+    def __init__(self, default_timeout: float = 30.0, read_only: bool = False):
         self.default_timeout = default_timeout
+        self.read_only = read_only
+
+    def _read_only_ok(self, command: str) -> bool:
+        """只读模式检查：首词在白名单 + 无写语义元字符 + git 仅允许只读子命令。"""
+        cmd = command.strip()
+        if not cmd:
+            return False
+        if any(meta in cmd for meta in READ_ONLY_BLOCKED_META):
+            return False
+        first = cmd.split()[0].lower()
+        base = first.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+        if base not in READ_ONLY_COMMANDS:
+            return False
+        if base == "git":
+            sub = cmd.split()[1].lower() if len(cmd.split()) > 1 else ""
+            if sub not in ("status", "diff", "log", "show", "branch", "ls-files"):
+                return False
+        return True
 
     def _build_argv(self, command: str) -> List[str]:
         if os.name == "nt":
@@ -43,6 +72,12 @@ class TerminalTool(Tool):
 
         if not command:
             return ToolResult(success=False, error="命令为空", elapsed_ms=0.0)
+        if self.read_only and not self._read_only_ok(command):
+            return ToolResult(
+                success=False,
+                error=f"只读角色禁止该命令: {command[:80]}",
+                elapsed_ms=0.0,
+            )
 
         # 沙箱策略在 ToolManager 层已检查；这里在 workspace 下执行
         argv = self._build_argv(command)
