@@ -33,6 +33,9 @@ EXPECTED_KEYS = [
     "team.message_timeout",
     "sandbox.network_policy", "sandbox.protected_paths",
     "sandbox.resource_monitor", "sandbox.memory_limit_mb",
+    "sandbox.docker_enabled", "sandbox.workdir", "sandbox.snapshot_prefix",
+    "sandbox.auto_rollback", "sandbox.timeout_seconds",
+    "mcp.reconnect_attempts", "mcp.resource_cache_ttl",
 ]
 
 

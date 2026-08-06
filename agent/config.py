@@ -70,6 +70,12 @@ class SandboxConfig(BaseModel):
     resource_monitor: bool = False
     memory_limit_mb: float = 512.0
     poll_interval: float = 0.2
+    # Docker 容器生命周期（docker-py，docker_enabled=True 时由 DockerSandbox 使用）
+    workdir: str = "/workspace"             # 容器内工作目录（卷挂载目标）
+    volume_mode: str = "rw"                 # 工作区卷挂载模式（rw / ro）
+    snapshot_prefix: str = "alphaswe/snap"  # docker commit 快照镜像前缀
+    auto_rollback: bool = True              # 任务失败时自动回滚到任务前快照
+    container_name: str = ""                # 稳定容器名（空 = docker 自动生成）
 
     @model_validator(mode="before")
     @classmethod
@@ -209,6 +215,9 @@ class MCPOptions(BaseModel):
     connect_timeout: float = 8.0
     tool_timeout: float = 30.0
     max_resources_per_run: int = 3
+    reconnect_attempts: int = 2       # 连接失败后的自动重连次数
+    reconnect_delay: float = 1.0      # 重连间隔秒数
+    resource_cache_ttl: float = 60.0  # MCP 资源缓存 TTL 秒数（0 = 不缓存）
 
 
 class AgentConfig(BaseModel):

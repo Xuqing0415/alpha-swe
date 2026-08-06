@@ -9,3 +9,14 @@ mcp_servers:
   - name: "custom-knowledge"
     transport: "sse"
     url: "http://localhost:8000/sse"
+  # ---- 自研 TypeScript MCP 服务器（mcp-servers/，需先 npm install && npm run build）----
+  - name: "knowledge-base"
+    transport: "stdio"
+    command: "node"
+    args: ["mcp-servers/knowledge-base/dist/index.js"]
+    env: {}
+  - name: "issue-tracker"
+    transport: "stdio"
+    command: "node"
+    args: ["mcp-servers/issue-tracker/dist/index.js"]
+    env: {}

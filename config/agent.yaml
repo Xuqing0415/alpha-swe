@@ -63,6 +63,11 @@ sandbox:
   resource_monitor: false
   memory_limit_mb: 512
   poll_interval: 0.2
+  # Docker 容器生命周期（docker_enabled=True 时由 DockerSandbox 使用）
+  workdir: "/workspace"          # 容器内工作目录（卷挂载目标）
+  volume_mode: "rw"              # 工作区卷挂载模式（rw / ro）
+  snapshot_prefix: "alphaswe/snap"  # docker commit 快照镜像前缀
+  auto_rollback: true            # 任务失败时自动回滚到任务前快照
 
 memory:
   backend: auto              # auto | sqlite | hybrid | chroma | qdrant
