@@ -17,8 +17,20 @@ logger = logging.getLogger("alpha-swe.memory.factory")
 
 
 def build_memory(config: Optional[MemoryConfig] = None) -> MemoryStore:
-    """构造记忆存储后端。"""
+    """构造记忆存储后端。
+
+    嵌入器只构建一次并在各后端尝试间复用：避免 auto 链路对 chroma/qdrant/hybrid
+    逐个尝试时重复触发 sentence-transformers 加载（含失败重试）造成噪音与延迟。
+    """
     config = config or MemoryConfig()
+    _embedder_cache: list = []
+
+    def _embedder():
+        """惰性构建嵌入器（首次成功后复用，失败回退 TF-IDF 不再重试）。"""
+        if not _embedder_cache:
+            _embedder_cache.append(build_embedder(config))
+        return _embedder_cache[0]
+
     backend = config.backend
 
     if backend in ("none", "off"):
@@ -36,7 +48,7 @@ def build_memory(config: Optional[MemoryConfig] = None) -> MemoryStore:
         return HybridLocalMemoryStore(
             db_path=config.db_path,
             max_entities=config.max_entities,
-            embedder=build_embedder(config),
+            embedder=_embedder(),
             vector_weight=config.hybrid_weight_vector,
             max_code_chars=config.max_code_index_chars,
             decay_days=config.decay_days,
@@ -48,7 +60,7 @@ def build_memory(config: Optional[MemoryConfig] = None) -> MemoryStore:
         try:
             return ChromaMemoryStore(db_path=config.db_path,
                                      collection=config.collection,
-                                     embedder=build_embedder(config),
+                                     embedder=_embedder(),
                                      decay_days=config.decay_days,
                                      decay_factor=config.decay_factor,
                                      counter_example_penalty=config.counter_example_penalty)
@@ -59,7 +71,7 @@ def build_memory(config: Optional[MemoryConfig] = None) -> MemoryStore:
         try:
             return QdrantMemoryStore(db_path=config.db_path,
                                      collection=config.collection,
-                                     embedder=build_embedder(config),
+                                     embedder=_embedder(),
                                      decay_days=config.decay_days,
                                      decay_factor=config.decay_factor,
                                      counter_example_penalty=config.counter_example_penalty)
@@ -70,7 +82,7 @@ def build_memory(config: Optional[MemoryConfig] = None) -> MemoryStore:
     for ctor, name in ((ChromaMemoryStore, "chroma"), (QdrantMemoryStore, "qdrant")):
         try:
             return ctor(db_path=config.db_path, collection=config.collection,
-                        embedder=build_embedder(config),
+                        embedder=_embedder(),
                         decay_days=config.decay_days,
                         decay_factor=config.decay_factor,
                         counter_example_penalty=config.counter_example_penalty)
@@ -79,7 +91,7 @@ def build_memory(config: Optional[MemoryConfig] = None) -> MemoryStore:
     return HybridLocalMemoryStore(
         db_path=config.db_path,
         max_entities=config.max_entities,
-        embedder=build_embedder(config),
+        embedder=_embedder(),
         vector_weight=config.hybrid_weight_vector,
         max_code_chars=config.max_code_index_chars,
         decay_days=config.decay_days,

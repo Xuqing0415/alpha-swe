@@ -103,6 +103,8 @@ class MemoryConfig(BaseModel):
     collection: str = "alpha_swe_memories"
     embedder: str = "auto"  # auto | tfidf | sentence-transformers | openai
     embedding_model: str = ""  # 例如 all-MiniLM-L6-v2 / text-embedding-3-small
+    embedding_model_path: str = ""  # 本地模型目录（优先于 embedding_model，离线加载）
+    embedding_offline: bool = True  # 离线模式：禁止 HF 联网下载（local_files_only）
     embedding_base_url: str = ""
     embedding_api_key_env: str = "OPENAI_API_KEY"
     hybrid_weight_vector: float = 0.6
