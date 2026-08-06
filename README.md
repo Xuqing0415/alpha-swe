@@ -30,7 +30,7 @@ config/
 └── aggressive.yaml     A/B 对比激进配置（17 项关键参数取反）
 scripts/analyze_decisions.py  决策日志分析：列出已生效/未生效配置项
 examples/quick_demo.py  脚本化 LLM 的端到端演示
-tests/                  新核心测试（99 项）
+tests/                  新核心测试（111 项）
 loop.py, scheduler.py, ... 旧版七层原型（保留，作为对照参考）
 ```
 
@@ -44,9 +44,9 @@ loop.py, scheduler.py, ... 旧版七层原型（保留，作为对照参考）
 | 4 Prompt 动态拼接 | `agent/prompt/builder.py` | 已实现（Jinja2、工具 Schema 动态化） |
 | 5 输出解析 | `agent/parser/parser.py` | 已实现（重试反馈、失败记录） |
 | 6 Executor 与工具 | `agent/tools/` | 已实现（异步 Terminal/FileIO，超时终止） |
-| 7 长期记忆 | `agent/memory/` | 已实现（混合向量检索，Chroma/Qdrant/Hybrid 可插拔；经验摘要/代码索引/错误记忆自动写入） |
+| 7 长期记忆 | `agent/memory/` | 已实现闭环（写入去重 + 反例降权 + 任务类型过滤 + 可信度衰减 + 引用计数，见 `test_memory_closed_loop.py` 的 A/A' 复用验证；Chroma/Qdrant/Hybrid/SQLite 可插拔） |
 | 10 技能/插件 | `agent/context/manager.py` | 基础版（关键词激活；可扩展文件类型匹配） |
-| 11 上下文压缩 | `agent/context/manager.py` | 基础版（长输出截断 + 阶段摘要） |
+| 11 上下文压缩 | `agent/context/manager.py` | 已实现分级（light 压工具输出/medium 保留决策点/heavy 递归摘要），长输出关键行提取 + 原始存档引用，压缩决策日志（级别/前后 token/丢弃消息 ID），见 `test_compression_quality.py` |
 | 12 沙箱 | `agent/sandbox/policy.py` | 路径锚定/危险命令拦截；Docker 容器隔离预留 |
 | 13 MCP | `agent/mcp/`（client/manager/tool）+ `config/mcp.yaml` | 已实现（stdio/sse 客户端、握手、工具合并、资源订阅注入 Prompt） |
 | 14 可观测性 | `tui/`（Textual 三栏）+ `AgentLoop.subscribe()` + 终端实时输出回调 | 已实现（思维流/终端流/状态栏/Ctrl+I 中断/Ctrl+P 暂停）；Web 面板与 OTel 导出待接入 |
@@ -57,7 +57,13 @@ loop.py, scheduler.py, ... 旧版七层原型（保留，作为对照参考）
 - **写入**：任务完成后 LLM 自动生成经验摘要（problem/steps/solution/outcome/key_files），
   失败时记录错误记忆（错误类型 + 上下文），文件写入/读取后自动索引代码（路径 + 符号 + 片段）。
 - **检索**：任务指令触发混合检索（向量相似度 + 关键词打分，`hybrid_weight_vector` 调权重），
+  优先按任务类型（fix/add/refactor/test）过滤同类型经验，命中为空再放宽全量；
   结果注入 Prompt 的「检索到的历史记忆」区块。
+- **闭环**：
+  - 去重：写入前 `find_similar` 检查，相似度 ≥ `memory.dedup_threshold`（默认 0.95）只更新引用计数（`memory.dedup`）；
+  - 反例：错误记忆标记 `negative=true`，检索时正例优先、反例降权（`counter_example_penalty`）；
+  - 衰减：超过 `memory.decay_days` 未引用，分数按 `decay_factor` 指数衰减；被引用次数越多越可信（use_count 加成）；
+  - 决策日志：`memory.write` / `memory.dedup` / `memory.retrieve` / `retrieval_skip` 记录写入与检索路径。
 - **后端**：`config/agent.yaml` 的 `memory.backend`：
   - `auto`：有 `chromadb` 用之，否则有 `qdrant-client` 用之，否则本地 `hybrid`（TF-IDF，零新依赖）；
   - `sqlite`：纯关键词（最轻）；`hybrid`：本地向量 + 关键词；`chroma` / `qdrant`：真实向量库。
