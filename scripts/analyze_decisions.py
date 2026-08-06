@@ -31,6 +31,8 @@ EXPECTED_KEYS = [
     "skills.enabled", "skills.workflow_enabled", "skills.allow_fallback",
     "team.roles", "team.read_only", "team.max_review_retries",
     "team.message_timeout",
+    "sandbox.network_policy", "sandbox.protected_paths",
+    "sandbox.resource_monitor", "sandbox.memory_limit_mb",
 ]
 
 

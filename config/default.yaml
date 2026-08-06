@@ -13,6 +13,30 @@ sandbox:
   memory_limit: "2g"
   cpu_limit: 2.0
   timeout_seconds: 300
+  # 网络细粒度策略（本地工具层）：deny | allowlist | allow
+  network_policy: deny
+  network_allowed_commands:
+    - "pip install"
+    - "pip3 install"
+    - "pip download"
+    - "apt-get"
+    - "npm install"
+    - "pnpm install"
+  fake_network: false          # 假网络：curl/wget 返回预设响应（不产生真实请求）
+  fake_network_responses: {}   # URL 前缀 -> 响应体
+  # 文件保护：删除/写入这些路径需要拦截或确认
+  protected_paths:
+    - ".git"
+    - "config/agent.yaml"
+    - "config/mcp.yaml"
+    - "config/team.yaml"
+    - "*.lock"
+    - "package-lock.json"
+  audit_dir: "./logs/audit"    # 文件操作审计（before/after diff，支持回滚）
+  # 资源监控与熔断（psutil）：命令内存超限自动 kill
+  resource_monitor: false
+  memory_limit_mb: 512
+  poll_interval: 0.2
 
 context:
   max_tokens: 8000

@@ -11,6 +11,16 @@ sandbox:
   memory_limit: "512m"        # 更小内存限制
   cpu_limit: 0.5
   timeout_seconds: 60
+  # 网络策略：全局放行（与基线 deny 相反）
+  network_policy: allow
+  network_allowed_commands: []
+  fake_network: false
+  fake_network_responses: {}
+  protected_paths: []         # 关闭文件保护（与基线相反）
+  audit_dir: "./logs/audit_aggressive"
+  resource_monitor: true      # 开启资源熔断（与基线相反）
+  memory_limit_mb: 128        # 更小内存上限，更易触发
+  poll_interval: 0.1
 
 context:
   max_tokens: 2000            # 极小上下文窗口

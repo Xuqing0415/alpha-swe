@@ -51,6 +51,25 @@ class SandboxConfig(BaseModel):
     memory_limit: str = "2g"
     cpu_limit: float = 2.0
     timeout_seconds: int = 300
+    # 网络细粒度策略（本地工具层生效，Docker 用 network_mode）：
+    # deny（默认，全部网络命令拦截）| allowlist（放行 network_allowed_commands）| allow（全局放行）
+    network_policy: str = "deny"
+    network_allowed_commands: List[str] = Field(default_factory=lambda: [
+        "pip install", "pip3 install", "pip download", "apt-get", "apt ",
+        "npm install", "pnpm install", "yarn add",
+    ])
+    fake_network: bool = False  # 假网络模式：curl/wget 返回预设响应，不产生真实请求
+    fake_network_responses: Dict[str, str] = Field(default_factory=dict)  # URL 前缀 -> 响应体
+    # 文件系统保护：删除/写入这些路径片段需要额外确认（默认 .git、配置文件）
+    protected_paths: List[str] = Field(default_factory=lambda: [
+        ".git", "config/agent.yaml", "config/mcp.yaml", "config/team.yaml",
+        "*.lock", "package-lock.json", "poetry.lock", "Pipfile.lock",
+    ])
+    audit_dir: str = "./logs/audit"  # 文件操作审计日志（before/after diff，支持回滚）
+    # 资源监控与熔断：命令内存超过阈值自动 kill（psutil）
+    resource_monitor: bool = False
+    memory_limit_mb: float = 512.0
+    poll_interval: float = 0.2
 
     @model_validator(mode="before")
     @classmethod
