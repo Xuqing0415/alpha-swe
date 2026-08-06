@@ -1,0 +1,39 @@
+# 激进配置（A/B 对比用）—— 所有关键开关与基线相反
+llm:
+  provider: anthropic
+  model: claude-3-haiku
+  temperature: 0.8            # 高温度 -> 解析器宽松
+
+sandbox:
+  workspace: "./workspace"
+  network_enabled: true       # 启用网络
+  read_only_root: false
+  memory_limit: "512m"        # 更小内存限制
+  cpu_limit: 0.5
+  timeout_seconds: 60
+
+context:
+  max_tokens: 2000            # 极小上下文窗口
+  compression_threshold: 0.5  # 更早触发压缩
+  compression_method: vector_retrieval
+
+memory:
+  backend: none               # 禁用长期记忆
+  similarity_threshold: 0.99
+
+planner:
+  max_subtasks: 2             # 更少子任务
+  split_threshold_complexity: 0.9  # 更难触发拆分
+  allow_parallel: false       # 强制串行
+
+agent:
+  max_loop_iterations: 5      # 更少循环
+  parallel_tool_calls: false  # 禁用并行工具调用
+  require_confirmation:
+    - file_write
+  auto_approve: []
+
+mcp_servers: []
+active_plugins: []
+active_skills: []
+decision_log_path: "decision_log_aggressive.jsonl"

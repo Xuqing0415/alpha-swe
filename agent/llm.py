@@ -9,7 +9,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
-from agent.config import LLMConfig
+from agent.config import LLMConfig, LLMProvider
 
 logger = logging.getLogger("alpha-swe.llm")
 
@@ -55,8 +55,9 @@ class LiteLLMClient(BaseLLM):
             "temperature": self.config.temperature,
             "max_tokens": self.config.max_tokens,
         }
-        if self.config.base_url:
-            kwargs["api_base"] = self.config.base_url
+        api_base = self.config.api_base or self.config.base_url
+        if api_base:
+            kwargs["api_base"] = api_base
         if self.config.api_key_env:
             kwargs["api_key"] = __import__("os").environ.get(self.config.api_key_env, "")
         resp = await litellm.acompletion(**kwargs)
@@ -65,6 +66,10 @@ class LiteLLMClient(BaseLLM):
 
 def build_llm(config: LLMConfig) -> BaseLLM:
     """按配置构造 LLM 客户端。"""
-    if config.provider == "litellm":
+    if config.provider in (
+        LLMProvider.LITELLM, LLMProvider.OPENAI,
+        LLMProvider.ANTHROPIC, LLMProvider.OLLAMA,
+    ):
+        # 统一走 LiteLLM 路由（openai/anthropic/ollama 通过 model 前缀区分）
         return LiteLLMClient(config)
     return MockLLM()

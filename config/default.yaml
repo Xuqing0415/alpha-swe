@@ -1,0 +1,50 @@
+# 基线配置 —— 配置→运行时数据流演示（config/default.yaml）
+# 对应设计：配置(Pydantic) → 组件工厂 → 运行时决策点注入
+llm:
+  provider: openai
+  model: gpt-4o
+  temperature: 0.2
+  max_tokens: 4096
+
+sandbox:
+  workspace: "./workspace"
+  network_enabled: false      # 默认禁止出站网络
+  read_only_root: true
+  memory_limit: "2g"
+  cpu_limit: 2.0
+  timeout_seconds: 300
+
+context:
+  max_tokens: 8000
+  compression_threshold: 0.8
+  compression_method: summary
+
+memory:
+  backend: hybrid             # none | sqlite | hybrid | chroma | qdrant
+  db_path: "memory.db"
+  collection_name: "swe-agent-memory"
+  embedding_model: "all-MiniLM-L6-v2"
+  top_k_retrieval: 5
+  similarity_threshold: 0.0   # 0 = 不过滤
+
+planner:
+  max_subtasks: 5
+  allow_parallel: true
+  split_threshold_complexity: 0.4
+
+agent:
+  max_loop_iterations: 20
+  parallel_tool_calls: true
+  require_confirmation:
+    - file_write
+    - terminal:rm
+    - terminal:git push
+  auto_approve:
+    - file_read
+    - terminal:ls
+    - terminal:cat
+
+mcp_servers: []
+active_plugins: []
+active_skills: []
+decision_log_path: "decision_log.jsonl"
