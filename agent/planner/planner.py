@@ -9,6 +9,7 @@ import logging
 import re
 from typing import Any, Dict, List, Optional
 
+from agent.config import PlannerConfig
 from agent.core.task import Task, TaskDAG
 from agent.llm import BaseLLM, MockLLM
 
@@ -28,12 +29,33 @@ PLAN_PROMPT = """你是一个任务规划器。请把下面的用户指令拆解
 
 
 class Planner:
-    def __init__(self, llm: Optional[BaseLLM] = None, max_tasks: int = 8):
+    """任务规划器：PlannerConfig 驱动拆分行为。
+
+    决策点：
+    - split_threshold_complexity：复杂度低于阈值时不拆分（记录 skip_split）；
+    - max_subtasks：LLM 子任务数超出时截断（记录 truncate_subtasks）；
+    - allow_parallel=False：强制子任务串行（记录 force_sequential）。
+    """
+
+    def __init__(self, llm: Optional[BaseLLM] = None, max_tasks: int = 8,
+                 config: Optional[PlannerConfig] = None,
+                 decision_logger=None):
         self.llm = llm or MockLLM()
         self.max_tasks = max_tasks
+        self.config = config or PlannerConfig()
+        self.decision_logger = decision_logger
 
     async def plan(self, prompt: str, context: str = "") -> List[Task]:
         """返回规划出的任务列表（由调用方提交给 Scheduler）。"""
+        complexity = self._estimate_complexity(prompt)
+        if complexity < self.config.split_threshold_complexity:
+            if self.decision_logger is not None:
+                self.decision_logger.record(
+                    "skip_split", "planner.split_threshold_complexity",
+                    self.config.split_threshold_complexity,
+                    f"复杂度 {complexity:.2f} < {self.config.split_threshold_complexity}，不拆分",
+                )
+            return [Task(id="t0", instruction=prompt)]
         try:
             raw = await self.llm.complete([
                 {"role": "system", "content": "你是任务规划器，只输出 JSON。"},
@@ -42,10 +64,48 @@ class Planner:
             tasks = self._parse_plan(raw, prompt)
             if tasks:
                 logger.info("规划完成: %d 个子任务", len(tasks))
+                if self.decision_logger is not None:
+                    self.decision_logger.record(
+                        "execute_split", "planner.split_threshold_complexity",
+                        self.config.split_threshold_complexity,
+                        f"复杂度 {complexity:.2f}，执行拆分",
+                    )
+                if len(tasks) > self.config.max_subtasks:
+                    if self.decision_logger is not None:
+                        self.decision_logger.record(
+                            "truncate_subtasks", "planner.max_subtasks",
+                            self.config.max_subtasks,
+                            f"子任务从 {len(tasks)} 截断为 {self.config.max_subtasks}",
+                        )
+                    tasks = tasks[: self.config.max_subtasks]
+                if not self.config.allow_parallel and len(tasks) > 1:
+                    # 强制串行：为每个后续任务追加前驱依赖
+                    for i in range(1, len(tasks)):
+                        tasks[i].dependencies.append(tasks[i - 1].id)
+                    if self.decision_logger is not None:
+                        self.decision_logger.record(
+                            "force_sequential", "planner.allow_parallel",
+                            self.config.allow_parallel,
+                            f"强制 {len(tasks)} 个子任务串行执行",
+                        )
                 return tasks
         except Exception as e:
             logger.warning("LLM 规划失败，回退单任务: %s", e)
         return [Task(id="t0", instruction=prompt)]
+
+    @staticmethod
+    def _estimate_complexity(instruction: str) -> float:
+        """规则化复杂度估计（0~1）：长度 + 句子/并列结构 + 多步骤关键词。"""
+        text = (instruction or "").strip()
+        if not text:
+            return 0.0
+        score = min(0.5, len(text) / 120.0)
+        score += min(0.25, (text.count("，") + text.count(",")
+                            + text.count("。") + text.count(".") + text.count(";")) * 0.05)
+        triggers = ["同时", "并且", "然后", "分别", "多个", "以及", "多个文件",
+                    "重构", "refactor", "multiple", "同时处理"]
+        score += min(0.25, sum(1 for t in triggers if t in text) * 0.06)
+        return round(min(1.0, score), 3)
 
     def _parse_plan(self, raw: str, fallback_prompt: str) -> List[Task]:
         m = re.search(r"```(?:json)?\s*(\[[\s\S]*?\])\s*```", raw)

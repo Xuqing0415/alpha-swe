@@ -27,6 +27,31 @@ SYSTEM_TEMPLATE = """你是 Alpha-SWE，一个运行在安全沙箱中的软件�
 {% endif %}
 """
 
+SYSTEM_TEMPLATE_ANTHROPIC = """<system-role>你是 Alpha-SWE，一个运行在安全沙箱中的软件工程 Agent。可调用以下工具完成当前任务，工具描述遵循 JSON Schema。</system-role>
+
+<available-tools>
+{% for t in tools %}
+<tool name="{{ t.name }}" description="{{ t.description }}"><parameters>{{ t.parameters | tojson }}</parameters></tool>
+{% endfor %}
+</available-tools>
+
+<output-format>
+只输出以下一种 fenced JSON：
+1. 需要调用工具时：```json {"tool": "工具名", "params": {...}}```
+2. 需要思考时：```json {"think": "你的分析"}```
+3. 任务完成时：```json {"final_answer": "最终回答"}```
+</output-format>
+{% if memory %}
+<retrieved-memory>{{ memory }}</retrieved-memory>
+{% endif %}
+{% if skill %}
+<active-skill>{{ skill }}</active-skill>
+{% endif %}
+{% if mcp_resources %}
+<mcp-resources>{{ mcp_resources }}</mcp-resources>
+{% endif %}
+"""
+
 USER_TEMPLATE = """## 当前任务
 {{ instruction }}
 

@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 
 from jinja2 import Environment, BaseLoader
 
+from agent.config import LLMConfig, LLMProvider
 from agent.core.task import Task
 from agent.prompt import templates
 
@@ -20,17 +21,50 @@ def estimate_tokens(text: str) -> int:
 
 
 class PromptBuilder:
+    """动态拼接 Prompt；llm.provider 决定系统提示风格，llm.temperature 决定解析器严格度。
+
+    决策点：
+    - llm.provider == anthropic -> Anthropic XML 风格系统提示；
+    - llm.temperature < 0.3 -> 解析器 strict 模式，否则 loose。
+    """
+
     def __init__(self, tool_schemas: List[Dict[str, Any]],
                  system_template: Optional[str] = None,
-                 user_template: Optional[str] = None):
+                 user_template: Optional[str] = None,
+                 llm_config: Optional[LLMConfig] = None,
+                 decision_logger=None):
         self.tool_schemas = tool_schemas
+        self.llm_config = llm_config
+        self.decision_logger = decision_logger
         self.env = Environment(loader=BaseLoader(), trim_blocks=True, lstrip_blocks=True)
         self.env.filters["tojson"] = lambda v: json.dumps(v, ensure_ascii=False)
-        self.system_template = self.env.from_string(system_template or templates.SYSTEM_TEMPLATE)
+        self.system_template = self.env.from_string(
+            system_template or self._resolve_system_template()
+        )
         self.user_template = self.env.from_string(user_template or templates.USER_TEMPLATE)
         self.memory_context = ""
         self.skill_context = ""
         self.resources_context = ""
+
+    def _resolve_system_template(self) -> str:
+        """按 llm.provider 选择系统提示风格并记录决策。"""
+        provider = None
+        if self.llm_config is not None:
+            provider = self.llm_config.provider
+        if provider == LLMProvider.ANTHROPIC:
+            if self.decision_logger is not None:
+                self.decision_logger.record(
+                    "system_prompt_style", "llm.provider", provider.value,
+                    "使用 Anthropic XML 风格提示",
+                )
+            return templates.SYSTEM_TEMPLATE_ANTHROPIC
+        if provider is not None:
+            if self.decision_logger is not None:
+                self.decision_logger.record(
+                    "system_prompt_style", "llm.provider", provider.value,
+                    "使用 OpenAI Markdown 风格提示",
+                )
+        return templates.SYSTEM_TEMPLATE
 
     def set_memory(self, context: str) -> None:
         self.memory_context = context
@@ -47,6 +81,14 @@ class PromptBuilder:
         self.resources_context = context
 
     def build(self, task: Task, upstream: List[Task] = None) -> List[Dict[str, str]]:
+        # 决策点：temperature 决定解析器宽松度
+        if self.llm_config is not None and self.decision_logger is not None:
+            strictness = "strict" if self.llm_config.temperature < 0.3 else "loose"
+            self.decision_logger.record(
+                "parser_strictness", "llm.temperature",
+                self.llm_config.temperature,
+                f"解析器模式: {strictness}",
+            )
         system = self.system_template.render(
             tools=self.tool_schemas,
             memory=self.memory_context,

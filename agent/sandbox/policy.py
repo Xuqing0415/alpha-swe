@@ -18,15 +18,19 @@ logger = logging.getLogger("alpha-swe.sandbox")
 TRAVERSAL_PATTERN = re.compile(r"(\.\./|\.\.\\)")
 
 DEFAULT_BLOCKED_COMMANDS = ["sudo", "rm -rf /", "mkfs", "dd if=", ":(){"]
+NETWORK_COMMANDS = ["curl", "wget", "pip install", "npm install", "git clone", "git push", "git fetch", "git pull", "ssh", "nc ", "telnet", "ping", "nslookup", "dig "]
 
 
 class SandboxPolicy:
     def __init__(self, workspace: str = "./workspace",
-                 allowed_paths=None, blocked_paths=None, block_commands=None):
+                 allowed_paths=None, blocked_paths=None, block_commands=None,
+                 network_enabled: bool = False, decision_logger=None):
         self.workspace = os.path.abspath(workspace)
         self.allowed_paths = [os.path.abspath(p) for p in (allowed_paths or [])]
         self.blocked_paths = [os.path.abspath(p) for p in (blocked_paths or [])]
         self.blocked_commands = block_commands or DEFAULT_BLOCKED_COMMANDS
+        self.network_enabled = network_enabled
+        self.decision_logger = decision_logger
         self.violation_count = 0
 
     def check(self, tool_name: str, params: Dict[str, Any],
@@ -66,6 +70,16 @@ class SandboxPolicy:
             if blocked.lower() in command:
                 self._violate(f"命令含危险关键字: {blocked}")
                 return False, f"禁止执行危险命令（包含 {blocked}）"
+        if not self.network_enabled:
+            for kw in NETWORK_COMMANDS:
+                if kw.lower() in command:
+                    self._violate(f"网络已禁用: {kw.strip()}")
+                    if self.decision_logger is not None:
+                        self.decision_logger.record(
+                            "block_network_command", "sandbox.network_enabled",
+                            False, f"网络已禁用，拦截命令: {command[:80]}",
+                        )
+                    return False, f"网络已禁用，禁止外部网络命令（包含 {kw.strip()}）"
         return True, ""
 
     @staticmethod

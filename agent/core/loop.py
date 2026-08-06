@@ -17,19 +17,21 @@ from typing import Any, Callable, Dict, List, Optional
 
 from agent.config import AppConfig, load_config, load_mcp_config
 from agent.context.manager import ContextManager
+from agent.core.decision_logger import DecisionLogger
 from agent.core.scheduler import Scheduler
 from agent.core.state import AgentPhase, StateMachine
 from agent.core.task import Task, TaskDAG, TaskStatus
 from agent.llm import BaseLLM, build_llm
 from agent.mcp.manager import MCPManager
 from agent.memory.factory import build_memory
-from agent.memory.store import MemoryStore
+from agent.memory.store import MemoryStore, NoopMemoryStore
 from agent.memory.summarizer import ExperienceSummarizer
 from agent.parser.parser import Parser
 from agent.planner.planner import Planner
 from agent.prompt.builder import PromptBuilder
+from agent.sandbox.docker_sandbox import DockerSandbox
 from agent.sandbox.policy import SandboxPolicy
-from agent.tools.base import ExecutionContext
+from agent.tools.base import ExecutionContext, ToolResult
 from agent.tools.fileio import FileIOTool
 from agent.tools.manager import ToolManager
 from agent.tools.terminal import TerminalTool
@@ -72,6 +74,8 @@ class AgentLoop:
         summarizer: Optional[ExperienceSummarizer] = None,
         mcp_manager: Optional[MCPManager] = None,
         output_callback: Optional[Callable[[str], None]] = None,
+        decision_logger: Optional[DecisionLogger] = None,
+        confirmation_callback: Optional[Callable[[str, Dict[str, Any]], Any]] = None,
     ):
         self.config = config or load_config()
         self.state = StateMachine()
@@ -81,18 +85,43 @@ class AgentLoop:
         self._output_callback = output_callback
         self._pause_event = asyncio.Event()
         self._pause_event.set()  # 默认运行态；pause() 后清空
+        self._decision = decision_logger or DecisionLogger(
+            log_path=self.config.decision_log_path or None,
+        )
+        self.confirmation_callback = confirmation_callback
+        self._max_rounds = (
+            self.config.agent.max_loop_iterations or self.config.agent.max_rounds
+        )
 
         # 组件装配（缺省即用默认实现，便于测试注入）
         self.llm = llm or build_llm(self.config.llm)
-        self.sandbox = sandbox or SandboxPolicy(workspace=self.config.sandbox.workspace)
+        self.sandbox = sandbox or SandboxPolicy(
+            workspace=self.config.sandbox.workspace,
+            allowed_paths=self.config.sandbox.allowed_paths,
+            blocked_paths=self.config.sandbox.blocked_paths,
+            block_commands=self.config.sandbox.block_commands,
+            network_enabled=self.config.sandbox.is_network_enabled,
+            decision_logger=self._decision,
+        )
         self.tools = tools or self._default_tools()
         self._tool_enabled = getattr(self, "_tool_enabled", None)
-        self.planner = planner or Planner(llm=self.llm)
-        self.parser = parser or Parser(max_retries=self.config.agent.max_retries)
+        self.planner = planner or Planner(
+            llm=self.llm, config=self.config.planner,
+            decision_logger=self._decision,
+        )
+        self.parser = parser or Parser(
+            max_retries=self.config.agent.max_retries,
+            mode="strict" if self.config.llm.temperature < 0.3 else "loose",
+            decision_logger=self._decision,
+        )
         self.context = context_manager or ContextManager(
             keep_recent_rounds=self.config.agent.keep_recent_rounds,
-            token_threshold=self.config.agent.token_threshold,
-            max_token_limit=self.config.agent.max_token_limit,
+            max_tokens=self.config.context.max_tokens,
+            compression_threshold=self.config.context.compression_threshold,
+            compression_method=self.config.context.compression_method,
+            decision_logger=self._decision,
+            active_skills=self.config.active_skills,
+            active_plugins=self.config.active_plugins,
         )
         self.memory = memory or build_memory(self.config.memory)
         self.summarizer = summarizer or ExperienceSummarizer(
@@ -103,7 +132,9 @@ class AgentLoop:
         )
         self._mcp_connected = False
         self.prompt_builder = prompt_builder or PromptBuilder(
-            tool_schemas=self.tools.schemas(enabled=self._tool_enabled)
+            tool_schemas=self.tools.schemas(enabled=self._tool_enabled),
+            llm_config=self.config.llm,
+            decision_logger=self._decision,
         )
         dag = TaskDAG()
         self.scheduler = scheduler or Scheduler(
@@ -113,6 +144,7 @@ class AgentLoop:
 
         # 沙箱工作目录
         os.makedirs(self.config.sandbox.workspace, exist_ok=True)
+        self.docker = DockerSandbox(self.config.sandbox, self._decision)
 
     # ---- 默认工具集 ----
     def _default_tools(self) -> ToolManager:
@@ -181,11 +213,42 @@ class AgentLoop:
                 await self._load_mcp_resources(prompt)
             self._mcp_connected = True
 
+        # 启动决策记录：循环上限 / 记忆后端 / 沙箱网络
+        self._decision.record(
+            "max_loop_iterations", "agent.max_loop_iterations",
+            self._max_rounds, f"主循环最大迭代: {self._max_rounds}",
+        )
+        self._decision.record(
+            "memory_backend", "memory.backend", self.config.memory.backend,
+            f"长期记忆后端: {self.config.memory.backend}",
+        )
+        self._decision.record(
+            "sandbox_network", "sandbox.network_enabled",
+            self.config.sandbox.is_network_enabled,
+            f"沙箱网络策略: {self.config.sandbox.network_mode}",
+        )
+
         # 技能/插件上下文 + 长期记忆注入
         skill = self.context.build_skill_context(prompt)
         if skill:
             self.prompt_builder.set_skill(skill)
         memory_hits = self.memory.retrieve(prompt, top_k=self.config.memory.top_k)
+        if isinstance(self.memory, NoopMemoryStore):
+            self._decision.record(
+                "retrieval_skip", "memory.backend", self.config.memory.backend,
+                "跳过记忆检索（长期记忆已禁用）",
+            )
+        elif self.config.memory.similarity_threshold > 0:
+            before = len(memory_hits)
+            memory_hits = [
+                h for h in memory_hits
+                if float(h.get("score", 1.0)) >= self.config.memory.similarity_threshold
+            ]
+            self._decision.record(
+                "retrieval_result", "memory.similarity_threshold",
+                self.config.memory.similarity_threshold,
+                f"检索到 {before} 项，相似度过滤后保留 {len(memory_hits)} 项",
+            )
         memory_text = self.memory.format_context(memory_hits)
         if memory_text:
             self.prompt_builder.set_memory(memory_text)
@@ -231,7 +294,7 @@ class AgentLoop:
         parse_failures = 0
 
         try:
-            while task.round_count < self.config.agent.max_rounds:
+            while task.round_count < self._max_rounds:
                 await self._checkpoint(task)
                 task.round_count += 1
 
@@ -253,23 +316,39 @@ class AgentLoop:
                     continue
 
                 if parsed.action_type == "tool_call":
-                    result = await self.tools.execute(
-                        parsed.tool_name, parsed.params,
-                        ExecutionContext(
-                            workspace=self.config.sandbox.workspace,
-                            task_id=task.id,
-                            instruction=task.instruction,
-                            interrupt_event=self.cancel_event,
-                            output_callback=self._output_callback,
-                        ),
+                    calls = [(parsed.tool_name, parsed.params)]
+                    calls.extend(
+                        (str(c.get("tool")),
+                         c.get("params") if isinstance(c.get("params"), dict) else {})
+                        for c in parsed.extra_tool_calls
                     )
-                    obs = self._summarize_observation(parsed.tool_name, result)
-                    task.history.append({"role": "observation", "content": obs})
-                    self._emit("tool_call", task_id=task.id, tool=parsed.tool_name,
-                               params=parsed.params, success=result.success,
-                               output=obs[:300])
-                    self._index_code(parsed.params, result)
-                    if result.metadata.get("waiting"):
+                    parallel = self.config.agent.parallel_tool_calls and len(calls) > 1
+                    if parallel:
+                        self._decision.record(
+                            "parallel_execution", "agent.parallel_tool_calls",
+                            len(calls), f"并行执行 {len(calls)} 个工具",
+                        )
+                        results = await asyncio.gather(
+                            *(self._run_tool(name, params, task)
+                              for name, params in calls)
+                        )
+                    else:
+                        if len(calls) > 1:
+                            self._decision.record(
+                                "sequential_execution", "agent.parallel_tool_calls",
+                                False, f"顺序执行 {len(calls)} 个工具",
+                            )
+                        results = []
+                        for name, params in calls:
+                            results.append(await self._run_tool(name, params, task))
+                    for (name, params), result in zip(calls, results):
+                        obs = self._summarize_observation(name, result)
+                        task.history.append({"role": "observation", "content": obs})
+                        self._emit("tool_call", task_id=task.id, tool=name,
+                                   params=params, success=result.success,
+                                   output=obs[:300])
+                        self._index_code(params, result)
+                    if any(r.metadata.get("waiting") for r in results):
                         task.mark(TaskStatus.WAITING)  # 挂起，释放控制权
                         return
                     continue
@@ -292,7 +371,7 @@ class AgentLoop:
                     "content": self.parser.retry_feedback(parsed, parse_failures),
                 })
 
-            task.mark(TaskStatus.FAILED, error=f"超过最大轮数 {self.config.agent.max_rounds}")
+            task.mark(TaskStatus.FAILED, error=f"超过最大轮数 {self._max_rounds}")
             self._remember_error(task)
         except TaskInterrupted:
             task.mark(TaskStatus.READY)  # 中断后回到就绪，等待重新调度
@@ -303,6 +382,74 @@ class AgentLoop:
             self._remember_error(task)
 
     # ---- 工具 ----
+    async def _run_tool(self, name: str, params: Dict[str, Any],
+                        task: Task) -> ToolResult:
+        """带确认策略执行单个工具（require_confirmation / auto_approve）。"""
+        if self._needs_confirmation(name, params):
+            if not await self._ask_confirmation(name, params):
+                self._decision.record(
+                    "user_rejected", "agent.require_confirmation",
+                    name, f"用户拒绝了 {name}",
+                )
+                return ToolResult(
+                    success=False, error="用户拒绝了工具调用（require_confirmation）",
+                )
+        return await self.tools.execute(
+            name, params,
+            ExecutionContext(
+                workspace=self.config.sandbox.workspace,
+                task_id=task.id,
+                instruction=task.instruction,
+                interrupt_event=self.cancel_event,
+                output_callback=self._output_callback,
+            ),
+        )
+
+    def _needs_confirmation(self, tool_name: str,
+                            params: Dict[str, Any]) -> bool:
+        """判断是否需要用户确认（规则: 工具名 / terminal:cmd前缀 / file_write 等）。"""
+        for rule in self.config.agent.auto_approve:
+            if self._match_rule(rule, tool_name, params):
+                self._decision.record(
+                    "auto_approve", "agent.auto_approve", rule,
+                    f"工具 {tool_name} 命中 auto_approve，免确认",
+                )
+                return False
+        for rule in self.config.agent.require_confirmation:
+            if self._match_rule(rule, tool_name, params):
+                self._decision.record(
+                    "require_confirmation", "agent.require_confirmation", rule,
+                    f"工具 {tool_name} 需要用户确认",
+                )
+                return True
+        return False
+
+    @staticmethod
+    def _match_rule(rule: str, tool_name: str,
+                    params: Dict[str, Any]) -> bool:
+        if rule == tool_name:
+            return True
+        if rule.startswith("terminal:") and tool_name == "terminal_execute":
+            command = str(params.get("command", "")).strip()
+            return command.startswith(rule[len("terminal:"):])
+        action_map = {
+            "file_write": "write", "file_read": "read",
+            "file_append": "append", "file_search": "search",
+        }
+        if tool_name == "file_ops" and action_map.get(rule) == params.get("action"):
+            return True
+        return False
+
+    async def _ask_confirmation(self, tool_name: str,
+                                params: Dict[str, Any]) -> bool:
+        if self.confirmation_callback is None:
+            self._decision.record(
+                "confirmation_bypassed", "agent.require_confirmation",
+                tool_name, "无确认回调，按自动通过处理",
+            )
+            return True
+        return bool(await self.confirmation_callback(tool_name, params))
+
     async def _checkpoint(self, task: Task) -> None:
         """yield 控制点：每次 Observe 后检查中断信号。"""
         if self.cancel_event.is_set():

@@ -118,6 +118,32 @@ class MemoryStore(ABC):
         return "\n".join(lines)
 
 
+class NoopMemoryStore(MemoryStore):
+    """长期记忆已禁用（memory.backend = none）时的空实现。"""
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def remember(self, kind: str, text: str,
+                 metadata: Optional[Dict[str, Any]] = None) -> None:
+        pass
+
+    def retrieve(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
+        return []
+
+    def search(self, query: str, top_k: int = 5,
+               kinds: Optional[List[str]] = None,
+               metadata_filter: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        return []
+
+    def close(self) -> None:
+        pass
+
+    @property
+    def disabled(self) -> bool:
+        return True
+
+
 class SqliteMemoryStore(MemoryStore):
     """SQLite 关键词检索（零依赖，兼容旧实现）。"""
 

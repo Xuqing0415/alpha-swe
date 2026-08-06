@@ -28,11 +28,21 @@ class ParsedAction:
     content: str = ""
     raw: str = ""
     error: Optional[str] = None
+    # 单次响应多工具调用（design 6 节）：tool_calls 列表中除第一个外的其余项
+    extra_tool_calls: List[Dict[str, Any]] = field(default_factory=list)
 
 
 class Parser:
-    def __init__(self, max_retries: int = 3):
+    """输出解析器：mode="strict" 要求 JSON 结构，mode="loose" 允许纯文本回退。
+
+    由 llm.temperature 驱动（<0.3 严格 / 其余宽松），并在决策日志中记录。
+    """
+
+    def __init__(self, max_retries: int = 3, mode: str = "loose",
+                 decision_logger=None):
         self.max_retries = max_retries
+        self.mode = mode
+        self.decision_logger = decision_logger
         self.failures: List[Dict[str, Any]] = []
 
     def parse(self, llm_output: str) -> ParsedAction:
@@ -60,6 +70,12 @@ class Parser:
         if m:
             return ParsedAction(action_type="tool_call", tool_name=m.group(1), raw=raw)
 
+        if self.mode == "strict":
+            # 严格模式：输出必须是可识别的 JSON/工具格式，否则报错重试
+            return ParsedAction(
+                action_type="error", raw=raw,
+                error="严格模式：输出不是可识别的 JSON/工具格式",
+            )
         return ParsedAction(action_type="final_answer", content=raw, raw=raw)
 
     def retry_feedback(self, action: ParsedAction, attempt: int) -> str:
@@ -89,6 +105,29 @@ class Parser:
         return None
 
     def _from_object(self, data: Dict[str, Any], raw: str) -> ParsedAction:
+        if "tool_calls" in data:
+            calls = data["tool_calls"]
+            if isinstance(calls, list) and calls and isinstance(calls[0], dict):
+                first = calls[0]
+                if "tool" in first:
+                    params = first.get("params")
+                    if not isinstance(params, dict):
+                        params = {}
+                    rest = [
+                        c for c in calls[1:]
+                        if isinstance(c, dict) and "tool" in c
+                    ]
+                    return ParsedAction(
+                        action_type="tool_call",
+                        tool_name=str(first["tool"]),
+                        params=params,
+                        extra_tool_calls=rest,
+                        raw=raw,
+                    )
+            return ParsedAction(
+                action_type="error", raw=raw,
+                error="tool_calls 字段格式错误",
+            )
         if "tool" in data:
             params = data.get("params")
             if not isinstance(params, dict):

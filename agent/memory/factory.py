@@ -10,8 +10,8 @@ from typing import Optional
 from agent.config import MemoryConfig
 from agent.memory.embed import build_embedder
 from agent.memory.store import (ChromaMemoryStore, HybridLocalMemoryStore,
-                                MemoryStore, QdrantMemoryStore,
-                                SqliteMemoryStore)
+                                MemoryStore, NoopMemoryStore,
+                                QdrantMemoryStore, SqliteMemoryStore)
 
 logger = logging.getLogger("alpha-swe.memory.factory")
 
@@ -20,6 +20,10 @@ def build_memory(config: Optional[MemoryConfig] = None) -> MemoryStore:
     """构造记忆存储后端。"""
     config = config or MemoryConfig()
     backend = config.backend
+
+    if backend in ("none", "off"):
+        logger.info("长期记忆已禁用（backend=%s）", backend)
+        return NoopMemoryStore()
 
     if backend == "sqlite":
         return SqliteMemoryStore(db_path=config.db_path,
