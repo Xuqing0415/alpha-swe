@@ -51,10 +51,16 @@ class ToolManager:
         if tool is None:
             return ToolResult(success=False, error=f"未找到工具: {name}，可用: {self.names()}")
 
-        # 沙箱前置校验（路径、危险命令）
+        # 沙箱前置校验（路径、危险命令、网络策略、文件保护）
         allowed, reason = self.policy.check(name, params, context)
         if not allowed:
             logger.warning("沙箱拦截: %s -> %s", name, reason)
             return ToolResult(success=False, error=f"沙箱拦截: {reason}")
+
+        # 假网络模式：curl/wget 命中预设响应时直接返回，不发起真实请求
+        fake = self.policy.intercept(name, params)
+        if fake is not None:
+            return ToolResult(success=True, output=fake,
+                              metadata={"fake_network": True})
 
         return await tool.execute(params, context)

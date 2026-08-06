@@ -1,4 +1,4 @@
-﻿"""异步终端工具 —— 对应设计第 6 节 Terminal。
+"""异步终端工具 —— 对应设计第 6 节 Terminal。
 
 - 异步子进程，实时读取 stdout/stderr；
 - 支持超时终止（terminate -> kill）；
@@ -38,9 +38,15 @@ class TerminalTool(Tool):
         "required": ["command"],
     }
 
-    def __init__(self, default_timeout: float = 30.0, read_only: bool = False):
+    def __init__(self, default_timeout: float = 30.0, read_only: bool = False,
+                 resource_monitor: bool = False,
+                 memory_limit_mb: float = 512.0,
+                 poll_interval: float = 0.2):
         self.default_timeout = default_timeout
         self.read_only = read_only
+        self.resource_monitor = resource_monitor
+        self.memory_limit_mb = max(1.0, memory_limit_mb)
+        self.poll_interval = max(0.02, poll_interval)
 
     def _read_only_ok(self, command: str) -> bool:
         """只读模式检查：首词在白名单 + 无写语义元字符 + git 仅允许只读子命令。"""
@@ -109,10 +115,48 @@ class TerminalTool(Tool):
                     callback(text.rstrip("\n"))
             return "".join(chunks)
 
+        async def _monitor() -> Optional[float]:
+            """周期采样进程树 RSS，超过阈值立即 kill 整棵进程树（熔断）。"""
+            try:
+                import psutil
+            except ImportError:
+                return None
+            while True:
+                await asyncio.sleep(self.poll_interval)
+                if proc.returncode is not None:
+                    return None
+                total = 0.0
+                try:
+                    p = psutil.Process(proc.pid)
+                    total += p.memory_info().rss
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+                try:
+                    children = p.children(recursive=True)
+                except Exception:
+                    children = []
+                for child in children:
+                    try:
+                        total += child.memory_info().rss
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        continue
+                if total > self.memory_limit_mb * 1024 * 1024:
+                    for child in children:
+                        try:
+                            child.kill()
+                        except Exception:
+                            pass
+                    proc.kill()
+                    return total
+
+        monitor_task = asyncio.create_task(_monitor()) if self.resource_monitor else None
         try:
             out_task = asyncio.create_task(_read_stream(proc.stdout))
             err_task = asyncio.create_task(_read_stream(proc.stderr))
-            await asyncio.wait_for(asyncio.gather(out_task, err_task), timeout=timeout)
+            tasks = [out_task, err_task]
+            if monitor_task is not None:
+                tasks.append(monitor_task)
+            await asyncio.wait_for(asyncio.gather(*tasks), timeout=timeout)
             await asyncio.wait_for(proc.wait(), timeout=timeout)
         except asyncio.TimeoutError:
             proc.terminate()
@@ -131,6 +175,19 @@ class TerminalTool(Tool):
         out = (await out_task).strip()
         err = (await err_task).strip()
         elapsed = (time.time() - start) * 1000
+        if monitor_task is not None:
+            breach = monitor_task.result()
+            if breach is not None:
+                return ToolResult(
+                    success=False,
+                    output=out,
+                    error=(f"资源熔断：命令内存超限"
+                           f"（{breach / 1024 / 1024:.1f}MB > "
+                           f"{self.memory_limit_mb:.0f}MB），已自动终止"),
+                    metadata={"circuit_breaker": True,
+                              "rss_mb": round(breach / 1024 / 1024, 1)},
+                    elapsed_ms=elapsed,
+                )
 
         if proc.returncode == 0:
             return ToolResult(success=True, output=out or "(empty stdout)",

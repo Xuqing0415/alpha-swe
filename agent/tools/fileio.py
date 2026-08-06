@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from agent.sandbox.audit import FileAuditStore
 from agent.tools.base import ExecutionContext, Tool, ToolResult
 
 TRAVERSAL_PATTERN = re.compile(r"(\.\./|\.\.\\)")
@@ -47,9 +48,11 @@ class FileIOTool(Tool):
         "required": ["action", "path"],
     }
 
-    def __init__(self, workspace: str = "", read_only: bool = False):
+    def __init__(self, workspace: str = "", read_only: bool = False,
+                 audit_store: Optional[FileAuditStore] = None):
         self.workspace = workspace
         self.read_only = read_only
+        self.audit_store = audit_store
 
     async def execute(self, params: Dict[str, Any], context: ExecutionContext) -> ToolResult:
         action = str(params.get("action", ""))
@@ -76,9 +79,11 @@ class FileIOTool(Tool):
             if action == "read":
                 return await self._read(target, start)
             if action == "write":
-                return await self._write(target, params.get("content", ""), start)
+                return await self._write(target, params.get("content", ""), start,
+                                         task_id=context.task_id or "")
             if action == "append":
-                return await self._append(target, params.get("content", ""), start)
+                return await self._append(target, params.get("content", ""), start,
+                                          task_id=context.task_id or "")
             if action == "search":
                 return await self._search(target, params.get("pattern", ""), start)
             return ToolResult(success=False, error=f"未知操作: {action}",
@@ -95,20 +100,48 @@ class FileIOTool(Tool):
         return ToolResult(success=True, output=data, metadata={"path": str(target), "size": len(data)},
                           elapsed_ms=(time.time() - start) * 1000)
 
-    async def _write(self, target: Path, content: str, start: float) -> ToolResult:
+    async def _write(self, target: Path, content: str, start: float,
+                     task_id: str = "") -> ToolResult:
         await asyncio.to_thread(target.parent.mkdir, parents=True, exist_ok=True)
+        before = await self._read_before(target)
         await asyncio.to_thread(target.write_text, content, encoding="utf-8")
+        self._audit("write", target, before, content, task_id)
         return ToolResult(success=True, output=f"写入成功: {target}",
-                          metadata={"path": str(target), "size": len(content)},
+                          metadata={"path": str(target), "size": len(content),
+                                    "audited": self.audit_store is not None},
                           elapsed_ms=(time.time() - start) * 1000)
 
-    async def _append(self, target: Path, content: str, start: float) -> ToolResult:
+    async def _append(self, target: Path, content: str, start: float,
+                      task_id: str = "") -> ToolResult:
         await asyncio.to_thread(target.parent.mkdir, parents=True, exist_ok=True)
+        before = await self._read_before(target)
         with open(target, "a", encoding="utf-8") as f:
             f.write(content)
+        after = (before or "") + content
+        self._audit("append", target, before, after, task_id)
         return ToolResult(success=True, output=f"追加成功: {target}",
-                          metadata={"path": str(target)},
+                          metadata={"path": str(target),
+                                    "audited": self.audit_store is not None},
                           elapsed_ms=(time.time() - start) * 1000)
+
+    @staticmethod
+    async def _read_before(target: Path) -> Optional[str]:
+        """写入前读取旧内容（文件不存在返回 None）。"""
+        if not await asyncio.to_thread(target.exists):
+            return None
+        return await asyncio.to_thread(
+            target.read_text, encoding="utf-8", errors="replace"
+        )
+
+    def _audit(self, action: str, target: Path, before: Optional[str],
+               after: str, task_id: str) -> None:
+        if self.audit_store is None:
+            return
+        try:
+            self.audit_store.record(action, str(target), before, after,
+                                    task_id=task_id)
+        except Exception as e:
+            logging.getLogger("alpha-swe.tools").warning("文件审计失败: %s", e)
 
     async def _search(self, target: Path, pattern: str, start: float) -> ToolResult:
         if not pattern:
