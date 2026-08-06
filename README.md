@@ -47,8 +47,8 @@ loop.py, scheduler.py, ... 旧版七层原型（保留，作为对照参考）
 | 7 长期记忆 | `agent/memory/` | 已实现闭环（写入去重 + 反例降权 + 任务类型过滤 + 可信度衰减 + 引用计数，见 `test_memory_closed_loop.py` 的 A/A' 复用验证；Chroma/Qdrant/Hybrid/SQLite 可插拔） |
 | 10 技能/插件 | `agent/context/manager.py` | 基础版（关键词激活；可扩展文件类型匹配） |
 | 11 上下文压缩 | `agent/context/manager.py` | 已实现分级（light 压工具输出/medium 保留决策点/heavy 递归摘要），长输出关键行提取 + 原始存档引用，压缩决策日志（级别/前后 token/丢弃消息 ID），见 `test_compression_quality.py` |
-| 12 沙箱 | `agent/sandbox/policy.py` + `agent/sandbox/audit.py` | 已实现（阶段五）：路径锚定/危险命令拦截；网络细粒度策略 deny\|allowlist\|allow + 假网络 + 请求审计；受保护路径防删/防写；文件操作审计（before/after diff）与回滚；资源监控与熔断（psutil） |
-| 13 MCP | `agent/mcp/`（client/manager/tool）+ `config/mcp.yaml` | 已实现（stdio/sse 客户端、握手、工具合并、资源订阅注入 Prompt） |
+| 12 沙箱 | `agent/sandbox/policy.py` + `agent/sandbox/audit.py` + `agent/sandbox/docker_sandbox.py` | 已实现（阶段五）：路径锚定/危险命令拦截；网络细粒度策略 deny\|allowlist\|allow + 假网络 + 请求审计；受保护路径防删/防写；文件操作审计与回滚；资源熔断。容器生命周期（阶段五后）：docker-py 惰性加载、start/exec_run/文件读写/快照 commit/回滚重建/超时 kill/stats，docker_enabled 时工具路由进容器 |
+| 13 MCP | `agent/mcp/`（client/manager/tool）+ `config/mcp.yaml` + `mcp-servers/` | 已实现（阶段六）：stdio/sse/streamable-http 客户端、握手、工具合并、资源注入 Prompt；断连自动重连与降级隐藏（ensure_connected/retry_connect）；资源缓存 TTL；自研 TS 服务器（knowledge-base/issue-tracker） |
 | 14 可观测性 | `tui/`（Textual 三栏）+ `AgentLoop.subscribe()` + 终端实时输出回调 | 已实现（思维流/终端流/状态栏/Ctrl+I 中断/Ctrl+P 暂停）；Web 面板与 OTel 导出待接入 |
 | 配置→运行时数据流 | `agent/config.py` + `agent/core/decision_logger.py` + `agent/sandbox/docker_sandbox.py` + `scripts/analyze_decisions.py` | 已实现：YAML→Pydantic→组件工厂→运行时决策点；JSONL 决策日志；default/aggressive A/B 对比测试 |
 
@@ -140,6 +140,21 @@ steps:
 
 验证见 `tests/test_sandbox_security.py`（危险命令、deny/allowlist/假网络、受保护路径、审计回滚、熔断、循环内恶意命令拦截端到端）。
 
+## Docker 沙箱容器生命周期（第 12 节）
+
+`agent/sandbox/docker_sandbox.py` 由 `sandbox.docker_enabled` 驱动（默认关闭，本地工具不变）。
+
+- **生命周期**：`start()` 拉取镜像（缺失时 pull）→ 创建容器（卷挂载 `workdir=/workspace`、只读根、资源限制、网络隔离）→ 启动；
+  `exec_run()` 容器内执行命令，超时强制 kill；`stop()/stats()/status()` 清理与资源采样。
+- **网络隔离**：`no_network`（默认）→ `network_mode=none`；`network_enabled: true` → `bridge`。
+- **资源限制**：`memory_limit` / `cpu_limit` 直接映射 docker `mem_limit` / `nano_cpus`；命令级超时由 `timeout_seconds` 控制。
+- **快照/回滚**：每个任务执行前 `docker commit` 快照（`snapshot_prefix`）；任务失败且 `auto_rollback: true` 时
+  `rollback()` 从快照镜像重建容器，失败后可快速回到干净状态。决策日志：`docker.start/snapshot/rollback/exec/timeout/stop`。
+- **工具路由**：docker 模式下 `TerminalTool` 经 `exec_run` 执行，`FileIOTool` 经 get/put_archive 操作容器文件系统
+  （路径仍先过本地沙箱策略）；容器启动失败自动降级回本地执行。
+
+验证见 `tests/test_docker_sandbox.py`（fake docker client 离线覆盖规格/生命周期/文件/超时/快照回滚/主循环端到端，13 项）。
+
 ## 快速开始
 
 ```powershell
@@ -154,6 +169,18 @@ python -X utf8 -m pytest tests -q
 # 最小演示：脚本化 LLM 驱动一次完整 ReAct（terminal -> final_answer）
 python -X utf8 examples/quick_demo.py
 ```
+
+## MCP 生态打通（阶段六）
+
+- **动态发现与断连处理**：`MCPManager.ensure_connected()` 首次连接 + 按 `mcp.reconnect_attempts` 自动重连；
+  失败服务器记录在 `failed_servers`，其工具从 `build_tools()` 降级隐藏（决策日志 `mcp.connect_failed/reconnect/degrade`）。
+- **资源缓存**：`read_resource()` 带 TTL 缓存（`mcp.resource_cache_ttl`，0 = 不缓存），命中记录
+  `mcp.resource_cache_hit`；`invalidate_resources()` 支持按服务器/URI 失效。
+- **自定义 TypeScript 服务器**（`mcp-servers/`）：`knowledge-base`（团队知识库：`search_kb`/`add_kb_entry` +
+  `kb://` 资源）、`issue-tracker`（Issue 追踪：`list_issues`/`create_issue`/`update_issue_status` + `issue://` 资源）。
+  构建：`npm install && npm run build`，注册进 `config/mcp.yaml`（stdio）。
+
+验证见 `tests/test_mcp_phase6.py`（重连/降级/缓存）与 `tests/test_mcp_ts_servers.py`（真实 TS 服务器端到端）。
 
 ## 配置影响验证（配置 → 运行时数据流）
 
@@ -207,6 +234,7 @@ python -m tui --config config/agent.yaml "修复失败的测试"
 2. ~~长期记忆升级为 Chroma/Qdrant 向量检索 + 自动经验摘要写入~~（已完成，见上节）；
 3. ~~多 Agent 协作（Orchestrator/Worker + 黑板）与 Critic 仲裁~~（已完成，见 `agent/multiagent/` 与第 8 节）；
 
-4. Docker 沙箱完整生命周期（网络隔离、资源限制、快照/回滚）；工具层安全加固（网络细粒度策略/假网络/受保护路径/审计回滚/资源熔断）已完成（阶段五，见 `agent/sandbox/policy.py` 与 `agent/sandbox/audit.py`）；
-5. ~~Textual TUI 三栏布局~~（已完成，见 `tui/` 与第 14 节）+ WebSocket 事件订阅（待接入）；
+4. ~~Docker 沙箱完整生命周期（网络隔离、资源限制、快照/回滚）~~（已完成，见 `agent/sandbox/docker_sandbox.py`）；工具层安全加固（网络细粒度策略/假网络/受保护路径/审计回滚/资源熔断）已完成（阶段五）；
+5. ~~MCP 生态打通（断连重连/降级、资源缓存 TTL、自研 TS 服务器）~~（已完成，阶段六，见 `agent/mcp/manager.py` 与 `mcp-servers/`）；
+6. ~~Textual TUI 三栏布局~~（已完成，见 `tui/` 与第 14 节）+ WebSocket 事件订阅（待接入）；
 6. OpenTelemetry 追踪导出与结构化 JSON 日志。
