@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from contextlib import AsyncExitStack
@@ -34,11 +35,13 @@ except ImportError:  # mcp SDK 未安装时的降级标记
 class MCPClient:
     """封装一个 MCP 服务器的连接生命周期。"""
 
-    def __init__(self, config: MCPClientConfig, tool_timeout: float = 30.0):
+    def __init__(self, config: MCPClientConfig, tool_timeout: float = 30.0,
+                 connect_timeout: float = 8.0):
         if not HAS_MCP:
             raise RuntimeError("MCP 功能需要安装 mcp SDK: pip install mcp")
         self.config = config
         self.tool_timeout = tool_timeout
+        self.connect_timeout = connect_timeout
         self._session: Optional[ClientSession] = None
         self._stack: Optional[AsyncExitStack] = None
 
@@ -75,11 +78,26 @@ class MCPClient:
 
     @staticmethod
     async def _safe_aclose(stack: AsyncExitStack) -> None:
+        """在可能被取消的上下文中尽量干净地关闭 AsyncExitStack。
+
+        必须在当前任务中执行 aclose：mcp SDK 的 stdio_client/sse_client 与
+        ClientSession 会在 connect() 所在任务创建 anyio 任务组/取消作用域，
+        跨任务关闭会抛 "Attempted to exit cancel scope in a different task
+        than it was entered in" 并残留后台任务。因此不能用 asyncio.shield /
+        ensure_future（会把清理挪到别的任务），也不能用
+        anyio.CancelScope(shield=True)（会与 SDK 内部的取消作用域栈互相干扰，
+        抛 "Attempted to exit a cancel scope that isn't the current task's
+        current cancel scope"）。正确做法：若当前任务正被取消，先 uncancel
+        消费取消信号，让 aclose 在同一任务里完整执行。
+        """
+        task = asyncio.current_task()
+        if task is not None and task.cancelling() > 0:
+            task.uncancel()
         try:
-            # shield：即使当前任务正被取消，也要把传输层/session 干净关闭。
-            import anyio
-            with anyio.CancelScope(shield=True):
-                await stack.aclose()
+            await stack.aclose()
+        except asyncio.CancelledError:
+            # SDK 内部收尾可能再次触发取消；尽力等待其任务组结束
+            logger.debug("MCP 清理过程被取消", exc_info=True)
         except Exception:
             logger.debug("MCP 连接失败后的资源清理异常", exc_info=True)
 
@@ -166,16 +184,44 @@ class MCPClient:
                 args=list(cfg.args or []),
                 env={**os.environ, **(cfg.env or {})},
             )
-            return await stack.enter_async_context(stdio_client(params))
+            return await self._enter_async_gen(stack, stdio_client(params))
         if cfg.transport == "sse":
             if not cfg.url:
                 raise ValueError("sse transport 需要 url")
-            return await stack.enter_async_context(sse_client(cfg.url))
+            # 把握手超时下发给 httpx 传输层：不可达/挂死的端点会以普通异常
+            # 快速失败，而不是一直挂到外层 asyncio.timeout 取消（后者会与
+            # SDK 的 anyio 取消作用域互相干扰，见 _connect_one 注释）。
+            return await self._enter_async_gen(
+                stack, sse_client(cfg.url, timeout=self.connect_timeout)
+            )
         if cfg.transport in ("streamable-http", "http"):
             if not cfg.url:
                 raise ValueError(f"{cfg.transport} transport 需要 url")
-            return await stack.enter_async_context(streamable_http_client(cfg.url))
+            return await self._enter_async_gen(
+                stack, streamable_http_client(cfg.url)
+            )
         raise ValueError(f"未知 transport: {cfg.transport}")
+
+    @staticmethod
+    async def _enter_async_gen(stack: AsyncExitStack, agen) -> Tuple[Any, Any]:
+        """进入 async 生成器上下文；__aenter__ 失败时显式 aclose 兜底。
+
+        mcp SDK 的 stdio_client/sse_client 在 __aenter__ 内部创建 anyio
+        任务组与取消作用域；若 __aenter__ 抛异常（含超时取消），生成器会被
+        contextlib 直接丢弃，内部后台任务与取消作用域随之泄漏——泄漏的取消
+        作用域会取消后续连接（表现为 "Cancelled via cancel scope ..." 崩溃，
+        且同一进程内后续连接全部遭殃）。这里在失败路径上显式关闭生成器。
+        """
+        try:
+            return await stack.enter_async_context(agen)
+        except BaseException:
+            try:
+                import anyio
+                with anyio.CancelScope(shield=True):
+                    await agen.aclose()
+            except BaseException:
+                pass
+            raise
 
     @staticmethod
     def _format_call_result(res: Any) -> str:

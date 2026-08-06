@@ -8,7 +8,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from agent.config import AppConfig, SandboxConfig
+from agent.config import AppConfig, MCPOptions, SandboxConfig
 from agent.core.loop import AgentLoop
 from agent.llm import MockLLM
 
@@ -28,13 +28,19 @@ class DemoLLM(MockLLM):
 
 async def main():
     loop = AgentLoop(
-        config=AppConfig(sandbox=SandboxConfig(workspace="./workspace")),
+        # 演示为脚本化 LLM 驱动，无需连接 MCP 服务器（避免未启动服务的连接噪音）
+        config=AppConfig(sandbox=SandboxConfig(workspace="./workspace"),
+                         mcp=MCPOptions(enabled=False)),
         llm=DemoLLM(),
     )
-    result = await loop.run("演示：执行一条命令")
-    print("阶段:", result.phase.value)
-    print("最终回答:", result.final_answer)
-    print("事件数:", len(result.events))
+    try:
+        result = await loop.run("演示：执行一条命令")
+        print("阶段:", result.phase.value)
+        print("最终回答:", result.final_answer)
+        print("事件数:", len(result.events))
+    finally:
+        # 释放 MCP 子进程与沙箱等资源；不关闭会导致 asyncio.run 收尾挂起
+        await loop.close()
 
 
 if __name__ == "__main__":

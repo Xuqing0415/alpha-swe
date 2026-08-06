@@ -3,6 +3,7 @@
 使用可注入的 FakeMCPClient 离线验证重连与降级逻辑；
 资源缓存用真实 mcp_test_server 验证（含 SDK 实际路径）。
 """
+import asyncio
 import sys
 from pathlib import Path
 
@@ -49,6 +50,25 @@ class FakeMCPClient:
 
     async def call_tool(self, name, arguments):
         return ToolResult(success=True, output="fake-ok")
+
+
+class CancelOnConnectClient(FakeMCPClient):
+    """connect() 抛 CancelledError，模拟 SDK 取消作用域泄漏/超时取消的崩溃路径。"""
+
+    async def connect(self):
+        self.connect_calls += 1
+        raise asyncio.CancelledError("simulated leaked cancel scope")
+
+
+class CancelThenOkClient(FakeMCPClient):
+    """首次连接被取消，重连成功（验证 uncancel 后任务可继续正常 await）。"""
+
+    async def connect(self):
+        self.connect_calls += 1
+        if self.connect_calls == 1:
+            raise asyncio.CancelledError("simulated first-connect cancel")
+        self.connected = True
+        return True
 
 
 def make_fake_manager(dl=None, fail_first=False, always_fail=False, ttl=60.0):
@@ -138,6 +158,40 @@ async def test_resource_cache_expires_by_ttl():
     await mgr.read_resource("test", "mem://r1")
     # 第二次读发生在过期后 -> 重新拉取并重写缓存（条目仍为 1）
     assert mgr.cache_info()["entries"] == 1
+
+
+# ---- SSE 崩溃回归：连接期 CancelledError 必须降级而非泄漏 ----
+@pytest.mark.asyncio
+async def test_connect_cancelled_degrades_not_crash():
+    # config/mcp.yaml 中不可达的 SSE 服务器超时取消时，SDK 可能以
+    # CancelledError（BaseException）上抛；connect_all 必须降级而不是崩溃。
+    mgr = MCPManager(
+        servers=[MCPClientConfig(name="x", transport="stdio", command="x")],
+        connect_timeout=2.0,
+        tool_timeout=5.0,
+        reconnect_attempts=0,
+        client_factory=lambda cfg: CancelOnConnectClient(cfg),
+    )
+    ok = await mgr.connect_all()
+    assert ok == 0
+    assert mgr.failed_servers == ["x"]
+
+
+@pytest.mark.asyncio
+async def test_connect_cancelled_then_retry_succeeds():
+    # uncancel 后任务未被残留取消作用域污染：下一次重连可以正常完成。
+    mgr = MCPManager(
+        servers=[MCPClientConfig(name="x", transport="stdio", command="x")],
+        connect_timeout=2.0,
+        tool_timeout=5.0,
+        reconnect_attempts=2,
+        reconnect_delay=0.0,
+        client_factory=lambda cfg: CancelThenOkClient(cfg),
+    )
+    ok = await mgr.ensure_connected()
+    assert ok == 1
+    assert mgr.failed_servers == []
+    assert list(mgr._clients.values())[0].connect_calls == 2
 
 
 # ---- 6.2b 真实服务器上的缓存（走 mcp SDK 实际路径） ----

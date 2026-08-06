@@ -40,11 +40,14 @@ class MCPManager:
         self._decision = decision_logger
         self._clients: Dict[str, MCPClient] = {
             cfg.name: (client_factory(cfg) if client_factory
-                       else MCPClient(cfg, tool_timeout=tool_timeout))
+                       else MCPClient(cfg, tool_timeout=tool_timeout,
+                                      connect_timeout=connect_timeout))
             for cfg in servers
         }
         self._failed: set[str] = set()
         self._resource_cache: Dict[CacheKey, Tuple[float, str]] = {}
+        # 不支持 resources/list 的服务器（本会话内不再重复请求/告警）
+        self._resource_list_failed: set[str] = set()
 
     @classmethod
     def from_config(cls, mcp_cfg: Optional[MCPConfig] = None,
@@ -74,19 +77,15 @@ class MCPManager:
             return 0
         ok = 0
         for name, client in self._clients.items():
-            try:
-                async with asyncio.timeout(self.connect_timeout):
-                    if await client.connect():
-                        ok += 1
-                        self._failed.discard(name)
-                        self._log("mcp.connect", "mcp.enabled", True,
-                                  f"服务器 {name} 已连接")
-                    else:
-                        self._failed.add(name)
-            except Exception as e:
+            if await self._connect_one(name, client):
+                ok += 1
+                self._failed.discard(name)
+                self._log("mcp.connect", "mcp.enabled", True,
+                          f"服务器 {name} 已连接")
+            else:
                 self._failed.add(name)
                 self._log("mcp.connect_failed", "mcp.enabled", True,
-                          f"服务器 {name} 连接失败: {str(e)[:100]}")
+                          f"服务器 {name} 连接失败/超时")
         return ok
 
     async def retry_connect(self, names: Optional[List[str]] = None) -> int:
@@ -97,19 +96,40 @@ class MCPManager:
             client = self._clients.get(name)
             if client is None or client.connected:
                 continue
-            try:
-                async with asyncio.timeout(self.connect_timeout):
-                    if await client.connect():
-                        ok += 1
-                        self._failed.discard(name)
-                        self._log("mcp.reconnect", "mcp.reconnect_attempts",
-                                  self.reconnect_attempts,
-                                  f"服务器 {name} 重连成功")
-            except Exception as e:
+            if await self._connect_one(name, client):
+                ok += 1
+                self._failed.discard(name)
+                self._log("mcp.reconnect", "mcp.reconnect_attempts",
+                          self.reconnect_attempts,
+                          f"服务器 {name} 重连成功")
+            else:
                 self._log("mcp.reconnect_failed", "mcp.reconnect_attempts",
                           self.reconnect_attempts,
-                          f"服务器 {name} 重连失败: {str(e)[:100]}")
+                          f"服务器 {name} 重连失败/超时")
         return ok
+
+    async def _connect_one(self, name: str, client) -> bool:
+        """连接单个服务器；超时或连接期取消一律降级为失败。
+
+        mcp SDK 的 stdio_client/sse_client 内部使用 anyio 取消作用域：外层
+        asyncio.timeout 触发取消，或 SDK 内部残留的取消作用域取消当前任务时，
+        会以 CancelledError（BaseException，except Exception 捕不到）上抛，
+        一旦泄漏会让整个 asyncio.run 崩溃。这里把连接期间的取消一律视为失败：
+        先 uncancel 消费取消信号，再返回 False 降级，避免残留取消作用域继续
+        取消后续连接。
+        """
+        try:
+            async with asyncio.timeout(self.connect_timeout):
+                return bool(await client.connect())
+        except asyncio.TimeoutError:
+            return False
+        except asyncio.CancelledError:
+            task = asyncio.current_task()
+            if task is not None and task.cancelling() > 0:
+                task.uncancel()
+            return False
+        except Exception:
+            return False
 
     async def ensure_connected(self) -> int:
         """首次连接 + 按配置次数自动重连失败服务器（阶段六 6.1）。"""
@@ -122,14 +142,19 @@ class MCPManager:
         return ok
 
     async def disconnect_all(self) -> None:
-        # close() 同样必须在连接时所在的同一 task 中执行（原因同上）。
-        for client in self._clients.values():
+        # close() 必须在连接时所在的同一 task 中执行，且需按连接顺序的倒序关闭：
+        # 多个客户端的传输/会话会在同一 task 上嵌套 anyio 取消作用域；若先关
+        # 较早连接的客户端，会去退出“非当前最内层”的取消作用域，抛 RuntimeError
+        # 并被吞掉，残留的已取消作用域会取消后续所有 checkpoint（后续连接全部
+        # 秒失败）。倒序关闭保证按 LIFO 弹出，不留残留。
+        for client in reversed(list(self._clients.values())):
             try:
                 await client.close()
             except Exception as e:
                 logger.warning("关闭 MCP 服务器 %s 异常: %s", client.config.name, e)
         self._failed.clear()
         self._resource_cache.clear()
+        self._resource_list_failed.clear()
 
     @property
     def connected(self) -> bool:
@@ -178,14 +203,17 @@ class MCPManager:
     async def list_resources(self) -> List[Dict[str, Any]]:
         out: List[Dict[str, Any]] = []
         for server_name, client in self._clients.items():
-            if not client.connected:
+            if not client.connected or server_name in self._resource_list_failed:
                 continue
             try:
                 for r in await client.list_resources():
                     out.append({"server": server_name, **r})
             except Exception as e:
-                logger.warning("获取 MCP 服务器 %s 的资源列表失败: %s",
-                               server_name, e)
+                # 服务器未实现 resources/list（如 Method not found）：记录一次，
+                # 本会话内跳过，避免每个任务重复请求与告警
+                self._resource_list_failed.add(server_name)
+                logger.warning("获取 MCP 服务器 %s 的资源列表失败"
+                               "（本会话不再重试）: %s", server_name, e)
         return out
 
     async def read_resource(self, server_name: str, uri: str) -> str:
