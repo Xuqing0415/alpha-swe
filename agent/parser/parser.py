@@ -1,0 +1,118 @@
+"""输出解析器 —— JSON 代码块优先，正则回退，Final Answer 单独处理。
+
+对应设计第 5 节：解析失败时生成重试反馈并记录失败上下文。
+"""
+from __future__ import annotations
+
+import json
+import logging
+import re
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger("alpha-swe.parser")
+
+FENCE_JSON = re.compile(r"```(?:json)?\s*([\s\S]*?)```")
+OBJECT_JSON = re.compile(r"\{[\s\S]*\}")
+TOOL_TEXT = re.compile(
+    r"(?:Tool|工具)\s*:\s*(\w+)\s*(?:Input|输入)\s*:\s*([\s\S]+)", re.IGNORECASE
+)
+
+
+@dataclass
+class ParsedAction:
+    """解析后的动作。"""
+    action_type: str  # tool_call | think | final_answer | error
+    tool_name: Optional[str] = None
+    params: Dict[str, Any] = field(default_factory=dict)
+    content: str = ""
+    raw: str = ""
+    error: Optional[str] = None
+
+
+class Parser:
+    def __init__(self, max_retries: int = 3):
+        self.max_retries = max_retries
+        self.failures: List[Dict[str, Any]] = []
+
+    def parse(self, llm_output: str) -> ParsedAction:
+        raw = llm_output.strip()
+        if not raw:
+            return ParsedAction(action_type="error", raw=raw, error="空响应")
+
+        # 文本格式 "Tool: x\nInput: ..." 优先（Input 可能是 JSON 对象）
+        m = TOOL_TEXT.search(raw)
+        if m:
+            return ParsedAction(
+                action_type="tool_call",
+                tool_name=m.group(1).strip(),
+                params=self._guess_params(m.group(2).strip()),
+                raw=raw,
+            )
+
+        # JSON 代码块 / 独立 JSON 对象
+        data = self._extract_json_object(raw)
+        if data is not None:
+            return self._from_object(data, raw)
+
+        # 兜底：正则抓 tool 名
+        m = re.search(r'"tool"\s*:\s*"(\w+)"', raw)
+        if m:
+            return ParsedAction(action_type="tool_call", tool_name=m.group(1), raw=raw)
+
+        return ParsedAction(action_type="final_answer", content=raw, raw=raw)
+
+    def retry_feedback(self, action: ParsedAction, attempt: int) -> str:
+        """生成反馈给 LLM，要求其修正输出格式。"""
+        self.failures.append({"attempt": attempt, "raw": action.raw[:500], "error": action.error})
+        logger.warning("解析失败第 %d 次: %s", attempt, action.error)
+        return (
+            f"你的上一条输出无法解析（错误: {action.error}）。"
+            f"请只输出 JSON 代码块，例如: ```json {{\"tool\": \"terminal_execute\", "
+            f"\"params\": {{\"command\": \"dir\"}}}}``` 或 {{\"final_answer\": \"...\"}}。"
+        )
+
+    # ---- 内部 ----
+    def _extract_json_object(self, text: str) -> Optional[Dict[str, Any]]:
+        m = FENCE_JSON.search(text)
+        if m:
+            try:
+                return json.loads(m.group(1).strip())
+            except json.JSONDecodeError:
+                pass
+        m = OBJECT_JSON.search(text)
+        if m:
+            try:
+                return json.loads(m.group(0))
+            except json.JSONDecodeError:
+                return None
+        return None
+
+    def _from_object(self, data: Dict[str, Any], raw: str) -> ParsedAction:
+        if "tool" in data:
+            params = data.get("params")
+            if not isinstance(params, dict):
+                params = {}
+            return ParsedAction(
+                action_type="tool_call",
+                tool_name=str(data["tool"]),
+                params=params,
+                raw=raw,
+            )
+        if "think" in data:
+            return ParsedAction(action_type="think", content=str(data["think"]), raw=raw)
+        if "final_answer" in data:
+            return ParsedAction(action_type="final_answer", content=str(data["final_answer"]), raw=raw)
+        return ParsedAction(
+            action_type="error",
+            raw=raw,
+            error=f"JSON 中缺少 tool/think/final_answer 字段: {list(data.keys())}",
+        )
+
+    @staticmethod
+    def _guess_params(text: str) -> Dict[str, Any]:
+        try:
+            data = json.loads(text)
+            return data if isinstance(data, dict) else {"input": text}
+        except json.JSONDecodeError:
+            return {"input": text}
