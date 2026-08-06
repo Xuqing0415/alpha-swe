@@ -8,6 +8,7 @@
 ```
 agent/                  新核心架构（本设计的主干）
 ├── core/               异步主循环、Task/TaskDAG、状态机、调度器
+├── decision_logger.py  决策点日志（config_key -> 决策，JSONL）
 ├── planner/            任务拆分（LLM，失败回退单任务）
 ├── prompt/             Jinja2 Prompt 构建（系统提示 + 工具 Schema + 记忆/技能）
 ├── parser/             输出解析（JSON 代码块 / 文本回退 / 重试反馈）
@@ -19,13 +20,17 @@ agent/                  新核心架构（本设计的主干）
 │   └── factory.py      按配置选择后端（auto 自动探测）
 ├── context/            技能/插件激活 + 上下文自动压缩
 ├── sandbox/            路径/命令安全策略（Docker 沙箱预留）
+├── docker_sandbox.py  Docker 容器 spec 生成（SandboxConfig 驱动）
 ├── config.py           Pydantic + YAML 配置
 └── llm.py              模型接口（mock / litellm）
 config/
 ├── agent.yaml          Agent 全局配置
-└── mcp.yaml            MCP 服务器清单
+├── mcp.yaml            MCP 服务器清单
+├── default.yaml       基线配置（可复制为自定义配置）
+└── aggressive.yaml     A/B 对比激进配置（17 项关键参数取反）
+scripts/analyze_decisions.py  决策日志分析：列出已生效/未生效配置项
 examples/quick_demo.py  脚本化 LLM 的端到端演示
-tests/                  新核心测试（66 项）
+tests/                  新核心测试（99 项）
 loop.py, scheduler.py, ... 旧版七层原型（保留，作为对照参考）
 ```
 
@@ -45,6 +50,7 @@ loop.py, scheduler.py, ... 旧版七层原型（保留，作为对照参考）
 | 12 沙箱 | `agent/sandbox/policy.py` | 路径锚定/危险命令拦截；Docker 容器隔离预留 |
 | 13 MCP | `agent/mcp/`（client/manager/tool）+ `config/mcp.yaml` | 已实现（stdio/sse 客户端、握手、工具合并、资源订阅注入 Prompt） |
 | 14 可观测性 | `tui/`（Textual 三栏）+ `AgentLoop.subscribe()` + 终端实时输出回调 | 已实现（思维流/终端流/状态栏/Ctrl+I 中断/Ctrl+P 暂停）；Web 面板与 OTel 导出待接入 |
+| 配置→运行时数据流 | `agent/config.py` + `agent/core/decision_logger.py` + `agent/sandbox/docker_sandbox.py` + `scripts/analyze_decisions.py` | 已实现：YAML→Pydantic→组件工厂→运行时决策点；JSONL 决策日志；default/aggressive A/B 对比测试 |
 
 ## 长期记忆（第 7 节）
 
@@ -72,6 +78,24 @@ python -X utf8 -m pytest tests -q
 # 最小演示：脚本化 LLM 驱动一次完整 ReAct（terminal -> final_answer）
 python -X utf8 examples/quick_demo.py
 ```
+
+## 配置影响验证（配置 → 运行时数据流）
+
+每个配置键在运行时决策点被读取并记录到 `decision_log.jsonl`（可用 `DECISION_LOG_PATH` 覆盖路径）。
+运行对比测试可确认配置是否真实改变 Agent 行为：
+
+```powershell
+# 1) A/B 对比测试（default.yaml vs aggressive.yaml，断言决策日志差异）
+python -X utf8 -m pytest tests/test_config_impact.py -q
+
+# 2) 分析决策日志：列出已生效/未生效的配置项
+python -X utf8 scripts/analyze_decisions.py
+```
+
+决策点覆盖：`llm.provider`（系统提示风格）、`llm.temperature`（解析器宽松度）、
+`sandbox.network_enabled`（容器网络模式 / 网络命令拦截）、`context.max_tokens` 与 `compression_threshold`（压缩触发）、
+`context.compression_method`（summary / vector_retrieval）、`memory.backend`（记忆后端 / 检索跳过）、
+`planner.*`（拆分阈值 / 子任务上限 / 串并行）、`agent.*`（循环上限 / 工具并行 / 确认与自动批准）。
 
 ## 接入真实模型与 MCP
 
