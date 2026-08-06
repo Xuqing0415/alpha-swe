@@ -82,6 +82,7 @@ class AgentLoop:
         confirmation_callback: Optional[Callable[[str, Dict[str, Any]], Any]] = None,
         plugin_manager: Optional[PluginManager] = None,
         skill_library: Optional[SkillLibrary] = None,
+        docker_sandbox: Optional[DockerSandbox] = None,
     ):
         self.config = config or load_config()
         self.state = StateMachine()
@@ -114,6 +115,9 @@ class AgentLoop:
             fake_network_responses=self.config.sandbox.fake_network_responses,
             protected_paths=self.config.sandbox.protected_paths,
         )
+        self.docker = docker_sandbox or DockerSandbox(
+            self.config.sandbox, self._decision,
+        )
         self.tools = tools or self._default_tools()
         self._tool_enabled = getattr(self, "_tool_enabled", None)
         self.planner = planner or Planner(
@@ -144,7 +148,8 @@ class AgentLoop:
             llm=self.llm, enabled=self.config.memory.auto_experience
         )
         self.mcp = mcp_manager or MCPManager.from_config(
-            load_mcp_config(), self.config.mcp
+            load_mcp_config(), self.config.mcp,
+            decision_logger=self._decision,
         )
         self._mcp_connected = False
         self.prompt_builder = prompt_builder or PromptBuilder(
@@ -153,10 +158,15 @@ class AgentLoop:
             decision_logger=self._decision,
         )
         dag = TaskDAG()
+        # Docker 沙箱回滚以容器为单位：强制串行，避免并行任务间回滚互相踩踏
+        max_concurrency = (1 if self.config.sandbox.docker_enabled
+                           else self.config.agent.max_concurrency)
         self.scheduler = scheduler or Scheduler(
-            dag=dag, max_concurrency=self.config.agent.max_concurrency
+            dag=dag, max_concurrency=max_concurrency
         )
-        self.scheduler.set_worker(self._execute_task)
+        worker = (self._docker_task_worker if self.config.sandbox.docker_enabled
+                  else self._execute_task)
+        self.scheduler.set_worker(worker)
         self.scheduler.set_on_task_failed(self._on_task_failed)
         self.plugins = plugin_manager or PluginManager(
             plugins_dir=self.config.plugin.dir,
@@ -176,18 +186,19 @@ class AgentLoop:
 
         # 沙箱工作目录
         os.makedirs(self.config.sandbox.workspace, exist_ok=True)
-        self.docker = DockerSandbox(self.config.sandbox, self._decision)
-
     # ---- 默认工具集 ----
     def _default_tools(self) -> ToolManager:
         manager = ToolManager(policy=self.sandbox)
+        docker = self.docker if self.config.sandbox.docker_enabled else None
         manager.register(TerminalTool(
             resource_monitor=self.config.sandbox.resource_monitor,
             memory_limit_mb=self.config.sandbox.memory_limit_mb,
             poll_interval=self.config.sandbox.poll_interval,
+            docker=docker,
         ))
         manager.register(FileIOTool(
             audit_store=FileAuditStore(self.config.sandbox.audit_dir),
+            docker=docker,
         ))
         raw = self.config.tools.model_dump()
         self._tool_enabled = {name: cfg["enabled"] for name, cfg in raw.items()}
@@ -245,11 +256,24 @@ class AgentLoop:
 
         # MCP 集成：连接服务器 -> 工具合并 -> 资源注入（失败容忍）
         if self.config.mcp.enabled and not self._mcp_connected:
-            connected = await self.mcp.connect_all()
+            connected = await self.mcp.ensure_connected()
             if connected:
                 await self._register_mcp_tools()
                 await self._load_mcp_resources(prompt)
             self._mcp_connected = True
+            self._decision.record(
+                "mcp_servers", "mcp.enabled", True,
+                f"MCP 服务器状态: {self.mcp.status()}；"
+                f"不可用: {self.mcp.failed_servers}",
+            )
+
+        # Docker 沙箱：会话级容器启动（失败自动降级到本地工具）
+        if self.config.sandbox.docker_enabled:
+            await self.docker.start(self.config.sandbox.workspace)
+            self._decision.record(
+                "docker_enabled", "sandbox.docker_enabled", True,
+                f"容器状态: {self.docker.status()}",
+            )
 
         # 启动决策记录：循环上限 / 记忆后端 / 沙箱网络
         self._decision.record(
@@ -346,6 +370,18 @@ class AgentLoop:
             total_rounds=sum(t.round_count for t in plan),
             events=self.events,
         )
+
+    # ---- Docker 任务包装：任务前快照，失败自动回滚（设计 12 节） ----
+    async def _docker_task_worker(self, task: Task) -> None:
+        snapshot = None
+        if self.docker.running:
+            snapshot = await self.docker.snapshot(f"pre-{task.id}")
+        try:
+            await self._execute_task(task)
+        finally:
+            if (snapshot and self.config.sandbox.auto_rollback
+                    and task.status == TaskStatus.FAILED):
+                await self.docker.rollback(snapshot)
 
     # ---- 单任务 ReAct ----
     async def _execute_task(self, task: Task) -> None:
@@ -781,9 +817,11 @@ class AgentLoop:
             logger.warning("MCP 资源加载失败: %s", e)
 
     async def close(self) -> None:
-        """释放 MCP 连接等资源。"""
+        """释放 MCP 连接与 Docker 沙箱等资源。"""
         await self.mcp.disconnect_all()
         self._mcp_connected = False
+        if self.docker.running:
+            await self.docker.stop()
 
     def _collect_final(self, completed: List[Task], failed: List[Task], prompt: str) -> str:
         answers = [t.result for t in completed if isinstance(t.result, str) and t.result]
