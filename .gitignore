@@ -22,3 +22,7 @@ decision_log*.jsonl
 # TypeScript MCP 服务器
 mcp-servers/*/node_modules/
 mcp-servers/*/dist/
+.workbuddy/
+# 向量库持久化目录（vector_db_dir 派生：memory.db -> memory.chroma）
+*.chroma/
+*.qdrant/
