@@ -4,7 +4,7 @@
 """
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from textual.message import Message
 
@@ -42,9 +42,21 @@ class AgentStartedMessage(Message):
         super().__init__()
 
 
+class ConfirmationRequestMessage(Message):
+    """请求用户确认高风险工具调用（阶段八 8.2）。"""
+
+    def __init__(self, tool_name: str, params: Dict[str, Any],
+                 rule: Optional[str] = None) -> None:
+        self.tool_name = tool_name
+        self.params = params
+        self.rule = rule
+        super().__init__()
+
+
 __all__ = [
     "AgentEventMessage",
     "TerminalOutputMessage",
     "AgentFinishedMessage",
     "AgentStartedMessage",
+    "ConfirmationRequestMessage",
 ]

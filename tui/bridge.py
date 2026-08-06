@@ -6,8 +6,9 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from agent.config import AppConfig
 from agent.core.loop import AgentLoop, LoopResult
@@ -17,7 +18,8 @@ from agent.mcp.manager import MCPManager
 from agent.planner.planner import Planner
 
 from tui.messages import (AgentEventMessage, AgentFinishedMessage,
-                          AgentStartedMessage, TerminalOutputMessage)
+                          AgentStartedMessage, ConfirmationRequestMessage,
+                          TerminalOutputMessage)
 
 logger = logging.getLogger("alpha-swe.tui.bridge")
 
@@ -43,6 +45,9 @@ class AgentRunner:
         self.mcp_manager = mcp_manager
         self.loop: Optional[AgentLoop] = None
         self.result: Optional[LoopResult] = None
+        self.approve_rule: Optional[str] = None
+        # 等待 TUI 用户决定的确认请求队列（支持并行工具调用的多次确认）
+        self._confirmation_futures: List[Any] = []
 
     def build_loop(self) -> AgentLoop:
         """构造 AgentLoop（连接输出回调与事件订阅）。"""
@@ -52,6 +57,7 @@ class AgentRunner:
             planner=self.planner,
             mcp_manager=self.mcp_manager,
             output_callback=self._on_terminal_output,
+            confirmation_callback=self._on_confirmation,
         )
         loop.subscribe(self._on_event)
         return loop
@@ -73,6 +79,40 @@ class AgentRunner:
     def _on_terminal_output(self, line: str) -> None:
         self.app.post_message(TerminalOutputMessage(line))
 
+    # ---- 高风险操作确认（阶段八 8.2） ----
+    async def _on_confirmation(self, tool_name: str, params: Dict[str, Any],
+                                rule: Optional[str] = None) -> Any:
+        """请求 TUI 弹窗确认；挂起直到用户选择，返回决定。
+
+        决定取值：True（批准一次）/ False（拒绝）/
+        "approved_all:<rule>"（批准所有同类）/ dict（批准并修改参数）。
+        """
+        if self.approve_rule and self.approve_rule == (rule or tool_name):
+            return "approved_all:" + (rule or tool_name)
+        future: Any = asyncio.get_running_loop().create_future()
+        self._confirmation_futures.append(future)
+        self.app.post_message(
+            ConfirmationRequestMessage(tool_name, params, rule)
+        )
+        try:
+            return await future
+        except asyncio.CancelledError:
+            try:
+                self._confirmation_futures.remove(future)
+            except ValueError:
+                pass
+            return False
+
+    def resolve_confirmation(self, decision: Any) -> None:
+        """App 侧把用户选择写回最早等待的确认请求。"""
+        if not self._confirmation_futures:
+            return
+        future = self._confirmation_futures.pop(0)
+        if isinstance(decision, str) and decision.startswith("approved_all:"):
+            self.approve_rule = decision[len("approved_all:"):]
+        if not future.done():
+            future.set_result(decision)
+
     # ---- 状态查询（供状态栏刷新） ----
     def running_task(self) -> Optional[Task]:
         if self.loop is None:
@@ -91,6 +131,18 @@ class AgentRunner:
         if self.loop is None:
             return 0
         return sum(t.round_count for t in self.loop.scheduler.dag.all())
+
+    def metrics_snapshot(self) -> Dict[str, Any]:
+        """实时指标快照（监控视图渲染用）。"""
+        if self.loop is None:
+            return {}
+        return self.loop.metrics.snapshot()
+
+    def metrics_alerts(self) -> List[str]:
+        """当前告警列表（token 速率 / 连续失败 / 轮次逼近上限）。"""
+        if self.loop is None:
+            return []
+        return self.loop.metrics.alerts(max_rounds=self.loop._max_rounds)
 
 
 __all__ = ["AgentRunner"]
