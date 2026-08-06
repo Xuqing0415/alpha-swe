@@ -7,6 +7,10 @@ agent:
   keep_recent_rounds: 3     # 压缩时保留的最近轮数
   max_concurrency: 1        # 并发子任务数（工具资源允许时提高）
   trace_dir: "./logs/traces"
+  trace_enabled: true
+  session_archive_dir: "./logs/sessions"  # 会话档案（回放用）
+  archive_enabled: true
+  metrics_enabled: true
 
 tools:
   terminal_execute:

@@ -235,7 +235,11 @@ class AgentConfig(BaseModel):
     auto_approve: List[str] = Field(default_factory=lambda: [
         "file_read", "terminal:ls", "terminal:cat",
     ])
-    trace_dir: str = "./logs/traces"
+    trace_dir: str = "./logs/traces"        # OTel 风格 span JSONL 导出目录
+    trace_enabled: bool = True              # 分布式追踪开关
+    session_archive_dir: str = "./logs/sessions"  # 会话档案目录（事件+span+决策+指标）
+    archive_enabled: bool = True            # 会话档案写入开关
+    metrics_enabled: bool = True            # 实时指标注册表开关
 
 
 class MCPClientConfig(BaseModel):

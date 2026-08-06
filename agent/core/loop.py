@@ -12,6 +12,7 @@ import asyncio
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
@@ -25,13 +26,14 @@ from agent.core.state import AgentPhase, StateMachine
 from agent.core.task import Task, TaskDAG, TaskStatus
 from agent.llm import BaseLLM, build_llm
 from agent.mcp.manager import MCPManager
+from agent.observability import MetricsRegistry, SessionArchive, Tracer
 from agent.memory.factory import build_memory
 from agent.memory.store import (MemoryStore, NoopMemoryStore,
                                  classify_task_type, format_experience_text)
 from agent.memory.summarizer import ExperienceSummarizer
 from agent.parser.parser import Parser
 from agent.planner.planner import Planner
-from agent.prompt.builder import PromptBuilder
+from agent.prompt.builder import PromptBuilder, estimate_tokens
 from agent.sandbox.audit import FileAuditStore
 from agent.sandbox.docker_sandbox import DockerSandbox
 from agent.sandbox.policy import SandboxPolicy
@@ -79,7 +81,9 @@ class AgentLoop:
         mcp_manager: Optional[MCPManager] = None,
         output_callback: Optional[Callable[[str], None]] = None,
         decision_logger: Optional[DecisionLogger] = None,
-        confirmation_callback: Optional[Callable[[str, Dict[str, Any]], Any]] = None,
+        confirmation_callback: Optional[
+            Callable[[str, Dict[str, Any], Optional[str]], Any]
+        ] = None,
         plugin_manager: Optional[PluginManager] = None,
         skill_library: Optional[SkillLibrary] = None,
         docker_sandbox: Optional[DockerSandbox] = None,
@@ -98,6 +102,29 @@ class AgentLoop:
         self.confirmation_callback = confirmation_callback
         self._max_rounds = (
             self.config.agent.max_loop_iterations or self.config.agent.max_rounds
+        )
+        # 阶段七：可观测性装配（分布式追踪 / 实时指标 / 会话档案）
+        self.tracer = Tracer(
+            self.config.agent.trace_dir,
+            self.config.agent.trace_enabled,
+            self._decision,
+        )
+        self.metrics = MetricsRegistry(self.config.agent.metrics_enabled)
+        self.archive = SessionArchive(
+            self.config.agent.session_archive_dir,
+            self.config.agent.archive_enabled,
+        )
+        self._approve_rules: set[str] = set()  # “批准所有同类操作”的规则集合
+        self._decision.record(
+            "trace_enabled", "agent.trace_enabled",
+            self.config.agent.trace_enabled,
+            f"分布式追踪: {'开启' if self.config.agent.trace_enabled else '关闭'}",
+        )
+        self._decision.record(
+            "archive_enabled", "agent.archive_enabled",
+            self.config.agent.archive_enabled,
+            f"会话档案: {'开启' if self.config.agent.archive_enabled else '关闭'}"
+            f"（目录 {self.config.agent.session_archive_dir}）",
         )
 
         # 组件装配（缺省即用默认实现，便于测试注入）
@@ -210,7 +237,7 @@ class AgentLoop:
         self._subscribers.append(callback)
 
     def _emit(self, event_type: str, **data: Any) -> None:
-        record = {"type": event_type, "data": data}
+        record = {"type": event_type, "data": data, "ts": time.time()}
         self.events.append(record)
         for callback in list(self._subscribers):
             try:
@@ -235,6 +262,7 @@ class AgentLoop:
     # ---- 中断 ----
     def interrupt(self, prompt: str) -> Task:
         """用户注入高优先级指令：打断当前任务流并重新调度。"""
+        self.metrics.inc("interrupts")
         task = self.scheduler.spawn(instruction=prompt, priority=10)
         self.state.inject_interrupt(prompt, self.cancel_event)
         try:
@@ -253,6 +281,8 @@ class AgentLoop:
     async def run(self, prompt: str) -> LoopResult:
         self.state.transition(AgentPhase.PLANNING)
         self._emit("run_start", prompt=prompt)
+        self.metrics.set("phase", "planning")
+        run_span = self.tracer.start_span("run", "run", prompt=prompt)
 
         # MCP 集成：连接服务器 -> 工具合并 -> 资源注入（失败容忍）
         if self.config.mcp.enabled and not self._mcp_connected:
@@ -354,7 +384,16 @@ class AgentLoop:
             logger.exception("调度循环异常")
             self._emit("run_error", error=str(e))
             self.state.transition(AgentPhase.FAILED)
-            return LoopResult(phase=AgentPhase.FAILED, tasks=plan, events=self.events)
+            self.metrics.set("phase", "failed")
+            self.tracer.end_span(run_span, status="error", error=str(e))
+            self.tracer.export()
+            result = LoopResult(phase=AgentPhase.FAILED, tasks=plan,
+                                events=self.events)
+            self.archive.write(
+                prompt, self.events, self.tracer.snapshot(),
+                self._decision.records(), self.metrics.snapshot(), result,
+            )
+            return result
 
         failed = [t for t in self.scheduler.dag.all() if t.status == TaskStatus.FAILED]
         completed = [t for t in self.scheduler.dag.all() if t.status == TaskStatus.COMPLETED]
@@ -363,13 +402,30 @@ class AgentLoop:
         phase = AgentPhase.COMPLETED if not failed else AgentPhase.FAILED
         self.state.transition(phase)
         self._emit("run_done", phase=phase.value, final_answer=final)
-        return LoopResult(
+        total_rounds = sum(t.round_count for t in plan)
+        self.metrics.set("phase", phase.value)
+        self.metrics.set("rounds", total_rounds)
+        self.metrics.set("tasks_total", len(plan))
+        self.metrics.set("tasks_completed", len(completed))
+        self.metrics.set("tasks_failed", len(failed))
+        self.tracer.end_span(
+            run_span,
+            status="ok" if phase == AgentPhase.COMPLETED else "error",
+            phase=phase.value, total_rounds=total_rounds,
+        )
+        self.tracer.export()
+        result = LoopResult(
             final_answer=final,
             phase=phase,
             tasks=plan,
-            total_rounds=sum(t.round_count for t in plan),
+            total_rounds=total_rounds,
             events=self.events,
         )
+        self.archive.write(
+            prompt, self.events, self.tracer.snapshot(),
+            self._decision.records(), self.metrics.snapshot(), result,
+        )
+        return result
 
     # ---- Docker 任务包装：任务前快照，失败自动回滚（设计 12 节） ----
     async def _docker_task_worker(self, task: Task) -> None:
@@ -388,6 +444,10 @@ class AgentLoop:
         """每个任务的内部 ReAct 循环：Think -> Act -> Observe -> Parse。"""
         task.mark(TaskStatus.RUNNING)
         self._emit("task_start", task_id=task.id, instruction=task.instruction)
+        self.metrics.inc("tasks_started")
+        task_span = self.tracer.start_span(
+            f"task:{task.id}", "task", instruction=task.instruction,
+        )
         self._load_task_memory(task)
         self._load_task_plugins(task)
         parse_failures = 0
@@ -399,6 +459,7 @@ class AgentLoop:
 
                 # 上下文自动压缩（对应设计第 11 节）
                 if self.context.should_compact(task.history):
+                    self.metrics.inc("compressions")
                     summary = self.context.compact(task.history)
                     if summary:
                         task.history.insert(0, {"role": "system", "content": summary})
@@ -406,7 +467,11 @@ class AgentLoop:
                 upstream = self._upstream_tasks(task)
                 messages = self.prompt_builder.build(task, upstream)
 
+                llm_span = self.tracer.start_span("llm", "llm", task_id=task.id)
+                self.metrics.inc("llm_calls")
                 resp = await self.llm.complete(messages)
+                self.metrics.record_token_usage(estimate_tokens(resp))
+                self.tracer.end_span(llm_span, status="ok", chars=len(resp))
                 parsed = self.parser.parse(resp)
                 task.history.append({"role": "assistant", "content": resp})
 
@@ -455,14 +520,21 @@ class AgentLoop:
                 if parsed.action_type == "final_answer":
                     task.mark(TaskStatus.COMPLETED, result=parsed.content)
                     self._emit("task_done", task_id=task.id, ok=True)
+                    self.metrics.inc("tasks_completed")
+                    self.tracer.end_span(task_span, status="ok",
+                                         rounds=task.round_count)
                     await self._remember_experience(task)
                     return
 
                 # 解析失败：反馈重试（最多 max_retries 次）
                 parse_failures += 1
+                self.metrics.inc("retries")
                 if parse_failures >= self.parser.max_retries:
                     task.mark(TaskStatus.FAILED,
                               error=f"输出解析失败 {parse_failures} 次: {parsed.error}")
+                    self.metrics.inc("tasks_failed")
+                    self.tracer.end_span(task_span, status="error",
+                                         error=task.error)
                     self._remember_error(task)
                     return
                 task.history.append({
@@ -471,57 +543,104 @@ class AgentLoop:
                 })
 
             task.mark(TaskStatus.FAILED, error=f"超过最大轮数 {self._max_rounds}")
+            self.metrics.inc("tasks_failed")
+            self.tracer.end_span(task_span, status="error", error=task.error)
             self._remember_error(task)
         except TaskInterrupted:
             task.mark(TaskStatus.READY)  # 中断后回到就绪，等待重新调度
             self._emit("task_interrupted", task_id=task.id)
+            self.metrics.inc("interrupts")
+            self.tracer.end_span(task_span, status="error", error="interrupted")
         except Exception as e:
             logger.exception("任务执行异常: %s", task.id)
             task.mark(TaskStatus.FAILED, error=str(e))
+            self.metrics.inc("tasks_failed")
+            self.tracer.end_span(task_span, status="error", error=str(e))
             self._remember_error(task)
 
     # ---- 工具 ----
     async def _run_tool(self, name: str, params: Dict[str, Any],
                         task: Task) -> ToolResult:
-        """带确认策略执行单个工具（require_confirmation / auto_approve）。"""
-        if self._needs_confirmation(name, params):
-            if not await self._ask_confirmation(name, params):
-                self._decision.record(
-                    "user_rejected", "agent.require_confirmation",
-                    name, f"用户拒绝了 {name}",
-                )
-                return ToolResult(
-                    success=False, error="用户拒绝了工具调用（require_confirmation）",
-                )
-        return await self.tools.execute(
-            name, params,
-            ExecutionContext(
-                workspace=self.config.sandbox.workspace,
-                task_id=task.id,
-                instruction=task.instruction,
-                interrupt_event=self.cancel_event,
-                output_callback=self._output_callback,
-            ),
+        """带确认策略执行单个工具（require_confirmation / auto_approve）。
+
+        确认回调可返回：
+        - True / False：批准一次 / 拒绝；
+        - "approved_all:<rule>"：批准所有同类操作；
+        - dict：批准并携带修改后的参数（阶段八“修改参数后执行”）。
+        """
+        span = self.tracer.start_span(
+            f"tool:{name}", "tool", task_id=task.id,
+            params=self._short_params(params),
         )
+        try:
+            rule = self._needs_confirmation(name, params)
+            if rule is not None:
+                decision = await self._ask_confirmation(name, params, rule)
+                if decision is False:
+                    self._decision.record(
+                        "user_rejected", "agent.require_confirmation",
+                        name, f"用户拒绝了 {name}",
+                    )
+                    result = ToolResult(
+                        success=False,
+                        error="用户拒绝了工具调用（require_confirmation）",
+                    )
+                    self.metrics.record_tool_result(False)
+                    self.tracer.end_span(span, status="error",
+                                         error=result.error, rejected=True)
+                    return result
+                if isinstance(decision, dict):
+                    params = {**params, **decision}
+            result = await self.tools.execute(
+                name, params,
+                ExecutionContext(
+                    workspace=self.config.sandbox.workspace,
+                    task_id=task.id,
+                    instruction=task.instruction,
+                    interrupt_event=self.cancel_event,
+                    output_callback=self._output_callback,
+                ),
+            )
+            self.metrics.record_tool_result(result.success)
+            self.tracer.end_span(
+                span,
+                status="ok" if result.success else "error",
+                error=result.error or "",
+            )
+            return result
+        except Exception:
+            self.metrics.record_tool_result(False)
+            self.tracer.end_span(span, status="error")
+            raise
 
     def _needs_confirmation(self, tool_name: str,
-                            params: Dict[str, Any]) -> bool:
-        """判断是否需要用户确认（规则: 工具名 / terminal:cmd前缀 / file_write 等）。"""
+                            params: Dict[str, Any]) -> Optional[str]:
+        """返回需要确认的匹配规则；None 表示无需确认。
+
+        优先级：已批准的“所有同类”规则 > auto_approve > require_confirmation。
+        """
+        for rule in self._approve_rules:
+            if self._match_rule(rule, tool_name, params):
+                self._decision.record(
+                    "approve_all", "agent.require_confirmation", rule,
+                    f"工具 {tool_name} 命中已批准规则 {rule}，免确认",
+                )
+                return None
         for rule in self.config.agent.auto_approve:
             if self._match_rule(rule, tool_name, params):
                 self._decision.record(
                     "auto_approve", "agent.auto_approve", rule,
                     f"工具 {tool_name} 命中 auto_approve，免确认",
                 )
-                return False
+                return None
         for rule in self.config.agent.require_confirmation:
             if self._match_rule(rule, tool_name, params):
                 self._decision.record(
                     "require_confirmation", "agent.require_confirmation", rule,
                     f"工具 {tool_name} 需要用户确认",
                 )
-                return True
-        return False
+                return rule
+        return None
 
     @staticmethod
     def _match_rule(rule: str, tool_name: str,
@@ -540,14 +659,29 @@ class AgentLoop:
         return False
 
     async def _ask_confirmation(self, tool_name: str,
-                                params: Dict[str, Any]) -> bool:
+                                params: Dict[str, Any],
+                                rule: Optional[str] = None) -> Any:
+        """调用确认回调并解析返回值（True/False/str/dict）。"""
         if self.confirmation_callback is None:
             self._decision.record(
                 "confirmation_bypassed", "agent.require_confirmation",
                 tool_name, "无确认回调，按自动通过处理",
             )
             return True
-        return bool(await self.confirmation_callback(tool_name, params))
+        try:
+            decision = await self.confirmation_callback(tool_name, params, rule)
+        except TypeError:
+            # 兼容旧的两参回调签名
+            decision = await self.confirmation_callback(tool_name, params)
+        if isinstance(decision, str) and decision.startswith("approved_all:"):
+            approve_rule = decision[len("approved_all:"):] or rule or tool_name
+            self._approve_rules.add(approve_rule)
+            self._decision.record(
+                "approve_all", "agent.require_confirmation", approve_rule,
+                f"用户批准所有同类操作: {approve_rule}",
+            )
+            return True
+        return decision
 
     async def _checkpoint(self, task: Task) -> None:
         """yield 控制点：每次 Observe 后检查中断信号。"""
@@ -566,6 +700,12 @@ class AgentLoop:
             self.scheduler.dag.get(dep) for dep in task.dependencies
             if self.scheduler.dag.get(dep) is not None
         ]
+
+    @staticmethod
+    def _short_params(params: Any, limit: int = 200) -> str:
+        """工具参数摘要（避免大段内容进入 span 属性）。"""
+        text = str(params)
+        return text if len(text) <= limit else text[:limit] + f"...({len(text)} chars)"
 
     @staticmethod
     def _summarize_observation(tool_name: str, result) -> str:

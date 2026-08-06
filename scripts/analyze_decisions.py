@@ -36,6 +36,9 @@ EXPECTED_KEYS = [
     "sandbox.docker_enabled", "sandbox.workdir", "sandbox.snapshot_prefix",
     "sandbox.auto_rollback", "sandbox.timeout_seconds",
     "mcp.reconnect_attempts", "mcp.resource_cache_ttl",
+    "agent.trace_enabled", "agent.trace_dir",
+    "agent.session_archive_dir", "agent.archive_enabled",
+    "agent.metrics_enabled",
 ]
 
 
