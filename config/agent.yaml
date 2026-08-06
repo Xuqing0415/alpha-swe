@@ -65,3 +65,17 @@ mcp:
   connect_timeout: 8.0     # 单服务器握手超时
   tool_timeout: 30.0       # 工具调用超时
   max_resources_per_run: 3 # 每次运行最多注入的资源数
+
+# 插件动态注入（对应设计第 10 节）
+plugin:
+  enabled: true
+  dir: "./plugins"              # 插件目录（Markdown + YAML front-matter，热加载）
+  max_active: 5                 # 单次最多激活插件数（按 priority 截断）
+
+# 技能工作流（对应设计第 10.2 节）
+skills:
+  enabled: true
+  dir: "./skills/workflows"     # YAML 技能库目录（热加载）
+  workflow_enabled: true        # 技能命中时展开为子任务 DAG，替代 LLM 规划
+  max_active: 3                 # 单次最多激活技能数
+  allow_fallback: true          # 步骤失败允许按 fallback 回退重试

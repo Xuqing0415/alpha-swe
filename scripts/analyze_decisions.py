@@ -27,6 +27,8 @@ EXPECTED_KEYS = [
     "agent.max_loop_iterations", "agent.parallel_tool_calls",
     "agent.require_confirmation", "agent.auto_approve",
     "active_skills",
+    "plugin.enabled", "plugin.max_active", "active_plugins",
+    "skills.enabled", "skills.workflow_enabled", "skills.allow_fallback",
 ]
 
 

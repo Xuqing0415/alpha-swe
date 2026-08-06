@@ -166,6 +166,22 @@ class ContextConfig(BaseModel):
 
 
 
+class PluginConfig(BaseModel):
+    """插件动态注入配置（对应设计第 10 节：文件类型/关键词/项目依赖触发）。"""
+    enabled: bool = True
+    dir: str = "./plugins"        # 插件目录（Markdown + YAML front-matter，mtime 热加载）
+    max_active: int = 5            # 单次最多激活插件数（按 priority 截断）
+
+
+class SkillConfig(BaseModel):
+    """技能工作流配置（对应设计第 10.2 节：YAML 技能库展开为子任务 DAG）。"""
+    enabled: bool = False  # 默认关闭；由 config/agent.yaml 的 skills.enabled 显式开启
+    dir: str = "./skills/workflows"  # YAML 技能库目录（热加载）
+    workflow_enabled: bool = True  # 技能命中时展开为子任务序列，替代 LLM 规划
+    max_active: int = 3            # 单次最多激活技能数
+    allow_fallback: bool = True    # 步骤失败允许按 fallback 回退重试
+
+
 class MCPOptions(BaseModel):
     """MCP 运行时选项。"""
     enabled: bool = True
@@ -217,6 +233,8 @@ class AppConfig(BaseModel):
     team: TeamConfig = Field(default_factory=TeamConfig)
     planner: PlannerConfig = Field(default_factory=PlannerConfig)
     context: ContextConfig = Field(default_factory=ContextConfig)
+    plugin: PluginConfig = Field(default_factory=PluginConfig)
+    skills: SkillConfig = Field(default_factory=SkillConfig)
     mcp_servers: List[Dict[str, Any]] = Field(default_factory=list)
     active_plugins: List[str] = Field(default_factory=list)
     active_skills: List[str] = Field(default_factory=list)
