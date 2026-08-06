@@ -57,6 +57,7 @@ class TeamResult:
     review_log: List[Dict[str, Any]] = field(default_factory=list)
     messages: List[Dict[str, Any]] = field(default_factory=list)
     blackboard_summary: Dict[str, Any] = field(default_factory=dict)
+    needs_intervention: bool = False  # 评审耗尽/无法仲裁时升级人工介入
 
 
 class TeamPlanner:
@@ -80,7 +81,20 @@ class TeamPlanner:
                 return tasks
         except Exception as e:
             logger.warning("团队规划失败，回退单任务: %s", e)
-        return [Task(id="s0", instruction=prompt, role="coder")]
+        # 回退：按指令分类路由（编码类 -> coder，审查类 -> reviewer，测试类 -> tester）
+        return [Task(id="s0", instruction=prompt, role=self._classify_role(prompt))]
+
+    @staticmethod
+    def _classify_role(instruction: str) -> str:
+        """基于关键词的规则路由：LLM 未给出角色/规划失败时的自动派发回退。"""
+        text = (instruction or "").lower()
+        review_kw = ("审查", "评审", "review", "check", "检查", "审阅", "代码规范", "安全隐患")
+        test_kw = ("测试", "test", "pytest", "jest", "coverage", "跑通")
+        if any(k in text for k in review_kw):
+            return "reviewer"
+        if any(k in text for k in test_kw):
+            return "tester"
+        return "coder"
 
     def _parse(self, raw: str) -> List[Task]:
         m = re.search(r"```(?:json)?\s*(\[[\s\S]*?\])\s*```", raw)
@@ -97,9 +111,9 @@ class TeamPlanner:
             instruction = str(item.get("instruction", "")).strip()
             if not instruction:
                 continue
-            role = str(item.get("role", "coder")).strip()
+            role = str(item.get("role", "")).strip()
             if role not in self.roles:
-                role = "coder"
+                role = self._classify_role(instruction)
             deps = []
             for d in item.get("dependencies", []):
                 try:
@@ -151,6 +165,7 @@ class OrchestratorAgent:
         self._dag: Optional[TaskDAG] = None
         self._retries: Dict[str, int] = {}
         self.review_log: List[ReviewRecord] = []
+        self.needs_intervention = False
 
     # ---- 主入口 ----
     async def run(self, prompt: str) -> TeamResult:
@@ -173,16 +188,27 @@ class OrchestratorAgent:
 
     # ---- 派发 ----
     async def _dispatch(self, task: Task) -> None:
-        role = task.role or "coder"
+        role = task.role or TeamPlanner._classify_role(task.instruction)
         worker = self.workers.get(role)
         if worker is None:
-            task.mark(TaskStatus.FAILED, error=f"未配置角色: {role}")
-            return
+            # 自动路由回退：角色未配置时按指令分类重定向，仍无 Worker 则失败
+            fallback_role = TeamPlanner._classify_role(task.instruction)
+            worker = self.workers.get(fallback_role)
+            if worker is None:
+                task.mark(TaskStatus.FAILED, error=f"未配置角色: {role}")
+                return
+            self.decision_logger.record(
+                "role.routing", "team.roles", role,
+                f"角色 {role} 未配置，按指令分类回退到 {fallback_role}",
+            )
+            role = fallback_role
         if worker.decision_logger is None:
             worker.decision_logger = self.decision_logger
         self.blackboard.post(Message(
             sender="orchestrator", receiver=role, type=MsgType.TASK_ASSIGN,
             payload={"task_id": task.id, "instruction": task.instruction},
+            priority=task.priority,
+            timeout=self.config.team.message_timeout,
         ))
         if role == "reviewer":
             await self._run_reviewer(task, worker)
@@ -229,8 +255,16 @@ class OrchestratorAgent:
             self._spawn_retry_pair(coder, suggestion, root_id=root_id)
             task.mark(TaskStatus.COMPLETED, result=result.output)  # 本轮评审完成
         else:
+            # 仲裁上限耗尽：升级为人工介入（标记 + 决策日志），任务按失败收尾
+            self.needs_intervention = True
+            self.decision_logger.record(
+                "review.exhausted", "team.max_review_retries",
+                self.max_review_retries,
+                f"评审 {retries + 1} 轮未通过（{coder.id if coder else ''}），"
+                f"升级人工介入: {suggestion[:80]}",
+            )
             task.mark(TaskStatus.FAILED,
-                      error=f"评审未通过（{retries + 1} 轮）: {suggestion}")
+                      error=f"评审未通过（{retries + 1} 轮），需人工介入: {suggestion}")
 
     def _spawn_retry_pair(self, coder: Task, suggestion: str, root_id: str = "") -> None:
         assert self._dag is not None
@@ -339,6 +373,7 @@ class OrchestratorAgent:
             review_log=[r.__dict__ for r in self.review_log],
             messages=[m.to_dict() for m in self.blackboard.messages()],
             blackboard_summary=self.blackboard.summary(),
+            needs_intervention=self.needs_intervention,
         )
 
 
