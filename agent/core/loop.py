@@ -346,7 +346,17 @@ class AgentLoop:
         skill = self._build_injected_context(prompt)
         if skill:
             self.prompt_builder.set_skill(skill)
-        memory_hits = self.memory.retrieve(prompt, top_k=self.config.memory.top_k)
+        try:
+            memory_hits = self.memory.retrieve(
+                prompt, top_k=self.config.memory.top_k)
+        except Exception as e:
+            # 记忆检索失败不应影响主流程：降级为无记忆注入
+            logger.warning("长期记忆检索失败，跳过记忆注入: %s", e)
+            self._decision.record(
+                "retrieval_error", "memory.backend", self.config.memory.backend,
+                f"记忆检索失败已降级: {str(e)[:100]}",
+            )
+            memory_hits = []
         if isinstance(self.memory, NoopMemoryStore):
             self._decision.record(
                 "retrieval_skip", "memory.backend", self.config.memory.backend,

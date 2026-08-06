@@ -565,9 +565,58 @@ class ChromaMemoryStore(VectorMemoryStore):
         )
         self._client = chromadb.PersistentClient(
             path=vector_db_dir(db_path, "chroma"))
-        self._collection = self._client.get_or_create_collection(
-            collection, metadata={"hnsw:space": "cosine"}
-        )
+        self._dim = int(getattr(self.embedder, "dim", 0) or 0)
+        self._collection = self._get_or_create_collection(collection)
+
+    def _get_or_create_collection(self, name: str):
+        """获取集合；嵌入维度与当前嵌入器不一致时自动重建。
+
+        Chroma 集合的嵌入维度在创建时固定（由首次写入的向量决定）；当嵌入器配置
+        变化（如 sentence-transformers 384 维 ↔ TF-IDF 8192 维）或回退切换时，
+        旧集合会拒绝写入/查询并抛 InvalidArgumentError（"Collection expecting
+        embedding with dimension of X, got Y"）。这里把当前嵌入器维度写入集合
+        元数据（embed_dim），发现不一致时删除重建，保证后端永远可用。
+        """
+        existing = None
+        try:
+            existing = self._client.get_collection(name)
+        except Exception:
+            existing = None
+        if existing is not None and self._dim:
+            stored = (existing.metadata or {}).get("embed_dim")
+            if stored is not None:
+                mismatch = int(stored) != self._dim
+            elif existing.count() == 0:
+                mismatch = True  # 空集合无数据，直接重建为当前维度
+            else:
+                mismatch = not self._probe_dim(existing)
+            if mismatch:
+                logger.warning(
+                    "集合 %s 嵌入维度与当前嵌入器 %s 不一致，重建集合（原数据被清除）",
+                    name, self._dim,
+                )
+                try:
+                    self._client.delete_collection(name)
+                except Exception as e:
+                    logger.warning("重建集合时删除旧集合失败: %s", e)
+        col = self._client.get_or_create_collection(
+            name, metadata={"hnsw:space": "cosine", "embed_dim": self._dim})
+        try:
+            cur = col.metadata or {}
+            if cur.get("embed_dim") != self._dim:
+                col.modify(metadata={**cur, "embed_dim": self._dim,
+                                     "hnsw:space": "cosine"})
+        except Exception as e:
+            logger.debug("更新集合维度元数据失败: %s", e)
+        return col
+
+    def _probe_dim(self, collection) -> bool:
+        """用 0 向量探测集合期望维度是否与当前嵌入器一致。"""
+        try:
+            collection.query(query_embeddings=[[0.0] * self._dim], n_results=1)
+            return True
+        except Exception:
+            return False
 
     def remember(self, kind: str, text: str, metadata: Optional[Dict[str, Any]] = None) -> None:
         now = datetime.now().isoformat(timespec="seconds")
@@ -600,11 +649,16 @@ class ChromaMemoryStore(VectorMemoryStore):
             where = {"$and": clauses}
         else:
             where = None
-        res = self._collection.query(
-            query_embeddings=[self.embedder.embed([query])[0]],
-            n_results=top_k,
-            where=where,
-        )
+        try:
+            res = self._collection.query(
+                query_embeddings=[self.embedder.embed([query])[0]],
+                n_results=top_k,
+                where=where,
+            )
+        except Exception as e:
+            # 记忆检索失败不应影响 Agent 主流程：降级为空结果
+            logger.warning("chroma 检索失败（降级为空结果）: %s", e)
+            return []
         hits = []
         ids = res.get("ids", [[]])[0]
         docs = res.get("documents", [[]])[0]

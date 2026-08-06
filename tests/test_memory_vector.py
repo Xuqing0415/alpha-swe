@@ -120,6 +120,55 @@ def test_chroma_backend(ws_tmp):
     assert hits and hits[0]["kind"] == "note"
 
 
+@pytest.mark.skipif(importlib.util.find_spec("chromadb") is None,
+                    reason="chromadb 未安装")
+def test_chroma_dimension_mismatch_rebuilds(ws_tmp):
+    """嵌入器维度变化（如 TF-IDF ↔ sentence-transformers）时集合自动重建。"""
+    from agent.memory.embed import TfidfEmbedder
+    from agent.memory.store import ChromaMemoryStore
+
+    db = str(ws_tmp / "chroma_dim")
+    store = ChromaMemoryStore(db_path=db, collection="test_store",
+                              embedder=TfidfEmbedder(max_features=16))
+    store.remember("note", "维度 16 的记忆")
+    store.close()
+
+    # 换用不同维度的嵌入器重开：旧集合 16 维应被自动重建为 64 维
+    store2 = ChromaMemoryStore(db_path=db, collection="test_store",
+                               embedder=TfidfEmbedder(max_features=64))
+    assert int(store2._collection.metadata.get("embed_dim")) == 64
+    store2.remember("note", "维度 64 的记忆")
+    hits = store2.search("维度 64")
+    assert hits and hits[0]["kind"] == "note"
+    store2.close()
+
+
+@pytest.mark.skipif(importlib.util.find_spec("chromadb") is None,
+                    reason="chromadb 未安装")
+def test_chroma_legacy_collection_probe_rebuild(ws_tmp):
+    """旧版本创建的集合（无 embed_dim 元数据）：探针探测维度后重建。"""
+    import chromadb
+
+    from agent.memory.embed import TfidfEmbedder
+    from agent.memory.store import ChromaMemoryStore, vector_db_dir
+
+    db = str(ws_tmp / "chroma_legacy")
+    client = chromadb.PersistentClient(path=vector_db_dir(db, "chroma"))
+    col = client.get_or_create_collection(
+        "test_store", metadata={"hnsw:space": "cosine"})
+    # 模拟旧版本集合：16 维数据、无 embed_dim 元数据
+    col.upsert(ids=["a"], documents=["旧数据"], embeddings=[[0.1] * 16])
+    client.close()
+
+    store = ChromaMemoryStore(db_path=db, collection="test_store",
+                              embedder=TfidfEmbedder(max_features=64))
+    assert int(store._collection.metadata.get("embed_dim")) == 64
+    store.remember("note", "新数据")
+    hits = store.search("新数据")
+    assert hits and hits[0]["kind"] == "note"
+    store.close()
+
+
 @pytest.mark.skipif(importlib.util.find_spec("qdrant_client") is None,
                     reason="qdrant-client 未安装")
 def test_qdrant_backend(ws_tmp):
