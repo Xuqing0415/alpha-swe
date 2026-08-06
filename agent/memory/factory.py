@@ -27,7 +27,10 @@ def build_memory(config: Optional[MemoryConfig] = None) -> MemoryStore:
 
     if backend == "sqlite":
         return SqliteMemoryStore(db_path=config.db_path,
-                                 max_entities=config.max_entities)
+                                 max_entities=config.max_entities,
+                                 decay_days=config.decay_days,
+                                 decay_factor=config.decay_factor,
+                                 counter_example_penalty=config.counter_example_penalty)
 
     if backend == "hybrid":
         return HybridLocalMemoryStore(
@@ -36,13 +39,19 @@ def build_memory(config: Optional[MemoryConfig] = None) -> MemoryStore:
             embedder=build_embedder(config),
             vector_weight=config.hybrid_weight_vector,
             max_code_chars=config.max_code_index_chars,
+            decay_days=config.decay_days,
+            decay_factor=config.decay_factor,
+            counter_example_penalty=config.counter_example_penalty,
         )
 
     if backend == "chroma":
         try:
             return ChromaMemoryStore(db_path=config.db_path,
                                      collection=config.collection,
-                                     embedder=build_embedder(config))
+                                     embedder=build_embedder(config),
+                                     decay_days=config.decay_days,
+                                     decay_factor=config.decay_factor,
+                                     counter_example_penalty=config.counter_example_penalty)
         except Exception as e:
             logger.warning("chroma 后端不可用，回退 hybrid: %s", e)
 
@@ -50,7 +59,10 @@ def build_memory(config: Optional[MemoryConfig] = None) -> MemoryStore:
         try:
             return QdrantMemoryStore(db_path=config.db_path,
                                      collection=config.collection,
-                                     embedder=build_embedder(config))
+                                     embedder=build_embedder(config),
+                                     decay_days=config.decay_days,
+                                     decay_factor=config.decay_factor,
+                                     counter_example_penalty=config.counter_example_penalty)
         except Exception as e:
             logger.warning("qdrant 后端不可用，回退 hybrid: %s", e)
 
@@ -58,7 +70,10 @@ def build_memory(config: Optional[MemoryConfig] = None) -> MemoryStore:
     for ctor, name in ((ChromaMemoryStore, "chroma"), (QdrantMemoryStore, "qdrant")):
         try:
             return ctor(db_path=config.db_path, collection=config.collection,
-                        embedder=build_embedder(config))
+                        embedder=build_embedder(config),
+                        decay_days=config.decay_days,
+                        decay_factor=config.decay_factor,
+                        counter_example_penalty=config.counter_example_penalty)
         except Exception as e:
             logger.info("%s 后端不可用: %s", name, e)
     return HybridLocalMemoryStore(
@@ -67,4 +82,7 @@ def build_memory(config: Optional[MemoryConfig] = None) -> MemoryStore:
         embedder=build_embedder(config),
         vector_weight=config.hybrid_weight_vector,
         max_code_chars=config.max_code_index_chars,
+        decay_days=config.decay_days,
+        decay_factor=config.decay_factor,
+        counter_example_penalty=config.counter_example_penalty,
     )

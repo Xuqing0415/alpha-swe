@@ -60,10 +60,20 @@ class MemoryStore(ABC):
 
     @abstractmethod
     def close(self) -> None:
-        try:
-            self._client.close()
-        except Exception as e:
-            logger.warning("qdrant 客户端关闭失败: %s", e)
+        """释放后端资源。"""
+
+    @property
+    def disabled(self) -> bool:
+        """记忆是否被禁用（Noop 后端返回 True）。"""
+        return False
+
+    def find_similar(self, text: str, top_k: int = 1,
+                     kinds: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        """查找与 text 最相似的已有记忆（写入前去重用）；默认后端不支持。"""
+        return []
+
+    def bump(self, memory_id: Any) -> None:
+        """记忆被引用/去重命中时更新使用计数与时间；默认不记录。"""
 
     # ---- 便捷写入（子类复用 remember 即可） ----
     def index_code(self, path: str, content: str, symbols: Optional[List[str]] = None,
@@ -83,13 +93,14 @@ class MemoryStore(ABC):
 
     def remember_experience(self, summary: Dict[str, Any]) -> None:
         """经验摘要写入（problem / steps / solution / outcome / key_files）。"""
-        text = (
-            f"任务: {summary.get('problem', '')}\n"
-            f"步骤: {'; '.join(str(s) for s in summary.get('steps', [])[:10])}\n"
-            f"解决: {summary.get('solution', '')}\n"
-            f"结果: {summary.get('outcome', '')}"
-        )
-        meta = {"key_files": summary.get("key_files", [])}
+        text = format_experience_text(summary)
+        meta: Dict[str, Any] = {
+            "key_files": summary.get("key_files", []),
+            "task_type": summary.get("task_type") or classify_task_type(
+                summary.get("problem", "")),
+            "outcome": summary.get("outcome", "success"),
+            "negative": False,
+        }
         self.remember("experience", text, meta)
 
     def remember_error(self, error_type: str, stack: str,
@@ -101,7 +112,9 @@ class MemoryStore(ABC):
             f"上下文: {stack}\n"
             f"解决: {solution or '（未解决）'}"
         )
-        self.remember("error", text, metadata or {})
+        meta: Dict[str, Any] = dict(metadata or {})
+        meta.setdefault("negative", True)  # 错误记忆作为反例，检索时降权
+        self.remember("error", text, meta)
 
     def format_context(self, hits: List[Dict[str, Any]]) -> str:
         """把检索结果格式化为注入 Prompt 的文本块。"""
@@ -136,6 +149,10 @@ class NoopMemoryStore(MemoryStore):
                metadata_filter: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         return []
 
+    def find_similar(self, text: str, top_k: int = 1,
+                     kinds: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        return []
+
     def close(self) -> None:
         pass
 
@@ -147,9 +164,17 @@ class NoopMemoryStore(MemoryStore):
 class SqliteMemoryStore(MemoryStore):
     """SQLite 关键词检索（零依赖，兼容旧实现）。"""
 
-    def __init__(self, db_path: str = "memory.db", max_entities: int = 1000):
+    def __init__(self, db_path: str = "memory.db", max_entities: int = 1000,
+                 decay_days: Optional[float] = None,
+                 decay_factor: Optional[float] = None,
+                 counter_example_penalty: Optional[float] = None):
         self.db_path = db_path
         self.max_entities = max_entities
+        self.decay_days = decay_days if decay_days is not None else 30.0
+        self.decay_factor = decay_factor if decay_factor is not None else 0.1
+        self.counter_example_penalty = (
+            counter_example_penalty if counter_example_penalty is not None else 0.3
+        )
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.execute("""
             CREATE TABLE IF NOT EXISTS memories (
@@ -157,15 +182,19 @@ class SqliteMemoryStore(MemoryStore):
                 kind TEXT NOT NULL,
                 text TEXT NOT NULL,
                 metadata TEXT DEFAULT '{}',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                use_count INTEGER DEFAULT 0,
+                last_used_at TEXT
             )
         """)
+        _ensure_columns(self._conn)
         self._conn.commit()
 
     def remember(self, kind: str, text: str, metadata: Optional[Dict[str, Any]] = None) -> None:
+        now = datetime.now().isoformat(timespec="seconds")
         self._conn.execute(
-            "INSERT INTO memories (kind, text, metadata) VALUES (?, ?, ?)",
-            (kind, text, json.dumps(metadata or {}, ensure_ascii=False)),
+            "INSERT INTO memories (kind, text, metadata, last_used_at) VALUES (?, ?, ?, ?)",
+            (kind, text, json.dumps(metadata or {}, ensure_ascii=False), now),
         )
         self._trim()
         self._conn.commit()
@@ -178,20 +207,65 @@ class SqliteMemoryStore(MemoryStore):
                metadata_filter: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         terms = [t for t in re.split(r"\W+", query.lower()) if len(t) > 1]
         rows = self._conn.execute(
-            "SELECT kind, text, metadata, created_at FROM memories ORDER BY id DESC"
+            "SELECT id, kind, text, metadata, created_at, use_count, last_used_at "
+            "FROM memories ORDER BY id DESC"
         ).fetchall()
         scored = []
-        for kind, text, metadata, created in rows:
+        for rid, kind, text, metadata, created, use_count, last_used in rows:
             if kinds is not None and kind not in kinds:
                 continue
             if metadata_filter and not _metadata_matches(metadata, metadata_filter):
                 continue
-            score = sum(1 for t in terms if t in text.lower())
+            raw = sum(1 for t in terms if t in text.lower())
+            if terms and raw == 0:
+                continue
+            meta = _parse_meta(metadata)
+            adjusted = _decay_score(
+                raw, use_count, last_used, created,
+                decay_days=self.decay_days,
+                decay_factor=self.decay_factor,
+                counter_example_penalty=self.counter_example_penalty,
+                negative=bool(meta.get("negative")),
+            )
+            if adjusted <= 0:
+                continue
+            is_neg = 0 if not bool(meta.get("negative")) else 1
+            scored.append((is_neg, -adjusted, rid,
+                           _hit(kind, text, metadata, created, adjusted)))
+        scored.sort()
+        top = scored[:top_k]
+        for _neg, _adj, rid, _h in top:
+            self.bump(rid)
+        return [h for _neg, _adj, _, h in top]
+
+    def find_similar(self, text: str, top_k: int = 1,
+                     kinds: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        terms = [t for t in re.split(r"\W+", text.lower()) if len(t) > 1]
+        rows = self._conn.execute(
+            "SELECT id, kind, text, metadata, created_at FROM memories ORDER BY id DESC"
+        ).fetchall()
+        scored = []
+        for rid, kind, rtext, metadata, created in rows:
+            if kinds is not None and kind not in kinds:
+                continue
+            score = sum(1 for t in terms if t in rtext.lower())
             if terms and score == 0:
                 continue
-            scored.append((score, _hit(kind, text, metadata, created)))
+            scored.append((score, rid, _hit(kind, rtext, metadata, created, score)))
         scored.sort(key=lambda x: -x[0])
-        return [item for _, item in scored[:top_k]]
+        return [dict(h, id=rid) for _, rid, h in scored[:top_k]]
+
+    def bump(self, memory_id: int) -> None:
+        try:
+            now = datetime.now().isoformat(timespec="seconds")
+            self._conn.execute(
+                "UPDATE memories SET use_count = use_count + 1, last_used_at = ? "
+                "WHERE id = ?",
+                (now, memory_id),
+            )
+            self._conn.commit()
+        except sqlite3.Error as e:
+            logger.warning("记忆引用计数更新失败: %s", e)
 
     def close(self) -> None:
         self._conn.close()
@@ -223,12 +297,20 @@ class HybridLocalMemoryStore(VectorMemoryStore):
     def __init__(self, db_path: str = "memory.db", max_entities: int = 1000,
                  embedder: Optional[Embedder] = None,
                  vector_weight: float = 0.6,
-                 max_code_chars: int = 2000):
+                 max_code_chars: int = 2000,
+                 decay_days: Optional[float] = None,
+                 decay_factor: Optional[float] = None,
+                 counter_example_penalty: Optional[float] = None):
         super().__init__(embedder)
         self.db_path = db_path
         self.max_entities = max_entities
         self.vector_weight = max(0.0, min(1.0, vector_weight))
         self.max_code_chars = max_code_chars
+        self.decay_days = decay_days if decay_days is not None else 30.0
+        self.decay_factor = decay_factor if decay_factor is not None else 0.1
+        self.counter_example_penalty = (
+            counter_example_penalty if counter_example_penalty is not None else 0.3
+        )
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.execute("""
             CREATE TABLE IF NOT EXISTS memories (
@@ -236,12 +318,17 @@ class HybridLocalMemoryStore(VectorMemoryStore):
                 kind TEXT NOT NULL,
                 text TEXT NOT NULL,
                 metadata TEXT DEFAULT '{}',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                use_count INTEGER DEFAULT 0,
+                last_used_at TEXT
             )
         """)
+        _ensure_columns(self._conn)
         self._conn.commit()
         self._ids: List[int] = []
         self._texts: List[str] = []
+        self._use_counts: List[int] = []
+        self._last_used: List[Optional[str]] = []
         self._vectors: Optional[np.ndarray] = None
         self._dirty = False
         self._load()
@@ -249,10 +336,12 @@ class HybridLocalMemoryStore(VectorMemoryStore):
     # ---- 内部 ----
     def _load(self) -> None:
         rows = self._conn.execute(
-            "SELECT id, text FROM memories ORDER BY id"
+            "SELECT id, text, use_count, last_used_at FROM memories ORDER BY id"
         ).fetchall()
         self._ids = [r[0] for r in rows]
         self._texts = [r[1] for r in rows]
+        self._use_counts = [r[2] or 0 for r in rows]
+        self._last_used = [r[3] for r in rows]
         self._dirty = True
 
     def _ensure_vectors(self) -> None:
@@ -271,15 +360,18 @@ class HybridLocalMemoryStore(VectorMemoryStore):
 
     # ---- 写入 ----
     def remember(self, kind: str, text: str, metadata: Optional[Dict[str, Any]] = None) -> None:
+        now = datetime.now().isoformat(timespec="seconds")
         self._conn.execute(
-            "INSERT INTO memories (kind, text, metadata) VALUES (?, ?, ?)",
-            (kind, text, json.dumps(metadata or {}, ensure_ascii=False)),
+            "INSERT INTO memories (kind, text, metadata, last_used_at) VALUES (?, ?, ?, ?)",
+            (kind, text, json.dumps(metadata or {}, ensure_ascii=False), now),
         )
         self._trim()
         self._conn.commit()
         row_id = self._conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         self._ids.append(row_id)
         self._texts.append(text)
+        self._use_counts.append(0)
+        self._last_used.append(now)
         self._dirty = True
 
     def index_code(self, path: str, content: str, symbols=None,
@@ -295,7 +387,8 @@ class HybridLocalMemoryStore(VectorMemoryStore):
                kinds: Optional[List[str]] = None,
                metadata_filter: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         rows = self._conn.execute(
-            "SELECT id, kind, text, metadata, created_at FROM memories ORDER BY id DESC"
+            "SELECT id, kind, text, metadata, created_at, use_count, last_used_at "
+            "FROM memories ORDER BY id DESC"
         ).fetchall()
         rows = [
             r for r in rows
@@ -319,19 +412,91 @@ class HybridLocalMemoryStore(VectorMemoryStore):
                 logger.debug("查询向量化失败: %s", e)
 
         scored = []
-        for rid, kind, text, metadata, created in rows:
+        for rid, kind, text, metadata, created, use_count, last_used in rows:
             vec_score = 0.0
             idx = id_index.get(rid)
             if query_vec is not None and idx is not None:
                 row_vec = self._vectors[idx]
                 vec_score = float(np.dot(row_vec, query_vec))
             kw_score = _keyword_score(text, terms)
+            raw = self.vector_weight * vec_score + (1 - self.vector_weight) * kw_score
+            if raw <= 0:
+                continue
+            meta = _parse_meta(metadata)
+            adjusted = _decay_score(
+                raw, use_count, last_used, created,
+                decay_days=self.decay_days,
+                decay_factor=self.decay_factor,
+                counter_example_penalty=self.counter_example_penalty,
+                negative=bool(meta.get("negative")),
+            )
+            if adjusted <= 0:
+                continue
+            is_neg = 0 if not bool(meta.get("negative")) else 1
+            scored.append((is_neg, -adjusted, rid,
+                           _hit(kind, text, metadata, created, adjusted)))
+        scored.sort()
+        top = scored[:top_k]
+        for _neg, _adj, rid, _h in top:
+            self.bump(rid)
+        return [h for _neg, _adj, _, h in top]
+
+    def find_similar(self, text: str, top_k: int = 1,
+                     kinds: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        """写入前去重：返回与 text 最相似的已有记忆（不做衰减与引用计数）。"""
+        rows = self._conn.execute(
+            "SELECT id, kind, text, metadata, created_at, use_count, last_used_at "
+            "FROM memories ORDER BY id DESC"
+        ).fetchall()
+        if kinds is not None:
+            rows = [r for r in rows if r[1] in kinds]
+        if not rows:
+            return []
+        self._ensure_vectors()
+        terms = [t for t in re.split(r"\W+", text.lower()) if len(t) > 1]
+        id_index = {iid: i for i, iid in enumerate(self._ids)}
+        query_vec: Optional[np.ndarray] = None
+        if self._vectors is not None and self._vectors.shape[0] > 0:
+            try:
+                qv = np.asarray(self.embedder.embed([text]), dtype=np.float64)[0]
+                if qv.ndim == 1 and qv.size == self._vectors.shape[1]:
+                    query_vec = qv
+            except Exception as e:
+                logger.debug("去重查询向量化失败: %s", e)
+        scored = []
+        for rid, kind, rtext, metadata, created, _uc, _lu in rows:
+            vec_score = 0.0
+            idx = id_index.get(rid)
+            if query_vec is not None and idx is not None:
+                row_vec = self._vectors[idx]
+                vec_score = float(np.dot(row_vec, query_vec))
+            kw_score = _keyword_score(rtext, terms)
             score = self.vector_weight * vec_score + (1 - self.vector_weight) * kw_score
             if score <= 0:
                 continue
-            scored.append((score, _hit(kind, text, metadata, created, score)))
+            scored.append((score, rid, _hit(kind, rtext, metadata, created, score)))
         scored.sort(key=lambda x: -x[0])
-        return [item for _, item in scored[:top_k]]
+        return [dict(h, id=rid) for _, rid, h in scored[:top_k]]
+
+    def bump(self, memory_id: int) -> None:
+        """引用/去重命中：use_count+1 并刷新 last_used_at。"""
+        try:
+            now = datetime.now().isoformat(timespec="seconds")
+            self._conn.execute(
+                "UPDATE memories SET use_count = use_count + 1, last_used_at = ? "
+                "WHERE id = ?",
+                (now, memory_id),
+            )
+            self._conn.commit()
+        except sqlite3.Error as e:
+            logger.warning("记忆引用计数更新失败: %s", e)
+            return
+        try:
+            idx = self._ids.index(memory_id)
+            self._use_counts[idx] += 1
+            self._last_used[idx] = now
+        except ValueError:
+            pass
 
     def close(self) -> None:
         self._conn.close()
@@ -356,20 +521,32 @@ class ChromaMemoryStore(VectorMemoryStore):
 
     def __init__(self, db_path: str = "memory.db",
                  collection: str = "alpha_swe_memories",
-                 embedder: Optional[Embedder] = None):
+                 embedder: Optional[Embedder] = None,
+                 decay_days: Optional[float] = None,
+                 decay_factor: Optional[float] = None,
+                 counter_example_penalty: Optional[float] = None):
         try:
             import chromadb
         except ImportError as e:
             raise RuntimeError("chroma 后端需要安装 chromadb") from e
         super().__init__(embedder or TfidfEmbedder())
+        self.decay_days = decay_days if decay_days is not None else 30.0
+        self.decay_factor = decay_factor if decay_factor is not None else 0.1
+        self.counter_example_penalty = (
+            counter_example_penalty if counter_example_penalty is not None else 0.3
+        )
         self._client = chromadb.PersistentClient(path=db_path)
         self._collection = self._client.get_or_create_collection(
             collection, metadata={"hnsw:space": "cosine"}
         )
 
     def remember(self, kind: str, text: str, metadata: Optional[Dict[str, Any]] = None) -> None:
+        now = datetime.now().isoformat(timespec="seconds")
         meta = dict(metadata or {})
         meta["kind"] = kind
+        meta.setdefault("use_count", 0)
+        meta.setdefault("created_at", now)
+        meta["last_used_at"] = now
         self._collection.upsert(
             ids=[uuid.uuid4().hex],
             documents=[text],
@@ -398,12 +575,69 @@ class ChromaMemoryStore(VectorMemoryStore):
         docs = res.get("documents", [[]])[0]
         metas = res.get("metadatas", [[]])[0]
         dists = res.get("distances", [[]])[0]
+        adjusted = []
         for i, doc_id in enumerate(ids):
             meta = dict(metas[i] or {}) if i < len(metas) else {}
             kind = meta.pop("kind", "note")
-            score = 1.0 - dists[i] if i < len(dists) else 0.0  # cosine -> 相似度
-            hits.append(_hit(kind, docs[i], meta, "", score))
+            created = str(meta.pop("created_at", "") or "")
+            last_used = str(meta.pop("last_used_at", "") or "")
+            use_count = int(meta.get("use_count") or 0)
+            raw = 1.0 - dists[i] if i < len(dists) else 0.0  # cosine -> 相似度
+            adjusted_score = _decay_score(
+                raw, use_count, last_used, created,
+                decay_days=self.decay_days,
+                decay_factor=self.decay_factor,
+                counter_example_penalty=self.counter_example_penalty,
+                negative=bool(meta.get("negative")),
+            )
+            hit = _hit(kind, docs[i], dict(meta), created, adjusted_score)
+            hit["id"] = doc_id
+            is_neg = 0 if not bool(meta.get("negative")) else 1
+            adjusted.append((is_neg, -adjusted_score, hit))
+        adjusted.sort()
+        hits = [h for _neg, _adj, h in adjusted]
+        for h in hits:
+            self.bump(h.get("id"))
         return hits
+
+    def find_similar(self, text: str, top_k: int = 1,
+                     kinds: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        where = None
+        if kinds:
+            where = {"kind": {"$in": kinds}}
+        try:
+            res = self._collection.query(
+                query_embeddings=[self.embedder.embed([text])[0]],
+                n_results=top_k,
+                where=where,
+            )
+        except Exception as e:
+            logger.warning("chroma find_similar 失败: %s", e)
+            return []
+        ids = res.get("ids", [[]])[0]
+        docs = res.get("documents", [[]])[0]
+        metas = res.get("metadatas", [[]])[0]
+        dists = res.get("distances", [[]])[0]
+        hits = []
+        for i, doc_id in enumerate(ids):
+            meta = dict(metas[i] or {}) if i < len(metas) else {}
+            kind = meta.pop("kind", "note")
+            created = str(meta.pop("created_at", "") or "")
+            score = 1.0 - dists[i] if i < len(dists) else 0.0
+            hits.append(dict(_hit(kind, docs[i], meta, created, score), id=doc_id))
+        return hits
+
+    def bump(self, memory_id: Any) -> None:
+        """引用/去重命中：use_count+1 并刷新 last_used_at。"""
+        try:
+            got = self._collection.get(ids=[memory_id])
+            metas = (got.get("metadatas") or [None] * 1) or [None]
+            meta = dict(metas[0] or {})
+            meta["use_count"] = int(meta.get("use_count") or 0) + 1
+            meta["last_used_at"] = datetime.now().isoformat(timespec="seconds")
+            self._collection.update(ids=[memory_id], metadatas=[meta])
+        except Exception as e:
+            logger.warning("chroma bump 失败: %s", e)
 
     def close(self) -> None:
         pass  # chromadb PersistentClient 无需显式关闭
@@ -414,7 +648,10 @@ class QdrantMemoryStore(VectorMemoryStore):
 
     def __init__(self, db_path: str = "memory.db",
                  collection: str = "alpha_swe_memories",
-                 embedder: Optional[Embedder] = None):
+                 embedder: Optional[Embedder] = None,
+                 decay_days: Optional[float] = None,
+                 decay_factor: Optional[float] = None,
+                 counter_example_penalty: Optional[float] = None):
         try:
             from qdrant_client import QdrantClient
             from qdrant_client.models import (Distance, PointStruct,
@@ -422,6 +659,11 @@ class QdrantMemoryStore(VectorMemoryStore):
         except ImportError as e:
             raise RuntimeError("qdrant 后端需要安装 qdrant-client") from e
         super().__init__(embedder or TfidfEmbedder())
+        self.decay_days = decay_days if decay_days is not None else 30.0
+        self.decay_factor = decay_factor if decay_factor is not None else 0.1
+        self.counter_example_penalty = (
+            counter_example_penalty if counter_example_penalty is not None else 0.3
+        )
         self._client = QdrantClient(path=db_path)  # 本地模式
         self._collection = collection
         self._PointStruct = PointStruct
@@ -435,8 +677,12 @@ class QdrantMemoryStore(VectorMemoryStore):
             )
 
     def remember(self, kind: str, text: str, metadata: Optional[Dict[str, Any]] = None) -> None:
+        now = datetime.now().isoformat(timespec="seconds")
         meta = dict(metadata or {})
         meta["kind"] = kind
+        meta.setdefault("use_count", 0)
+        meta.setdefault("created_at", now)
+        meta["last_used_at"] = now
         self._client.upsert(
             collection_name=self._collection,
             points=[self._PointStruct(
@@ -477,13 +723,82 @@ class QdrantMemoryStore(VectorMemoryStore):
                 query_filter=Filter(must=must) if must else None,
             )
             points = res
+        adjusted = []
+        for point in points:
+            payload = dict(point.payload or {})
+            text = payload.pop("text", "")
+            kind = payload.pop("kind", "note")
+            created = str(payload.pop("created_at", "") or "")
+            last_used = str(payload.pop("last_used_at", "") or "")
+            use_count = int(payload.get("use_count") or 0)
+            adjusted_score = _decay_score(
+                float(point.score), use_count, last_used, created,
+                decay_days=self.decay_days,
+                decay_factor=self.decay_factor,
+                counter_example_penalty=self.counter_example_penalty,
+                negative=bool(payload.get("negative")),
+            )
+            hit = _hit(kind, text, dict(payload), created, adjusted_score)
+            hit["id"] = point.id
+            is_neg = 0 if not bool(payload.get("negative")) else 1
+            adjusted.append((is_neg, -adjusted_score, hit))
+        adjusted.sort()
+        hits = [h for _neg, _adj, h in adjusted]
+        for h in hits:
+            self.bump(h.get("id"))
+        return hits
+
+    def find_similar(self, text: str, top_k: int = 1,
+                     kinds: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        from qdrant_client.models import (FieldCondition, Filter,
+                                          MatchAny)
+        query_vector = self.embedder.embed([text])[0]
+        f = Filter(must=[FieldCondition(key="kind", match=MatchAny(any=kinds))]) if kinds else None
+        try:
+            if hasattr(self._client, "query_points"):
+                res = self._client.query_points(
+                    collection_name=self._collection,
+                    query=query_vector, limit=top_k, query_filter=f,
+                )
+                points = res.points
+            else:
+                res = self._client.search(
+                    collection_name=self._collection,
+                    query_vector=query_vector, limit=top_k, query_filter=f,
+                )
+                points = res
+        except Exception as e:
+            logger.warning("qdrant find_similar 失败: %s", e)
+            return []
         hits = []
         for point in points:
             payload = dict(point.payload or {})
             text = payload.pop("text", "")
             kind = payload.pop("kind", "note")
-            hits.append(_hit(kind, text, payload, "", float(point.score)))
+            created = str(payload.pop("created_at", "") or "")
+            hits.append(dict(_hit(kind, text, payload, created, float(point.score)),
+                             id=point.id))
         return hits
+
+    def bump(self, memory_id: Any) -> None:
+        """引用/去重命中：use_count+1 并刷新 last_used_at。"""
+        try:
+            got = self._client.retrieve(
+                collection_name=self._collection,
+                ids=[memory_id], with_payload=True,
+            )
+            if not got:
+                return
+            payload = dict(got[0].payload or {})
+            payload["use_count"] = int(payload.get("use_count") or 0) + 1
+            payload["last_used_at"] = datetime.now().isoformat(timespec="seconds")
+            self._client.set_payload(
+                collection_name=self._collection,
+                payload=payload,
+                points=[memory_id],
+            )
+        except Exception as e:
+            logger.warning("qdrant bump 失败: %s", e)
 
     def close(self) -> None:
         try:
@@ -510,6 +825,19 @@ def _hit(kind: str, text: str, metadata: Any, created_at: str,
     }
 
 
+def _parse_meta(raw_metadata: Any) -> Dict[str, Any]:
+    """把 metadata（str 或 dict）规范化为 dict。"""
+    if isinstance(raw_metadata, dict):
+        return raw_metadata
+    if isinstance(raw_metadata, str):
+        try:
+            data = json.loads(raw_metadata or "{}")
+            return data if isinstance(data, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
 def _metadata_matches(raw_metadata: Any, wanted: Dict[str, Any]) -> bool:
     meta = raw_metadata
     if isinstance(raw_metadata, str):
@@ -530,3 +858,67 @@ def _keyword_score(text: str, terms: List[str]) -> float:
     lowered = text.lower()
     hits = sum(1 for t in terms if t in lowered)
     return hits / len(terms)
+
+def format_experience_text(summary: Dict[str, Any]) -> str:
+    """经验摘要的标准文本形式（与 remember_experience 写入内容一致）。"""
+    return (
+        f"任务: {summary.get('problem', '')}\n"
+        f"步骤: {'; '.join(str(x) for x in summary.get('steps', [])[:10])}\n"
+        f"解决: {summary.get('solution', '')}\n"
+        f"结果: {summary.get('outcome', '')}"
+    )
+
+
+def classify_task_type(instruction: str) -> str:
+    """从任务指令推断任务类型（fix / add / refactor / test / general）。"""
+    text = str(instruction or "").lower()
+    fix_kw = ["fix", "bug", "错误", "修复", "失败", "broken", "crash", "异常", "报错", "出错"]
+    add_kw = ["add", "feature", "功能", "实现", "新增", "create", "添加", "端点", "endpoint", "接口"]
+    refactor_kw = ["refactor", "重构", "优化", "clean", "整理", "重写", "rewrite"]
+    test_kw = ["test", "测试", "用例", "pytest", "unit"]
+    if any(k in text for k in fix_kw):
+        return "fix"
+    if any(k in text for k in add_kw):
+        return "add"
+    if any(k in text for k in refactor_kw):
+        return "refactor"
+    if any(k in text for k in test_kw):
+        return "test"
+    return "general"
+
+
+def _ensure_columns(conn, table: str = "memories") -> None:
+    """兼容旧库：确保 use_count / last_used_at 列存在。"""
+    cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if "use_count" not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN use_count INTEGER DEFAULT 0")
+    if "last_used_at" not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN last_used_at TEXT")
+
+
+def _parse_dt(value) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except (ValueError, TypeError):
+        return None
+
+
+def _decay_score(score: float, use_count: int, last_used_at: Optional[str],
+                 created_at: Optional[str], decay_days: float = 30.0,
+                 decay_factor: float = 0.1,
+                 counter_example_penalty: float = 0.3,
+                 negative: bool = False) -> float:
+    """记忆可信度：引用越多越可信；长期未引用则衰减；反例降权。"""
+    out = float(score)
+    out *= 1.0 + 0.1 * min(int(use_count or 0), 5)  # 引用加成（最多 +50%）
+    now = datetime.now()
+    used = _parse_dt(last_used_at) or _parse_dt(created_at) or now
+    days = max(0.0, (now - used).total_seconds() / 86400.0)
+    if decay_days > 0 and days > decay_days:
+        periods = (days - decay_days) / decay_days
+        out *= decay_factor ** periods
+    if negative:
+        out *= 1.0 - counter_example_penalty
+    return out
