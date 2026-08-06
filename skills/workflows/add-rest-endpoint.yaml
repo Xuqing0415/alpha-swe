@@ -1,0 +1,29 @@
+# 技能：添加 REST 端点（示例工作流，对应设计第 10.2 节）
+# 展开为：route -> validation -> controller -> tests -> run-tests
+name: add-rest-endpoint
+version: "1.0.0"
+description: 添加一个 REST API 端点（路由 -> 校验 -> 控制器 -> 测试 -> 运行测试）
+priority: 8
+triggers:
+  keywords: [rest, api, 端点, endpoint, 路由, 接口]
+  file_ext: [.py, .ts, .js]
+  project_dep: [express, flask, fastapi, django, koa]
+steps:
+  - name: route
+    instruction: 定义 REST 端点路由（method + path），注册到应用并确认可访问
+    dependencies: []
+  - name: validation
+    instruction: 为端点编写请求参数校验规则，拒绝非法输入
+    dependencies: [route]
+    on_failure: fallback
+    fallback: 改用最简参数校验（只校验必填字段）并重试
+  - name: controller
+    instruction: 实现端点控制器逻辑，接入现有服务层/数据层并返回统一响应结构
+    dependencies: [validation]
+  - name: tests
+    instruction: 为端点编写测试用例（正常输入 + 非法输入 + 边界）
+    dependencies: [controller]
+  - name: run-tests
+    instruction: 运行测试套件并修复失败直到全部通过
+    dependencies: [tests]
+    on_failure: abort

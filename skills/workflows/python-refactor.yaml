@@ -1,0 +1,21 @@
+# 技能：Python 小规模重构（示例工作流）
+name: python-refactor
+version: "1.0.0"
+description: 对 Python 模块做小规模重构（分析 -> 拆分 -> 补测试 -> 验证）
+priority: 6
+triggers:
+  keywords: [重构, refactor, 拆分, 提取函数, 优化代码]
+steps:
+  - name: analyze
+    instruction: 分析目标代码的职责边界与坏味道，输出重构方案
+    dependencies: []
+  - name: split
+    instruction: 按方案拆分/提取函数与模块，保持行为不变
+    dependencies: [analyze]
+  - name: tests
+    instruction: 为重构后的代码补齐/更新测试
+    dependencies: [split]
+    on_failure: orchestrate
+  - name: verify
+    instruction: 运行测试与静态检查，确认重构未破坏行为
+    dependencies: [tests]
