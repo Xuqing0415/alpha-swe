@@ -15,6 +15,7 @@ import sqlite3
 import uuid
 from abc import ABC, abstractmethod
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -22,6 +23,19 @@ import numpy as np
 from agent.memory.embed import Embedder, TfidfEmbedder
 
 logger = logging.getLogger("alpha-swe.memory")
+
+
+def vector_db_dir(db_path: str, backend: str) -> str:
+    """向量库（chroma/qdrant）持久化目录。
+
+    db_path 默认为 "memory.db"（sqlite/hybrid 文件形态）；而 chroma/qdrant 的
+    PersistentClient 需要目录路径。若 db_path 带后缀（文件形态），派生同名前缀的
+    独立目录（memory.db -> memory.chroma），避免"文件已存在"冲突（os error 183）。
+    """
+    p = Path(db_path)
+    if p.suffix:
+        return str(p.parent / f"{p.stem}.{backend}")
+    return str(p / backend)
 
 SYMBOL_PATTERN = re.compile(
     r"\b(?:class|def|async def|function|async function|const|let|var|"
@@ -516,6 +530,20 @@ class HybridLocalMemoryStore(VectorMemoryStore):
         self._load()
 
 
+def _sanitize_chroma_metadata(meta: Dict[str, Any]) -> Dict[str, Any]:
+    """Chroma 元数据值清洗：丢弃 None 与空集合（chroma 1.5.x 拒绝空 list）。"""
+    out: Dict[str, Any] = {}
+    for k, v in meta.items():
+        if v is None:
+            continue
+        if isinstance(v, (list, tuple, set, dict)) and len(v) == 0:
+            continue
+        if isinstance(v, (tuple, set)):
+            v = list(v)
+        out[k] = v
+    return out
+
+
 class ChromaMemoryStore(VectorMemoryStore):
     """Chroma 持久化向量后端（需 pip install chromadb）。"""
 
@@ -535,7 +563,8 @@ class ChromaMemoryStore(VectorMemoryStore):
         self.counter_example_penalty = (
             counter_example_penalty if counter_example_penalty is not None else 0.3
         )
-        self._client = chromadb.PersistentClient(path=db_path)
+        self._client = chromadb.PersistentClient(
+            path=vector_db_dir(db_path, "chroma"))
         self._collection = self._client.get_or_create_collection(
             collection, metadata={"hnsw:space": "cosine"}
         )
@@ -550,7 +579,7 @@ class ChromaMemoryStore(VectorMemoryStore):
         self._collection.upsert(
             ids=[uuid.uuid4().hex],
             documents=[text],
-            metadatas=[meta],
+            metadatas=[_sanitize_chroma_metadata(meta)],
             embeddings=[self.embedder.embed([text])[0]],
         )
 
@@ -560,11 +589,17 @@ class ChromaMemoryStore(VectorMemoryStore):
     def search(self, query: str, top_k: int = 5,
                kinds: Optional[List[str]] = None,
                metadata_filter: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
-        where = None
+        clauses: List[Dict[str, Any]] = []
         if kinds:
-            where = {"kind": {"$in": kinds}}
+            clauses.append({"kind": {"$in": list(kinds)}})
         if metadata_filter:
-            where = {**where, **metadata_filter} if where else dict(metadata_filter)
+            clauses.append(dict(metadata_filter))
+        if len(clauses) == 1:
+            where = clauses[0]
+        elif len(clauses) > 1:
+            where = {"$and": clauses}
+        else:
+            where = None
         res = self._collection.query(
             query_embeddings=[self.embedder.embed([query])[0]],
             n_results=top_k,
@@ -635,7 +670,8 @@ class ChromaMemoryStore(VectorMemoryStore):
             meta = dict(metas[0] or {})
             meta["use_count"] = int(meta.get("use_count") or 0) + 1
             meta["last_used_at"] = datetime.now().isoformat(timespec="seconds")
-            self._collection.update(ids=[memory_id], metadatas=[meta])
+            self._collection.update(ids=[memory_id],
+                                    metadatas=[_sanitize_chroma_metadata(meta)])
         except Exception as e:
             logger.warning("chroma bump 失败: %s", e)
 
@@ -664,7 +700,7 @@ class QdrantMemoryStore(VectorMemoryStore):
         self.counter_example_penalty = (
             counter_example_penalty if counter_example_penalty is not None else 0.3
         )
-        self._client = QdrantClient(path=db_path)  # 本地模式
+        self._client = QdrantClient(path=vector_db_dir(db_path, "qdrant"))  # 本地模式
         self._collection = collection
         self._PointStruct = PointStruct
         existing = [c.name for c in self._client.get_collections().collections]

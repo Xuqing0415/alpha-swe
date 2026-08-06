@@ -114,7 +114,7 @@ def test_extract_symbols():
 def test_chroma_backend(ws_tmp):
     from agent.memory.store import ChromaMemoryStore
 
-    store = ChromaMemoryStore(db_path=str(ws_tmp / "chroma"), collection="t")
+    store = ChromaMemoryStore(db_path=str(ws_tmp / "chroma"), collection="test_store")
     store.remember("note", "chroma 向量记忆")
     hits = store.search("chroma 向量")
     assert hits and hits[0]["kind"] == "note"
@@ -125,7 +125,7 @@ def test_chroma_backend(ws_tmp):
 def test_qdrant_backend(ws_tmp):
     from agent.memory.store import QdrantMemoryStore
 
-    store = QdrantMemoryStore(db_path=str(ws_tmp / "qdrant"), collection="t")
+    store = QdrantMemoryStore(db_path=str(ws_tmp / "qdrant"), collection="test_store")
     store.remember("note", "qdrant 向量记忆")
     hits = store.search("qdrant 向量")
     assert hits and hits[0]["kind"] == "note"
