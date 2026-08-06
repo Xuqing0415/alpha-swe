@@ -1,7 +1,10 @@
 """配置加载测试。"""
 from pathlib import Path
 
-from agent.config import (AppConfig, ToolsConfig, load_config, load_mcp_config)
+import yaml
+
+from agent.config import (AppConfig, CONFIG_FILE, ToolsConfig,
+                        load_config, load_mcp_config)
 
 WS_ROOT = Path(__file__).resolve().parent.parent / "test_workspace"
 
@@ -15,7 +18,9 @@ def test_defaults_when_file_missing():
 
 def test_load_project_config():
     cfg = load_config()  # 读取 config/agent.yaml
-    assert cfg.llm.provider == "mock"
+    raw = yaml.safe_load(CONFIG_FILE.read_text(encoding="utf-8")) or {}
+    # 与 YAML 内容对比，确保解析器忠实地读取了用户配置（不硬编码 provider）
+    assert cfg.llm.provider == (raw.get("llm") or {}).get("provider", "mock")
     assert cfg.sandbox.workspace.endswith("workspace")
     assert cfg.agent.max_retries == 3
 
