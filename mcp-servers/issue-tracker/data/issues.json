@@ -1,0 +1,21 @@
+[
+  {
+    "id": "1",
+    "title": "修复登录页超时",
+    "description": "登录接口在高峰期超时，需要加缓存。",
+    "status": "open",
+    "labels": [
+      "bug",
+      "backend"
+    ]
+  },
+  {
+    "id": "2",
+    "title": "增加导出 CSV 功能",
+    "description": "报表模块支持导出 CSV。",
+    "status": "in_progress",
+    "labels": [
+      "feature"
+    ]
+  }
+]

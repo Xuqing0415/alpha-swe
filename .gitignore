@@ -18,3 +18,7 @@ workspace/
 .pytest_cache/
 pytest-cache-files-*
 decision_log*.jsonl
+
+# TypeScript MCP 服务器
+mcp-servers/*/node_modules/
+mcp-servers/*/dist/

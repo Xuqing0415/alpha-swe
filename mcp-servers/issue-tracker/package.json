@@ -1,0 +1,18 @@
+{
+  "name": "alpha-swe-issue-tracker-mcp",
+  "version": "0.1.0",
+  "description": "Issue 追踪 MCP 服务器：列表/创建/更新状态，暴露 issue:// 资源",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "@types/node": "^22.0.0"
+  }
+}

@@ -1,0 +1,28 @@
+[
+  {
+    "id": "1",
+    "topic": "构建约定",
+    "content": "项目使用 npm workspaces，新增包必须提供单元测试。",
+    "tags": [
+      "build",
+      "convention"
+    ]
+  },
+  {
+    "id": "2",
+    "topic": "Python 风格",
+    "content": "Python 代码遵循 PEP8，类型注解必须完整。",
+    "tags": [
+      "python",
+      "style"
+    ]
+  },
+  {
+    "id": "3",
+    "topic": "发布流程",
+    "content": "发版前运行完整回归并更新 CHANGELOG。",
+    "tags": [
+      "release"
+    ]
+  }
+]
