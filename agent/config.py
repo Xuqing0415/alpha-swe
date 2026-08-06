@@ -133,6 +133,7 @@ class WorkerRoleConfig(BaseModel):
     system_prompt: str = ""  # 角色提示，拼在系统 Prompt 最前
     tools: List[str] = Field(default_factory=lambda: ["terminal_execute", "file_ops"])
     max_rounds: int = 10
+    read_only: bool = False  # 只读角色：file 只读 + terminal 白名单（如 reviewer）
 
 
 class TeamConfig(BaseModel):
@@ -140,6 +141,7 @@ class TeamConfig(BaseModel):
     roles: List[WorkerRoleConfig] = Field(default_factory=list)
     concurrency: int = 1
     max_review_retries: int = 2
+    message_timeout: float = 60.0  # 团队消息默认超时秒数（写进 Message.timeout）
 
 
 class PlannerConfig(BaseModel):

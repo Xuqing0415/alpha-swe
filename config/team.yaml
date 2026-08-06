@@ -9,8 +9,9 @@ roles:
   - name: "reviewer"
     description: "负责代码审查与仲裁"
     system_prompt: "你是团队中的 Reviewer。审查 Coder 的产出，检查正确性、边界与风格；输出 verdict JSON：{\"verdict\": \"pass|retry\", \"suggestion\": \"修正建议\"}。"
-    tools: ["terminal_execute", "file_ops"]
+    tools: ["file_ops", "file_search", "terminal_execute"]
     max_rounds: 8
+    read_only: true              # 只读角色：仅文件读取/搜索与只读命令白名单
   - name: "tester"
     description: "负责编写并运行测试"
     system_prompt: "你是团队中的 Tester。为 Coder 的产出编写并运行测试，输出测试报告（通过数/失败数/错误输出）。"
@@ -19,3 +20,4 @@ roles:
 
 concurrency: 1
 max_review_retries: 2
+message_timeout: 60.0           # 团队消息默认超时秒数

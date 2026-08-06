@@ -29,6 +29,8 @@ EXPECTED_KEYS = [
     "active_skills",
     "plugin.enabled", "plugin.max_active", "active_plugins",
     "skills.enabled", "skills.workflow_enabled", "skills.allow_fallback",
+    "team.roles", "team.read_only", "team.max_review_retries",
+    "team.message_timeout",
 ]
 
 
