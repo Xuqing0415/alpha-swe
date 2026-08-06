@@ -102,6 +102,31 @@ async def test_terminal_tool_streams_output(ws_tmp):
     assert any("line2" in line for line in lines)
 
 
+# ---- 会话回放 CLI：通配符展开与缺档报错 ----
+def test_replay_glob_expands_latest(ws_tmp):
+    import json
+    import os
+    import time
+
+    from tui.__main__ import replay_session
+
+    arch = {"session_id": "s1", "created_at": "2026-01-01T00:00:00",
+            "prompt": "旧会话", "events": [], "spans": [], "decisions": []}
+    (ws_tmp / "session_1.json").write_text(
+        json.dumps(arch, ensure_ascii=False), encoding="utf-8")
+    arch["session_id"] = "s2"
+    arch["events"] = [{"type": "think", "ts": 1.0,
+                       "data": {"content": "新会话"}}]
+    newer = ws_tmp / "session_2.json"
+    newer.write_text(json.dumps(arch, ensure_ascii=False), encoding="utf-8")
+    os.utime(newer, (time.time() + 1, time.time() + 1))  # 保证 session_2 最新
+
+    # 通配符应展开并回放最新档案（不再报 Errno 22）
+    assert replay_session(str(ws_tmp / "session_*.json")) == 0
+    # 无匹配档案应明确报错而非抛 OSError
+    assert replay_session(str(ws_tmp / "no_such_*.json")) == 1
+
+
 # ---- Textual 无头运行：事件流入左栏并正常结束 ----
 @pytest.mark.asyncio
 async def test_tui_streams_events_and_finishes(ws_tmp):

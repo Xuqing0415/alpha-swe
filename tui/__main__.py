@@ -46,8 +46,18 @@ def main(argv=None) -> int:
 
 def replay_session(path: str) -> int:
     """按时间线逐步打印会话档案（事件 / span / 决策合并排序）。"""
+    import glob
+    import os
     from agent.observability import SessionReplay
 
+    matches = sorted(glob.glob(path))
+    if not matches:
+        print(f"未找到匹配的会话档案: {path}", file=sys.stderr)
+        return 1
+    if len(matches) > 1:
+        # 通配符匹配多个档案时回放最新修改的一个
+        path = max(matches, key=os.path.getmtime)
+        print(f"匹配 {len(matches)} 个档案，回放最新的: {path}")
     replay = SessionReplay.load(path)
     arch = replay.archive
     print("=" * 68)
