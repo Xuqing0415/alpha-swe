@@ -84,6 +84,10 @@ class MemoryConfig(BaseModel):
     max_code_index_chars: int = 2000
     auto_experience: bool = True  # 任务完成后自动生成经验摘要
     similarity_threshold: float = 0.0  # 检索结果相似度下限（0 = 不过滤）
+    dedup_threshold: float = 0.95  # 写入前去重：相似度超过该值只更新计数
+    decay_days: float = 30.0  # 记忆超过该天数未引用开始可信度衰减
+    decay_factor: float = 0.1  # 每超过一个衰减周期，分数乘以该系数
+    counter_example_penalty: float = 0.3  # 反例（negative）检索时的分数惩罚
     top_k_retrieval: Optional[int] = None  # 别名 -> top_k
     collection_name: Optional[str] = None  # 别名 -> collection
 
@@ -151,6 +155,14 @@ class ContextConfig(BaseModel):
     max_tokens: int = 8000
     compression_threshold: float = 0.8
     compression_method: str = "summary"  # summary | vector_retrieval
+    archive_dir: str = "./logs/archives"  # 长工具输出归档目录
+    output_truncate: int = 2000  # 工具输出超过该长度触发输出压缩
+    # 分级压缩压力阈值（当前 token / max_tokens）：
+    # light_threshold 以下不压缩；light 只压工具输出；
+    # medium 压缩旧对话（保留决策点）；heavy 递归摘要。
+    light_threshold: float = 0.8
+    medium_threshold: float = 0.9
+    heavy_threshold: float = 1.05
 
 
 

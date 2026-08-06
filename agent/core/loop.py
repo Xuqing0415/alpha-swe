@@ -24,7 +24,8 @@ from agent.core.task import Task, TaskDAG, TaskStatus
 from agent.llm import BaseLLM, build_llm
 from agent.mcp.manager import MCPManager
 from agent.memory.factory import build_memory
-from agent.memory.store import MemoryStore, NoopMemoryStore
+from agent.memory.store import (MemoryStore, NoopMemoryStore,
+                                 classify_task_type, format_experience_text)
 from agent.memory.summarizer import ExperienceSummarizer
 from agent.parser.parser import Parser
 from agent.planner.planner import Planner
@@ -122,6 +123,11 @@ class AgentLoop:
             decision_logger=self._decision,
             active_skills=self.config.active_skills,
             active_plugins=self.config.active_plugins,
+            archive_dir=self.config.context.archive_dir,
+            output_truncate=self.config.context.output_truncate,
+            light_threshold=self.config.context.light_threshold,
+            medium_threshold=self.config.context.medium_threshold,
+            heavy_threshold=self.config.context.heavy_threshold,
         )
         self.memory = memory or build_memory(self.config.memory)
         self.summarizer = summarizer or ExperienceSummarizer(
@@ -480,11 +486,45 @@ class AgentLoop:
         return text
 
     async def _remember_experience(self, task: Task) -> None:
-        """任务完成后生成经验摘要并写入长期记忆（设计 7.2 节）。"""
+        """任务完成后生成经验摘要并写入长期记忆（设计 7.2 节）。
+
+        写入前做相似度去重（> dedup_threshold 只更新引用计数，记录 memory.dedup）；
+        成功写入记录 memory.write 决策。
+        """
         try:
+            if self.memory.disabled:
+                self._decision.record("memory.write", "memory.backend", "none",
+                                      "记忆已禁用，跳过经验写入")
+                return
             summary = await self.summarizer.summarize_task(task)
-            if summary:
-                self.memory.remember_experience(summary)
+            if not summary:
+                return
+            task_type = classify_task_type(task.instruction)
+            summary.setdefault("task_type", task_type)
+            summary.setdefault(
+                "outcome",
+                "success" if task.status == TaskStatus.COMPLETED else "failed",
+            )
+            threshold = self.config.memory.dedup_threshold
+            similar = self.memory.find_similar(
+                format_experience_text(summary),
+                top_k=1, kinds=["experience"],
+            )
+            if threshold > 0 and similar:
+                best = similar[0]
+                if float(best.get("score", 0)) >= threshold:
+                    self.memory.bump(best.get("id"))
+                    self._decision.record(
+                        "memory.dedup", "memory.dedup_threshold", threshold,
+                        f"相似经验已存在（score={best.get('score'):.3f}），"
+                        f"仅更新引用计数（id={best.get('id')}）",
+                    )
+                    return
+            self.memory.remember_experience(summary)
+            self._decision.record(
+                "memory.write", "memory.task_type_filter", task_type,
+                f"写入经验（task_type={task_type}, outcome={summary.get('outcome')}）",
+            )
         except Exception as e:  # 记忆写入失败不应影响主流程
             logger.warning("经验摘要写入失败: %s", e)
 
@@ -502,8 +542,16 @@ class AgentLoop:
                 err_type,
                 context,
                 metadata={"task_id": task.id,
-                          "instruction": task.instruction[:200]},
+                          "instruction": task.instruction[:200],
+                          "task_type": classify_task_type(task.instruction)},
             )
+            if not self.memory.disabled:
+                self._decision.record(
+                    "memory.write", "memory.counter_example_penalty",
+                    self.config.memory.counter_example_penalty,
+                    f"写入反例（task_type={classify_task_type(task.instruction)}, "
+                    f"error={err_type}）",
+                )
         except Exception as e:
             logger.warning("错误记忆写入失败: %s", e)
 
@@ -523,11 +571,35 @@ class AgentLoop:
             logger.warning("代码索引失败: %s", e)
 
     def _load_task_memory(self, task: Task) -> None:
-        """按任务指令检索相关记忆并注入 Prompt（设计 7.3 节）。"""
+        """按任务指令检索相关记忆并注入 Prompt（设计 7.3 节）。
+
+        优先按任务类型（fix/add/refactor/test/general）过滤同类型经验；
+        命中为空时放宽为全量检索；记录 memory.retrieve 决策。
+        """
         try:
-            hits = self.memory.search(task.instruction, top_k=self.config.memory.top_k)
+            if self.memory.disabled:
+                self._decision.record(
+                    "retrieval_skip", "memory.backend", "none",
+                    "跳过记忆检索（已禁用）",
+                )
+                return
+            task_type = classify_task_type(task.instruction)
+            hits = self.memory.search(
+                task.instruction, top_k=self.config.memory.top_k,
+                kinds=["experience", "error", "note"],
+                metadata_filter={"task_type": task_type},
+            )
+            filtered_by_type = bool(hits)
+            if not hits:
+                hits = self.memory.search(
+                    task.instruction, top_k=self.config.memory.top_k)
             if hits:
                 self.prompt_builder.set_memory(self.memory.format_context(hits))
+            self._decision.record(
+                "memory.retrieve", "memory.task_type_filter", task_type,
+                f"检索到 {len(hits)} 条记忆（task_type={task_type}"
+                f"{'' if filtered_by_type else '，类型过滤无命中已放宽'}）",
+            )
         except Exception as e:
             logger.warning("任务记忆检索失败: %s", e)
 
