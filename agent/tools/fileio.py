@@ -49,10 +49,11 @@ class FileIOTool(Tool):
     }
 
     def __init__(self, workspace: str = "", read_only: bool = False,
-                 audit_store: Optional[FileAuditStore] = None):
+                 audit_store: Optional[FileAuditStore] = None, docker=None):
         self.workspace = workspace
         self.read_only = read_only
         self.audit_store = audit_store
+        self.docker = docker  # DockerSandbox；running 时文件操作路由进容器
 
     async def execute(self, params: Dict[str, Any], context: ExecutionContext) -> ToolResult:
         action = str(params.get("action", ""))
@@ -74,6 +75,47 @@ class FileIOTool(Tool):
             target = resolve_workspace_path(context.workspace, path)
         except PermissionError as e:
             return ToolResult(success=False, error=str(e), elapsed_ms=0.0)
+
+        if self.docker is not None and getattr(self.docker, "running", False):
+            rel = os.path.relpath(target, os.path.abspath(context.workspace))
+            rel = rel.replace("\\", "/")
+            try:
+                if action == "read":
+                    content = await self.docker.read_file(rel)
+                    return ToolResult(success=True, output=content,
+                                      metadata={"path": str(target), "docker": True,
+                                                "size": len(content)},
+                                      elapsed_ms=(time.time() - start) * 1000)
+                if action == "write":
+                    before = await self._docker_before(rel)
+                    await self.docker.write_file(rel, params.get("content", ""))
+                    self._audit("write", target, before, params.get("content", ""),
+                                task_id=context.task_id or "")
+                    return ToolResult(success=True,
+                                      output=f"写入成功（容器内）: {target}",
+                                      metadata={"path": str(target), "docker": True},
+                                      elapsed_ms=(time.time() - start) * 1000)
+                if action == "append":
+                    before = await self._docker_before(rel)
+                    await self.docker.append_file(rel, params.get("content", ""))
+                    self._audit("append", target, before,
+                                (before or "") + params.get("content", ""),
+                                task_id=context.task_id or "")
+                    return ToolResult(success=True,
+                                      output=f"追加成功（容器内）: {target}",
+                                      metadata={"path": str(target), "docker": True},
+                                      elapsed_ms=(time.time() - start) * 1000)
+                if action == "search":
+                    output = await self.docker.search_file(
+                        params.get("pattern", ""), rel)
+                    return ToolResult(success=True, output=output or f"未匹配到 '{params.get('pattern', '')}'",
+                                      metadata={"path": str(target), "docker": True},
+                                      elapsed_ms=(time.time() - start) * 1000)
+                return ToolResult(success=False, error=f"未知操作: {action}",
+                                  elapsed_ms=(time.time() - start) * 1000)
+            except Exception as e:
+                return ToolResult(success=False, error=str(e),
+                                  elapsed_ms=(time.time() - start) * 1000)
 
         try:
             if action == "read":
@@ -142,6 +184,13 @@ class FileIOTool(Tool):
                                     task_id=task_id)
         except Exception as e:
             logging.getLogger("alpha-swe.tools").warning("文件审计失败: %s", e)
+
+    async def _docker_before(self, rel: str) -> Optional[str]:
+        """docker 模式下写入前读取旧内容（不存在返回 None）。"""
+        try:
+            return await self.docker.read_file(rel)
+        except FileNotFoundError:
+            return None
 
     async def _search(self, target: Path, pattern: str, start: float) -> ToolResult:
         if not pattern:

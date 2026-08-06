@@ -41,12 +41,14 @@ class TerminalTool(Tool):
     def __init__(self, default_timeout: float = 30.0, read_only: bool = False,
                  resource_monitor: bool = False,
                  memory_limit_mb: float = 512.0,
-                 poll_interval: float = 0.2):
+                 poll_interval: float = 0.2,
+                 docker=None):
         self.default_timeout = default_timeout
         self.read_only = read_only
         self.resource_monitor = resource_monitor
         self.memory_limit_mb = max(1.0, memory_limit_mb)
         self.poll_interval = max(0.02, poll_interval)
+        self.docker = docker  # DockerSandbox；running 时命令路由进容器执行
 
     def _read_only_ok(self, command: str) -> bool:
         """只读模式检查：首词在白名单 + 无写语义元字符 + git 仅允许只读子命令。"""
@@ -83,6 +85,29 @@ class TerminalTool(Tool):
                 success=False,
                 error=f"只读角色禁止该命令: {command[:80]}",
                 elapsed_ms=0.0,
+            )
+
+        # Docker 模式：命令路由进容器执行（沙箱策略在 ToolManager 层已检查）
+        if self.docker is not None and getattr(self.docker, "running", False):
+            res = await self.docker.exec_run(
+                command, timeout=timeout, environment=context.env
+            )
+            if callback is not None:
+                for line in res.stdout.splitlines():
+                    callback(line)
+            if res.exit_code == 0:
+                return ToolResult(
+                    success=True,
+                    output=res.stdout or "(empty stdout)",
+                    metadata={"docker": True, "exit_code": res.exit_code},
+                    elapsed_ms=(time.time() - start) * 1000,
+                )
+            return ToolResult(
+                success=False,
+                output=res.stdout,
+                error=res.stderr or f"退出码 {res.exit_code}",
+                metadata={"docker": True, "exit_code": res.exit_code},
+                elapsed_ms=(time.time() - start) * 1000,
             )
 
         # 沙箱策略在 ToolManager 层已检查；这里在 workspace 下执行
