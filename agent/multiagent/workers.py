@@ -17,6 +17,7 @@ from agent.core.task import Task
 from agent.llm import BaseLLM, MockLLM
 from agent.mcp.manager import MCPManager
 from agent.multiagent.blackboard import Artifact, Blackboard
+from agent.sandbox.audit import FileAuditStore
 from agent.prompt.builder import PromptBuilder
 from agent.prompt import templates
 from agent.tools.fileio import FileIOTool
@@ -124,9 +125,17 @@ class WorkerAgent:
         wanted = set(self.role.tools)
         read_only = bool(self.role.read_only)
         if "terminal_execute" in wanted:
-            manager.register(TerminalTool(read_only=read_only))
+            manager.register(TerminalTool(
+                read_only=read_only,
+                resource_monitor=self.config.sandbox.resource_monitor,
+                memory_limit_mb=self.config.sandbox.memory_limit_mb,
+                poll_interval=self.config.sandbox.poll_interval,
+            ))
         if "file_ops" in wanted or "file_search" in wanted:
-            manager.register(FileIOTool(read_only=read_only))
+            manager.register(FileIOTool(
+                read_only=read_only,
+                audit_store=FileAuditStore(self.config.sandbox.audit_dir),
+            ))
         return manager
 
     def _collect_artifact(self, loop: AgentLoop, result: LoopResult) -> Artifact:

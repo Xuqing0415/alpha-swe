@@ -1,4 +1,4 @@
-﻿"""多 Agent 消息协议 —— 对应设计第 8 节。
+"""多 Agent 消息协议 —— 对应设计第 8 节。
 
 内部消息 `{sender, receiver, type, payload}`，支持 TASK_ASSIGN / TASK_RESULT /
 QUERY / REVIEW_REQUEST / REVIEW_RESULT 等类型。

@@ -32,6 +32,7 @@ from agent.memory.summarizer import ExperienceSummarizer
 from agent.parser.parser import Parser
 from agent.planner.planner import Planner
 from agent.prompt.builder import PromptBuilder
+from agent.sandbox.audit import FileAuditStore
 from agent.sandbox.docker_sandbox import DockerSandbox
 from agent.sandbox.policy import SandboxPolicy
 from agent.tools.base import ExecutionContext, ToolResult
@@ -107,6 +108,11 @@ class AgentLoop:
             block_commands=self.config.sandbox.block_commands,
             network_enabled=self.config.sandbox.is_network_enabled,
             decision_logger=self._decision,
+            network_policy=self.config.sandbox.network_policy,
+            network_allowed_commands=self.config.sandbox.network_allowed_commands,
+            fake_network=self.config.sandbox.fake_network,
+            fake_network_responses=self.config.sandbox.fake_network_responses,
+            protected_paths=self.config.sandbox.protected_paths,
         )
         self.tools = tools or self._default_tools()
         self._tool_enabled = getattr(self, "_tool_enabled", None)
@@ -175,8 +181,14 @@ class AgentLoop:
     # ---- 默认工具集 ----
     def _default_tools(self) -> ToolManager:
         manager = ToolManager(policy=self.sandbox)
-        manager.register(TerminalTool())
-        manager.register(FileIOTool())
+        manager.register(TerminalTool(
+            resource_monitor=self.config.sandbox.resource_monitor,
+            memory_limit_mb=self.config.sandbox.memory_limit_mb,
+            poll_interval=self.config.sandbox.poll_interval,
+        ))
+        manager.register(FileIOTool(
+            audit_store=FileAuditStore(self.config.sandbox.audit_dir),
+        ))
         raw = self.config.tools.model_dump()
         self._tool_enabled = {name: cfg["enabled"] for name, cfg in raw.items()}
         return manager
@@ -252,6 +264,23 @@ class AgentLoop:
             "sandbox_network", "sandbox.network_enabled",
             self.config.sandbox.is_network_enabled,
             f"沙箱网络策略: {self.config.sandbox.network_mode}",
+        )
+        self._decision.record(
+            "network_policy", "sandbox.network_policy",
+            self.config.sandbox.network_policy,
+            f"网络细粒度策略: {self.config.sandbox.network_policy}"
+            f"{'（假网络）' if self.config.sandbox.fake_network else ''}",
+        )
+        self._decision.record(
+            "resource_monitor", "sandbox.resource_monitor",
+            self.config.sandbox.resource_monitor,
+            f"资源熔断: {'开启' if self.config.sandbox.resource_monitor else '关闭'}"
+            f"（上限 {self.config.sandbox.memory_limit_mb}MB）",
+        )
+        self._decision.record(
+            "file_protection", "sandbox.protected_paths",
+            self.config.sandbox.protected_paths,
+            f"受保护路径: {self.config.sandbox.protected_paths}",
         )
 
         # 技能/插件上下文 + 长期记忆注入（项目上下文扫描一次，供插件/技能匹配）
