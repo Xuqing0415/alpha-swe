@@ -47,7 +47,7 @@ loop.py, scheduler.py, ... 旧版七层原型（保留，作为对照参考）
 | 7 长期记忆 | `agent/memory/` | 已实现闭环（写入去重 + 反例降权 + 任务类型过滤 + 可信度衰减 + 引用计数，见 `test_memory_closed_loop.py` 的 A/A' 复用验证；Chroma/Qdrant/Hybrid/SQLite 可插拔） |
 | 10 技能/插件 | `agent/context/manager.py` | 基础版（关键词激活；可扩展文件类型匹配） |
 | 11 上下文压缩 | `agent/context/manager.py` | 已实现分级（light 压工具输出/medium 保留决策点/heavy 递归摘要），长输出关键行提取 + 原始存档引用，压缩决策日志（级别/前后 token/丢弃消息 ID），见 `test_compression_quality.py` |
-| 12 沙箱 | `agent/sandbox/policy.py` | 路径锚定/危险命令拦截；Docker 容器隔离预留 |
+| 12 沙箱 | `agent/sandbox/policy.py` + `agent/sandbox/audit.py` | 已实现（阶段五）：路径锚定/危险命令拦截；网络细粒度策略 deny\|allowlist\|allow + 假网络 + 请求审计；受保护路径防删/防写；文件操作审计（before/after diff）与回滚；资源监控与熔断（psutil） |
 | 13 MCP | `agent/mcp/`（client/manager/tool）+ `config/mcp.yaml` | 已实现（stdio/sse 客户端、握手、工具合并、资源订阅注入 Prompt） |
 | 14 可观测性 | `tui/`（Textual 三栏）+ `AgentLoop.subscribe()` + 终端实时输出回调 | 已实现（思维流/终端流/状态栏/Ctrl+I 中断/Ctrl+P 暂停）；Web 面板与 OTel 导出待接入 |
 | 配置→运行时数据流 | `agent/config.py` + `agent/core/decision_logger.py` + `agent/sandbox/docker_sandbox.py` + `scripts/analyze_decisions.py` | 已实现：YAML→Pydantic→组件工厂→运行时决策点；JSONL 决策日志；default/aggressive A/B 对比测试 |
@@ -122,6 +122,24 @@ steps:
   coder）；耗尽后升级人工介入——`TeamResult.needs_intervention=True` + 决策日志 `review.exhausted`。
 - **共享上下文**：Worker 产出（文件 diff、测试报告）发布到黑板，下游 Reviewer/Tester 只读挂载上游产物。
 
+## 沙箱安全加固（阶段五）
+
+入口 `agent/sandbox/policy.py`（策略）+ `agent/sandbox/audit.py`（审计），由 `config/agent.yaml` 的 `sandbox` 段驱动。
+
+- **网络细粒度策略**：`network_policy` 支持 `deny`（默认，拦截所有网络命令）/ `allowlist`（仅放行
+  `network_allowed_commands`，如 `pip install`、`apt-get`）/ `allow`（全局放行）；决策日志记录 `block_network_command`
+  与 `network.audit`（自动提取 curl/wget/git clone 的目标 URL）。
+- **假网络模式**：`fake_network: true` + `fake_network_responses`（URL 前缀 → 响应体）时，`curl`/`wget` 命中预设
+  即返回响应文本、不发起真实请求（决策日志 `network.fake`），用于离线/受控测试。
+- **文件系统保护**：`protected_paths`（默认 `.git`、`config/*.yaml`、`*.lock`）拦截受保护路径的写入与删除
+  （`rm`/`del`/`Remove-Item`），并新增路径 NUL 字节检查（决策日志 `file.protect`）。
+- **操作审计与回滚**：`FileAuditStore` 记录每次 write/append 的 before/after 内容与 unified diff 到
+  `audit_dir/file_audit.jsonl`；`rollback(path)` 用最近一条审计的 before 内容恢复文件。
+- **资源监控与熔断**：`resource_monitor: true` 时 Terminal 周期采样进程树 RSS（psutil），超过 `memory_limit_mb`
+  立即 kill 整棵进程树并返回 `circuit_breaker=True` 的失败结果，Agent 可据此选择更低内存的方案重试。
+
+验证见 `tests/test_sandbox_security.py`（危险命令、deny/allowlist/假网络、受保护路径、审计回滚、熔断、循环内恶意命令拦截端到端）。
+
 ## 快速开始
 
 ```powershell
@@ -189,6 +207,6 @@ python -m tui --config config/agent.yaml "修复失败的测试"
 2. ~~长期记忆升级为 Chroma/Qdrant 向量检索 + 自动经验摘要写入~~（已完成，见上节）；
 3. ~~多 Agent 协作（Orchestrator/Worker + 黑板）与 Critic 仲裁~~（已完成，见 `agent/multiagent/` 与第 8 节）；
 
-4. Docker 沙箱完整生命周期（网络隔离、资源限制、快照/回滚）；
+4. Docker 沙箱完整生命周期（网络隔离、资源限制、快照/回滚）；工具层安全加固（网络细粒度策略/假网络/受保护路径/审计回滚/资源熔断）已完成（阶段五，见 `agent/sandbox/policy.py` 与 `agent/sandbox/audit.py`）；
 5. ~~Textual TUI 三栏布局~~（已完成，见 `tui/` 与第 14 节）+ WebSocket 事件订阅（待接入）；
 6. OpenTelemetry 追踪导出与结构化 JSON 日志。
