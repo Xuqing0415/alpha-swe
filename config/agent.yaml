@@ -37,8 +37,8 @@ sandbox:
     - "rm -rf /"
     - "mkfs"
     - "dd if="
-  # Docker 沙箱（docker-py）预留，默认关闭
-  docker_enabled: false
+  # Docker 沙箱（docker-py）已启用；需本机 Docker daemon 可用，且镜像 alphaswe/dev:latest 已存在
+  docker_enabled: true
   image: "alphaswe/dev:latest"
   read_only: false
   no_network: true
@@ -74,13 +74,15 @@ sandbox:
   auto_rollback: true            # 任务失败时自动回滚到任务前快照
 
 memory:
-  backend: auto              # auto | sqlite | hybrid | chroma | qdrant
+  backend: chroma            # auto | sqlite | hybrid | chroma | qdrant
   db_path: "memory.db"
   max_entities: 1000
   top_k: 5
   collection: "alpha_swe_memories"
-  embedder: auto             # auto | tfidf | sentence-transformers | openai
-  embedding_model: ""        # 例如 all-MiniLM-L6-v2 / text-embedding-3-small
+  embedder: sentence-transformers  # auto | tfidf | sentence-transformers | openai
+  embedding_model: "all-MiniLM-L6-v2"  # 例如 all-MiniLM-L6-v2 / text-embedding-3-small
+  embedding_model_path: ""  # 本地模型目录（离线加载，优先于 embedding_model）
+  embedding_offline: true   # 离线：禁止 HuggingFace 联网下载，规避 SSL/httpx 错误
   embedding_base_url: ""
   embedding_api_key_env: "OPENAI_API_KEY"
   hybrid_weight_vector: 0.6  # 向量 vs 关键词 混合权重
@@ -88,10 +90,10 @@ memory:
   auto_experience: true      # 任务完成后自动生成经验摘要
 
 llm:
-  provider: mock             # mock | litellm
-  model: mock
-  base_url: ""
-  api_key_env: ""            # 例如 OPENAI_API_KEY
+  provider: litellm          # mock | litellm
+  model: deepseek/deepseek-chat  # 带 provider 前缀，litellm 才能识别为 deepseek；推理模型用 deepseek/deepseek-reasoner
+  base_url: "https://api.deepseek.com"
+  api_key_env: "DEEPSEEK_API_KEY"   # 运行前先 set DEEPSEEK_API_KEY=sk-...（不落盘）
   temperature: 0.2
   max_tokens: 2048
 mcp:
