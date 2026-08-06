@@ -30,6 +30,7 @@ class Task:
     status: TaskStatus = TaskStatus.IDLE
     dependencies: List[str] = field(default_factory=list)
     priority: int = 0
+    role: str = ""  # 多 Agent 协作：coder / reviewer / tester ...
     parent_id: Optional[str] = None
     result: Any = None
     error: Optional[str] = None
@@ -56,6 +57,7 @@ class Task:
             "status": self.status.value,
             "dependencies": list(self.dependencies),
             "priority": self.priority,
+            "role": self.role,
             "parent_id": self.parent_id,
             "result": self.result,
             "error": self.error,
@@ -81,6 +83,7 @@ class TaskDAG:
         priority: int = 0,
         parent_id: Optional[str] = None,
         task_id: Optional[str] = None,
+        role: str = "",
     ) -> Task:
         tid = task_id or uuid.uuid4().hex[:8]
         task = Task(
@@ -89,6 +92,7 @@ class TaskDAG:
             dependencies=list(dependencies or []),
             priority=priority,
             parent_id=parent_id,
+            role=role,
         )
         return self.add(task)
 

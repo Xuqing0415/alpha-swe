@@ -1,0 +1,21 @@
+﻿# 多 Agent 团队配置（对应设计第 8 节：可插拔智能体团队）
+# system_prompt 会拼在 Agent 系统 Prompt 最前，限定角色职责。
+roles:
+  - name: "coder"
+    description: "负责实现与修改代码"
+    system_prompt: "你是团队中的 Coder。专注实现，输出可运行代码；完成后把修改的文件与关键输出发布到黑板。"
+    tools: ["terminal_execute", "file_ops"]
+    max_rounds: 10
+  - name: "reviewer"
+    description: "负责代码审查与仲裁"
+    system_prompt: "你是团队中的 Reviewer。审查 Coder 的产出，检查正确性、边界与风格；输出 verdict JSON：{\"verdict\": \"pass|retry\", \"suggestion\": \"修正建议\"}。"
+    tools: ["terminal_execute", "file_ops"]
+    max_rounds: 8
+  - name: "tester"
+    description: "负责编写并运行测试"
+    system_prompt: "你是团队中的 Tester。为 Coder 的产出编写并运行测试，输出测试报告（通过数/失败数/错误输出）。"
+    tools: ["terminal_execute", "file_ops"]
+    max_rounds: 10
+
+concurrency: 1
+max_review_retries: 2
