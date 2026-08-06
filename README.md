@@ -70,6 +70,43 @@ loop.py, scheduler.py, ... 旧版七层原型（保留，作为对照参考）
 - **嵌入器**：`memory.embedder` 支持 `tfidf`（默认）、`sentence-transformers`（本地模型）、
   `openai`（Embeddings API，`embedding_api_key_env` 指定密钥环境变量）。
 
+## 技能与插件（第 10 节）
+
+### 插件动态注入（`agent/context/plugin.py`）
+插件 = 纯上下文注入（Markdown + YAML front-matter），目录 `config/agent.yaml` 的 `plugin.dir`（默认 `./plugins/`），
+按文件 mtime 热加载（新增/修改无需重启）。激活条件可组合叠加，命中任意一类即激活：
+- `keywords`：任务指令关键词（如「数据库」→ `sql` 插件）；
+- `file_ext`：项目/任务涉及文件扩展名（如 `.tsx` → `react-ts` 插件）；
+- `project_file`：项目文件路径模式（fnmatch，如 `**/package.json`）；
+- `project_dep`：项目依赖名（自动解析 `package.json` / `requirements.txt` / `pyproject.toml`）。
+
+多插件同时命中时按 `priority` 降序注入，超出 `plugin.max_active` 截断（决策日志 `plugin.activate` / `plugin.truncate`）；
+`config.active_plugins` 非空时作为白名单过滤。工作区扫描与指令路径提取由 `ProjectContext` 提供。
+
+### 技能工作流（`agent/context/skill.py`）
+技能 = 预定义子任务序列（YAML，目录 `config/agent.yaml` 的 `skills.dir`，默认 `./skills/workflows/`），
+热加载；`skills.enabled` 由 `config/agent.yaml` 显式开启（程序化 `AppConfig()` 默认关闭，Worker Agent 恒关闭）。
+
+```yaml
+name: add-rest-endpoint
+triggers:
+  keywords: [rest, api, 端点, endpoint]
+  file_ext: [.py, .ts]
+steps:
+  - name: route          # 展开为子任务：定义 REST 路由
+    instruction: 定义 REST 端点路由
+  - name: validation
+    instruction: 编写请求参数校验
+    dependencies: [route]
+    on_failure: fallback     # 步骤失败决策点：fallback / abort / orchestrate
+    fallback: 改用最简参数校验并重试
+```
+
+- 技能命中时由 `SkillLibrary.expand()` 展开为 Task DAG（步骤依赖 -> 任务依赖），替代 LLM 规划器；
+- 步骤决策点写入 `Task.metadata`：`on_failure=fallback` 时失败自动 `spawn` 回退任务（`skill.step_fallback`），
+  `orchestrate` 时发出 `skill_intervention` 事件请求介入；
+- 决策日志：`skill.activate` / `skill.expand` / `skill.step_fallback` / `skill.step_intervention`。
+
 ## 快速开始
 
 ```powershell
@@ -135,7 +172,8 @@ python -m tui --config config/agent.yaml "修复失败的测试"
 
 1. ~~MCP 客户端（`mcp` Python SDK）初始化握手、工具合并与资源订阅~~（已完成，见 `agent/mcp/` 与第 13 节）；
 2. ~~长期记忆升级为 Chroma/Qdrant 向量检索 + 自动经验摘要写入~~（已完成，见上节）；
-3. 多 Agent 协作（Orchestrator/Worker + 黑板）与 Critic 仲裁；
+3. ~~多 Agent 协作（Orchestrator/Worker + 黑板）与 Critic 仲裁~~（已完成，见 `agent/multiagent/` 与第 8 节）；
+
 4. Docker 沙箱完整生命周期（网络隔离、资源限制、快照/回滚）；
 5. ~~Textual TUI 三栏布局~~（已完成，见 `tui/` 与第 14 节）+ WebSocket 事件订阅（待接入）；
 6. OpenTelemetry 追踪导出与结构化 JSON 日志。
