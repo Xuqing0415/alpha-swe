@@ -1,0 +1,11 @@
+# MCP 服务器清单（对应设计第 13 节）
+# transport: stdio（本地命令）或 sse（远程 URL）
+mcp_servers:
+  - name: "github"
+    transport: "stdio"
+    command: "npx"
+    args: ["-y", "@modelcontextprotocol/server-github"]
+    env: {}
+  - name: "custom-knowledge"
+    transport: "sse"
+    url: "http://localhost:8000/sse"

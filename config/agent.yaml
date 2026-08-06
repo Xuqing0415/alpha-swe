@@ -1,0 +1,67 @@
+# Alpha-SWE Agent 配置（对应设计第 15 节：YAML + Pydantic）
+agent:
+  max_rounds: 30            # 单任务最大 ReAct 轮数
+  max_retries: 3            # 输出解析失败最大重试次数
+  token_threshold: 0.8      # 上下文压缩触发阈值
+  max_token_limit: 100000
+  keep_recent_rounds: 3     # 压缩时保留的最近轮数
+  max_concurrency: 1        # 并发子任务数（工具资源允许时提高）
+  trace_dir: "./logs/traces"
+
+tools:
+  terminal_execute:
+    enabled: true
+    timeout: 30
+  file_ops:
+    enabled: true
+  file_search:
+    enabled: true
+
+sandbox:
+  workspace: "./workspace"
+  allowed_paths: []          # 留空 = 工作区内任意路径
+  blocked_paths:
+    - "/etc"
+    - "/sys"
+    - "/proc"
+    - "/boot"
+    - "/root"
+    - "C:\\Windows"
+    - "C:\\Windows\\System32"
+  block_commands:
+    - "sudo"
+    - "rm -rf /"
+    - "mkfs"
+    - "dd if="
+  # Docker 沙箱（docker-py）预留，默认关闭
+  docker_enabled: false
+  image: "alphaswe/dev:latest"
+  read_only: false
+  no_network: true
+
+memory:
+  backend: auto              # auto | sqlite | hybrid | chroma | qdrant
+  db_path: "memory.db"
+  max_entities: 1000
+  top_k: 5
+  collection: "alpha_swe_memories"
+  embedder: auto             # auto | tfidf | sentence-transformers | openai
+  embedding_model: ""        # 例如 all-MiniLM-L6-v2 / text-embedding-3-small
+  embedding_base_url: ""
+  embedding_api_key_env: "OPENAI_API_KEY"
+  hybrid_weight_vector: 0.6  # 向量 vs 关键词 混合权重
+  max_code_index_chars: 2000
+  auto_experience: true      # 任务完成后自动生成经验摘要
+
+llm:
+  provider: mock             # mock | litellm
+  model: mock
+  base_url: ""
+  api_key_env: ""            # 例如 OPENAI_API_KEY
+  temperature: 0.2
+  max_tokens: 2048
+mcp:
+  enabled: true            # 启动时连接 config/mcp.yaml 中的服务器
+  connect_timeout: 8.0     # 单服务器握手超时
+  tool_timeout: 30.0       # 工具调用超时
+  max_resources_per_run: 3 # 每次运行最多注入的资源数
