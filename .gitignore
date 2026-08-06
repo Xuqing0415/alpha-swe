@@ -14,3 +14,6 @@ test_memory.db
 *.egg-info/
 dist/
 build/
+workspace/
+.pytest_cache/
+pytest-cache-files-*
