@@ -61,7 +61,11 @@ def find_local_model(model_name: str, model_path: str = "") -> Optional[str]:
     """解析可用的本地模型目录；找不到返回 None（纯文件系统检查，绝不联网）。"""
     candidates: List[Path] = []
     if model_path:
-        candidates.append(Path(model_path))
+        p = Path(model_path)
+        if not p.is_absolute():
+            # 相对路径按项目根目录解析，避免依赖启动时的工作目录
+            p = Path(__file__).resolve().parent.parent.parent / p
+        candidates.append(p)
     if model_name:
         p = Path(model_name)
         if p.exists():
@@ -174,7 +178,11 @@ class SentenceTransformersEmbedder(Embedder):
                 self._model = SentenceTransformer(local, local_files_only=True)
             except TypeError:  # 旧版本无 local_files_only 参数
                 self._model = SentenceTransformer(local)
-            self._dim = self._model.get_sentence_embedding_dimension()
+            try:
+                # sentence-transformers 3.x 起改名为 get_embedding_dimension
+                self._dim = self._model.get_embedding_dimension()
+            except AttributeError:
+                self._dim = self._model.get_sentence_embedding_dimension()
         except Exception as e:
             reset_hf_http_session()  # 清理可能残留的共享客户端
             raise RuntimeError(f"本地模型加载失败（{local}）: {e}") from e

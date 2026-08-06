@@ -26,3 +26,5 @@ mcp-servers/*/dist/
 # 向量库持久化目录（vector_db_dir 派生：memory.db -> memory.chroma）
 *.chroma/
 *.qdrant/
+# 本地模型权重（scripts/download_embedding_model.py 下载）
+models/

@@ -55,7 +55,7 @@ def main(argv=None) -> int:
     # 重置共享客户端（httpx 生命周期修复），再替换工厂为 verify=False 的实现。
     def _client_factory() -> httpx.Client:
         return httpx.Client(
-            verify=not args.verify,
+            verify=args.verify,
             follow_redirects=True,
             timeout=args.timeout,
         )

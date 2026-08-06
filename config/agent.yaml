@@ -81,7 +81,7 @@ memory:
   collection: "alpha_swe_memories"
   embedder: sentence-transformers  # auto | tfidf | sentence-transformers | openai
   embedding_model: "all-MiniLM-L6-v2"  # 例如 all-MiniLM-L6-v2 / text-embedding-3-small
-  embedding_model_path: ""  # 本地模型目录（离线加载，优先于 embedding_model）
+  embedding_model_path: "models/sentence-transformers/all-MiniLM-L6-v2"  # 本地模型目录（相对项目根，离线加载，优先于 embedding_model）
   embedding_offline: true   # 离线：禁止 HuggingFace 联网下载，规避 SSL/httpx 错误
   embedding_base_url: ""
   embedding_api_key_env: "OPENAI_API_KEY"
