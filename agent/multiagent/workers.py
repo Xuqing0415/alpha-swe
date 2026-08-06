@@ -100,8 +100,16 @@ class WorkerAgent:
             tool_schemas=tools.schemas(),
             system_template=system_template,
         )
+        config = self.config
+        try:
+            # Worker 是单任务执行器：团队级工作流由 Orchestrator 展开，这里禁用
+            config = config.model_copy(deep=True)
+            config.skills.enabled = False
+            config.plugin.enabled = False
+        except Exception:
+            pass
         return AgentLoop(
-            config=self.config,
+            config=config,
             llm=self.llm,
             planner=_SingleTaskPlanner(),
             prompt_builder=prompt_builder,

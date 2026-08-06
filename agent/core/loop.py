@@ -17,6 +17,8 @@ from typing import Any, Callable, Dict, List, Optional
 
 from agent.config import AppConfig, load_config, load_mcp_config
 from agent.context.manager import ContextManager
+from agent.context.plugin import PluginManager, ProjectContext
+from agent.context.skill import SkillLibrary
 from agent.core.decision_logger import DecisionLogger
 from agent.core.scheduler import Scheduler
 from agent.core.state import AgentPhase, StateMachine
@@ -77,6 +79,8 @@ class AgentLoop:
         output_callback: Optional[Callable[[str], None]] = None,
         decision_logger: Optional[DecisionLogger] = None,
         confirmation_callback: Optional[Callable[[str, Dict[str, Any]], Any]] = None,
+        plugin_manager: Optional[PluginManager] = None,
+        skill_library: Optional[SkillLibrary] = None,
     ):
         self.config = config or load_config()
         self.state = StateMachine()
@@ -147,6 +151,22 @@ class AgentLoop:
             dag=dag, max_concurrency=self.config.agent.max_concurrency
         )
         self.scheduler.set_worker(self._execute_task)
+        self.scheduler.set_on_task_failed(self._on_task_failed)
+        self.plugins = plugin_manager or PluginManager(
+            plugins_dir=self.config.plugin.dir,
+            whitelist=self.config.active_plugins,
+            max_active=self.config.plugin.max_active,
+            enabled=self.config.plugin.enabled,
+            decision_logger=self._decision,
+        )
+        self.skill_library = skill_library or SkillLibrary(
+            skills_dir=self.config.skills.dir,
+            whitelist=self.config.active_skills,
+            max_active=self.config.skills.max_active,
+            enabled=self.config.skills.enabled,
+            decision_logger=self._decision,
+        )
+        self._project_ctx: Optional[ProjectContext] = None
 
         # 沙箱工作目录
         os.makedirs(self.config.sandbox.workspace, exist_ok=True)
@@ -234,8 +254,13 @@ class AgentLoop:
             f"沙箱网络策略: {self.config.sandbox.network_mode}",
         )
 
-        # 技能/插件上下文 + 长期记忆注入
-        skill = self.context.build_skill_context(prompt)
+        # 技能/插件上下文 + 长期记忆注入（项目上下文扫描一次，供插件/技能匹配）
+        self._project_ctx = ProjectContext.scan(
+            self.config.sandbox.workspace, max_depth=2, max_files=200,
+            skip={"venv", ".venv", "node_modules", "dist", "build",
+                  "__pycache__", ".git", ".idea"},
+        )
+        skill = self._build_injected_context(prompt)
         if skill:
             self.prompt_builder.set_skill(skill)
         memory_hits = self.memory.retrieve(prompt, top_k=self.config.memory.top_k)
@@ -259,8 +284,10 @@ class AgentLoop:
         if memory_text:
             self.prompt_builder.set_memory(memory_text)
 
-        # 规划 -> READY
-        plan = await self.planner.plan(prompt)
+        # 规划 -> READY（技能命中时按工作流展开，否则走 LLM 规划器）
+        plan = self._expand_skills(prompt)
+        if not plan:
+            plan = await self.planner.plan(prompt)
         self.scheduler.submit_plan(plan)
         self._emit("plan_created", total=len(plan),
                    tasks=[t.instruction for t in plan])
@@ -297,6 +324,7 @@ class AgentLoop:
         task.mark(TaskStatus.RUNNING)
         self._emit("task_start", task_id=task.id, instruction=task.instruction)
         self._load_task_memory(task)
+        self._load_task_plugins(task)
         parse_failures = 0
 
         try:
@@ -602,6 +630,83 @@ class AgentLoop:
             )
         except Exception as e:
             logger.warning("任务记忆检索失败: %s", e)
+
+    # ---- 插件/技能（对应设计第 10 节） ----
+    def _build_injected_context(self, instruction: str) -> str:
+        """合并静态技能规则 + 动态插件上下文，注入 Prompt 的 skill 区块。"""
+        parts: List[str] = []
+        try:
+            parts.append(self.context.build_skill_context(instruction))
+        except Exception as e:
+            logger.warning("静态技能上下文构建失败: %s", e)
+        ctx = ProjectContext.from_instruction(instruction, self._project_ctx)
+        try:
+            active = self.plugins.get_active(instruction, ctx.files, ctx.deps)
+            parts.append(self.plugins.to_context(active))
+        except Exception as e:
+            logger.warning("插件激活失败: %s", e)
+        return "\n\n".join(x for x in parts if x)
+
+    def _expand_skills(self, prompt: str) -> List[Task]:
+        """技能命中时把 YAML 工作流展开为子任务 DAG（设计 10.2 节）。"""
+        if not (self.config.skills.enabled and self.config.skills.workflow_enabled):
+            return []
+        try:
+            ctx = ProjectContext.from_instruction(prompt, self._project_ctx)
+            matched = self.skill_library.match(prompt, ctx.files, ctx.deps)
+            if not matched:
+                return []
+            plan: List[Task] = []
+            for skill in matched:
+                self._decision.record(
+                    "skill.activate", "skills.enabled", True,
+                    f"技能 {skill.name}（{len(skill.steps)} 步）命中激活",
+                )
+                plan.extend(self.skill_library.expand(skill, prompt))
+            self._emit("skills_activated",
+                       skills=[s.name for s in matched], total=len(plan))
+            return plan
+        except Exception as e:
+            logger.warning("技能工作流展开失败，回退 LLM 规划: %s", e)
+            return []
+
+    def _load_task_plugins(self, task: Task) -> None:
+        """按子任务指令刷新插件上下文（文件类型/项目依赖触发按任务感知）。"""
+        try:
+            injected = self._build_injected_context(task.instruction)
+            if injected:
+                self.prompt_builder.set_skill(injected)
+        except Exception as e:
+            logger.warning("子任务插件上下文注入失败: %s", e)
+
+    def _on_task_failed(self, task: Task) -> None:
+        """技能步骤失败处理：fallback 回退重试 / orchestrate 升级介入（设计 10.2 节）。"""
+        meta = task.metadata or {}
+        on_failure = str(meta.get("on_failure", ""))
+        if on_failure == "fallback" and meta.get("fallback"):
+            if not self.config.skills.allow_fallback:
+                self._decision.record(
+                    "skill.step_fallback", "skills.allow_fallback", False,
+                    f"步骤 {task.id} 失败但 fallback 被禁用",
+                )
+                return
+            fallback_task = self.scheduler.spawn(
+                instruction=f"{meta['fallback']}（原步骤: {task.instruction[:120]}）",
+                parent_id=task.id,
+                priority=task.priority,
+            )
+            self._decision.record(
+                "skill.step_fallback", "skills.allow_fallback", True,
+                f"技能步骤 {task.id} 失败，回退任务 {fallback_task.id}: "
+                f"{str(meta['fallback'])[:80]}",
+            )
+            self._emit("skill_fallback", task_id=task.id, fallback_id=fallback_task.id)
+        elif on_failure == "orchestrate":
+            self._decision.record(
+                "skill.step_intervention", "skills.workflow_enabled", True,
+                f"技能步骤 {task.id} 需要 Orchestrator/人工介入",
+            )
+            self._emit("skill_intervention", task_id=task.id)
 
     # ---- MCP ----
     async def _register_mcp_tools(self) -> None:

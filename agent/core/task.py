@@ -35,6 +35,7 @@ class Task:
     result: Any = None
     error: Optional[str] = None
     history: List[Dict[str, Any]] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)  # 技能步骤决策点等附加信息
     round_count: int = 0
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     updated_at: str = field(default_factory=lambda: datetime.now().isoformat())
@@ -61,6 +62,7 @@ class Task:
             "parent_id": self.parent_id,
             "result": self.result,
             "error": self.error,
+            "metadata": dict(self.metadata),
             "round_count": self.round_count,
         }
 

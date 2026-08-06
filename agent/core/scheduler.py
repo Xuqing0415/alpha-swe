@@ -19,10 +19,16 @@ logger = logging.getLogger("alpha-swe.scheduler")
 class Scheduler:
     """包装 TaskDAG 的调度入口。"""
 
-    def __init__(self, dag: Optional[TaskDAG] = None, max_concurrency: int = 1):
+    def __init__(self, dag: Optional[TaskDAG] = None, max_concurrency: int = 1,
+                 on_task_failed: Optional[Callable[[Task], None]] = None):
         self.dag = dag or TaskDAG()
         self.max_concurrency = max(max_concurrency, 1)
         self._worker: Optional[Callable[[Task], Awaitable[None]]] = None
+        self._on_task_failed = on_task_failed
+
+    def set_on_task_failed(self, callback: Callable[[Task], None]) -> None:
+        """注册任务失败回调（技能步骤 fallback / 升级介入用）。"""
+        self._on_task_failed = callback
 
     def set_worker(self, worker: Callable[[Task], Awaitable[None]]) -> None:
         """注册任务执行协程（由 AgentLoop 提供）。"""
@@ -61,9 +67,14 @@ class Scheduler:
         return self.dag.ready_tasks()
 
     def on_task_done(self, task: Task) -> None:
-        """任务终结后提升依赖者。"""
+        """任务终结后提升依赖者；失败时触发失败回调（技能步骤决策点）。"""
         if task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED):
             self.dag.promote_dependents(task.id)
+            if task.status == TaskStatus.FAILED and self._on_task_failed is not None:
+                try:
+                    self._on_task_failed(task)
+                except Exception:
+                    logger.exception("任务失败回调异常: %s", task.id)
 
     async def run_to_completion(self) -> None:
         """主调度循环：弹出就绪任务并并行执行，直到 DAG 终结。
