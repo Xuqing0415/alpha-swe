@@ -9,7 +9,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 
 class MsgType(str, Enum):
@@ -26,11 +26,13 @@ class MsgType(str, Enum):
 
 @dataclass
 class Message:
-    """团队内消息。"""
+    """团队内消息（严格格式：发送者/接收者/类型/载荷/优先级/超时）。"""
     sender: str
     receiver: str
     type: str
     payload: Dict[str, Any] = field(default_factory=dict)
+    priority: int = 0                  # 高优先级消息可被调度器插队
+    timeout: Optional[float] = None    # 超时秒数，None = 无限制
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
     ts: str = field(default_factory=lambda: datetime.now().isoformat())
 
@@ -40,6 +42,8 @@ class Message:
             "receiver": self.receiver,
             "type": self.type,
             "payload": self.payload,
+            "priority": self.priority,
+            "timeout": self.timeout,
             "id": self.id,
             "ts": self.ts,
         }

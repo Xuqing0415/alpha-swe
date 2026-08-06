@@ -119,12 +119,14 @@ class WorkerAgent:
         )
 
     def _role_tools(self) -> ToolManager:
+        """按角色构建工具集：read_only 角色只暴露只读文件操作 + 只读命令白名单。"""
         manager = ToolManager()
         wanted = set(self.role.tools)
+        read_only = bool(self.role.read_only)
         if "terminal_execute" in wanted:
-            manager.register(TerminalTool())
+            manager.register(TerminalTool(read_only=read_only))
         if "file_ops" in wanted or "file_search" in wanted:
-            manager.register(FileIOTool())
+            manager.register(FileIOTool(read_only=read_only))
         return manager
 
     def _collect_artifact(self, loop: AgentLoop, result: LoopResult) -> Artifact:
