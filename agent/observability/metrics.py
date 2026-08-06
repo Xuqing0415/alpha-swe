@@ -104,11 +104,11 @@ class MetricsRegistry:
         derived = self.snapshot()["derived"]
         out: List[str] = []
         if derived["token_rate"] > token_rate:
-            out.append(f"⚠ token 消耗过快: {derived['token_rate']:.0f}/s > {token_rate:.0f}/s")
+            out.append(f"token 消耗过快: {derived['token_rate']:.0f}/s > {token_rate:.0f}/s")
         if derived["consecutive_failures"] >= consecutive_failures:
-            out.append(f"⚠ 工具连续失败 {derived['consecutive_failures']} 次")
+            out.append(f"工具连续失败 {derived['consecutive_failures']} 次")
         if max_rounds and derived["rounds"] >= max_rounds * round_ratio:
-            out.append(f"⚠ 循环轮次接近上限 {derived['rounds']}/{max_rounds}")
+            out.append(f"循环轮次接近上限 {derived['rounds']}/{max_rounds}")
         return out
 
     def reset(self) -> None:

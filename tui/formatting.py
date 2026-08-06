@@ -21,32 +21,12 @@ _EVENT_STYLE: Dict[str, str] = {
     "run_error": "bold red",
 }
 
-_EVENT_ICON: Dict[str, str] = {
-    "run_start": "▶",
-    "plan_created": "🗺",
-    "task_start": "◆",
-    "think": "💭",
-    "tool_call": "🔧",
-    "task_done": "✔",
-    "task_interrupted": "⏸",
-    "interrupt": "⚠",
-    "mcp_tools": "🔌",
-    "mcp_resources": "📚",
-    "run_done": "🏁",
-    "run_error": "✖",
-}
-
-
 def format_event(record: Dict[str, Any]) -> Text:
-    """把一条事件记录渲染成单行/多行 Text。"""
+    """把一条事件记录渲染成单行/多行 Text（颜色区分，无图标前缀）。"""
     etype = record.get("type", "unknown")
     data = record.get("data", {})
     style = _EVENT_STYLE.get(etype, "white")
-    icon = _EVENT_ICON.get(etype, "•")
-    text = Text()
-    text.append(f"{icon} ", style=style)
-    text.append(_format_body(etype, data), style=style)
-    return text
+    return Text(_format_body(etype, data), style=style)
 
 
 def _format_body(etype: str, data: Dict[str, Any]) -> str:
@@ -87,10 +67,10 @@ def format_status_line(record: Dict[str, Any]) -> Text:
     """状态栏高亮行（run_done / run_error 用）。"""
     etype = record.get("type", "")
     if etype == "run_done":
-        return Text(f"🏁 {record.get('data', {}).get('final_answer', '')}",
+        return Text(f"{record.get('data', {}).get('final_answer', '')}",
                     style="bold green")
     if etype == "run_error":
-        return Text(f"✖ {record.get('data', {}).get('error', '')}",
+        return Text(f"{record.get('data', {}).get('error', '')}",
                     style="bold red")
     return format_event(record)
 
@@ -116,7 +96,7 @@ def _join(items: Any, limit: int = 6) -> str:
 
 
 def _truncate(text: str, limit: int) -> str:
-    text = text.replace("\n", "⏎ ")
+    text = text.replace("\n", "\\n ")
     return text if len(text) <= limit else text[:limit] + "…"
 
 

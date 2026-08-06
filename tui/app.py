@@ -130,12 +130,6 @@ ConfirmationScreen {
 
 _VIEW_ORDER = ["tab-thought", "tab-tasktree", "tab-metrics", "tab-diff"]
 
-_TASK_ICON = {
-    "idle": "○", "planning": "◌", "ready": "⭘", "running": "▶",
-    "waiting": "⏳", "completed": "✔", "failed": "✖",
-}
-
-
 class ConfirmationScreen(ModalScreen[Any]):
     """高风险工具调用确认弹窗：批准一次 / 批准所有同类 / 拒绝 / 修改参数。"""
 
@@ -151,7 +145,7 @@ class ConfirmationScreen(ModalScreen[Any]):
 
     def compose(self):
         with Vertical(id="confirm-box"):
-            yield Label("⚠ 需要确认", classes="pane-title")
+            yield Label("需要确认", classes="pane-title")
             yield Static(
                 f"[bold]工具[/bold]: {self.tool_name}\n"
                 f"[bold]规则[/bold]: {self.rule or '（无）'}\n"
@@ -251,18 +245,18 @@ class AlphaSWEApp(App[None]):
         with Horizontal(id="body"):
             with Vertical(id="left-box"):
                 with TabbedContent(initial="tab-thought"):
-                    with TabPane("🧠 思维流", id="tab-thought"):
+                    with TabPane("思维流", id="tab-thought"):
                         yield RichLog(id="thought-log", highlight=True,
                                       markup=True, wrap=True, auto_scroll=True)
-                    with TabPane("🗂 任务树", id="tab-tasktree"):
+                    with TabPane("任务树", id="tab-tasktree"):
                         yield Static(id="task-tree-view", markup=True)
-                    with TabPane("📊 监控", id="tab-metrics"):
+                    with TabPane("监控", id="tab-metrics"):
                         yield Static(id="metrics-view", markup=True)
-                    with TabPane("🖊 文件变更", id="tab-diff"):
+                    with TabPane("文件变更", id="tab-diff"):
                         yield RichLog(id="diff-log", highlight=True,
                                       markup=True, wrap=True, auto_scroll=True)
             with Vertical(id="terminal-box"):
-                yield Label("🖥 终端输出", classes="pane-title")
+                yield Label("终端输出", classes="pane-title")
                 yield RichLog(id="terminal-log", highlight=True, markup=True,
                               wrap=True, auto_scroll=True)
         yield Static(id="status")
@@ -294,7 +288,7 @@ class AlphaSWEApp(App[None]):
     # ---- 消息处理 ----
     def on_agent_started_message(self, msg: AgentStartedMessage) -> None:
         self._started_at = time.monotonic()
-        self._append_thought(Text(f"▶ 会话开始：{msg.prompt}", style="bold white"))
+        self._append_thought(Text(f"会话开始：{msg.prompt}", style="bold white"))
         self.refresh_status()
 
     def on_agent_event_message(self, msg: AgentEventMessage) -> None:
@@ -352,14 +346,14 @@ class AlphaSWEApp(App[None]):
         action = params.get("action", "")
         if tool == "file_ops" and action in ("write", "append"):
             self._append_diff(Text(
-                f"✏ {params.get('path', '')} ({action})",
+                f"{params.get('path', '')} ({action})",
                 style="bold yellow"))
             content = str(params.get("content", ""))
             for line in content.splitlines()[:60]:
                 self._append_diff(Text(f"  + {line}", style="green"))
         else:
             self._append_diff(Text(
-                f"⚙ {tool} {_short(params, 120)}", style="dim"))
+                f"{tool} {_short(params, 120)}", style="dim"))
 
     def _append_diff(self, renderable) -> None:
         self.query_one("#diff-log", RichLog).write(renderable)
@@ -372,24 +366,24 @@ class AlphaSWEApp(App[None]):
             return
         elapsed = time.monotonic() - self._started_at
         parts: list[Text] = []
-        parts.append(Text(f"⏱ {elapsed:.1f}s ", style="bold"))
+        parts.append(Text(f"{elapsed:.1f}s ", style="bold"))
 
         if self._finished is not None:
             if isinstance(self._finished, Exception):
-                parts.append(Text(f"✖ 运行异常: {self._finished}",
+                parts.append(Text(f"运行异常: {self._finished}",
                                   style="bold red"))
             else:
                 ok = bool(self._finished and self._finished.ok)
                 style = "bold green" if ok else "bold red"
-                text = (f"🏁 完成 ({self._finished.phase.value})"
-                        if self._finished else "🏁 结束")
+                text = (f"完成 ({self._finished.phase.value})"
+                        if self._finished else "结束")
                 parts.append(Text(text, style=style))
         else:
             loop = runner.loop
             if loop is not None and loop.paused:
-                parts.append(Text("⏸ 已暂停", style="bold yellow"))
+                parts.append(Text("已暂停", style="bold yellow"))
             else:
-                parts.append(Text("▶ 运行中", style="bold cyan"))
+                parts.append(Text("运行中", style="bold cyan"))
 
         task = runner.running_task()
         if task is not None:
@@ -417,10 +411,9 @@ class AlphaSWEApp(App[None]):
         tree = self.query_one("#task-tree-view", Static)
         rows = []
         for t in runner.loop.scheduler.dag.all():
-            icon = _TASK_ICON.get(t.status.value, "·")
-            deps = f" ← {','.join(t.dependencies)}" if t.dependencies else ""
+            deps = f" <- {','.join(t.dependencies)}" if t.dependencies else ""
             rows.append(
-                f"{icon} {t.id} [{t.status.value}] "
+                f"{t.id} [{t.status.value}] "
                 f"{t.instruction[:48]}{deps}"
             )
         tree.update("\n".join(rows) if rows else "（暂无任务）")
@@ -443,7 +436,7 @@ class AlphaSWEApp(App[None]):
         ]
         if alerts:
             lines.append("")
-            lines.extend(f"⚠ {a}" for a in alerts)
+            lines.extend(a for a in alerts)
         mon.update("\n".join(lines))
 
     def _estimate_tokens(self) -> int:
@@ -489,7 +482,7 @@ class AlphaSWEApp(App[None]):
             return
         runner = self.runner
         if runner is None or runner.loop is None:
-            self._append_thought(Text("⚠ Agent 尚未就绪，无法注入指令",
+            self._append_thought(Text("Agent 尚未就绪，无法注入指令",
                                       style="yellow"))
             return
         runner.loop.interrupt(value)
@@ -502,10 +495,10 @@ class AlphaSWEApp(App[None]):
             return
         if runner.loop.paused:
             runner.loop.resume()
-            self._append_thought(Text("▶ 已恢复运行", style="green"))
+            self._append_thought(Text("已恢复运行", style="green"))
         else:
             runner.loop.pause()
-            self._append_thought(Text("⏸ 已暂停（Ctrl+P 恢复）", style="yellow"))
+            self._append_thought(Text("已暂停（Ctrl+P 恢复）", style="yellow"))
         self.refresh_status()
 
     def action_clear_terminal(self) -> None:
@@ -513,7 +506,7 @@ class AlphaSWEApp(App[None]):
 
 
 def _short(value: Any, limit: int) -> str:
-    text = str(value).replace("\n", "⏎ ")
+    text = str(value).replace("\n", "\\n ")
     return text if len(text) <= limit else text[:limit] + "…"
 
 
