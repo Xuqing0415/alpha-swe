@@ -15,6 +15,7 @@ import os
 import re
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from agent.config import AppConfig, load_config, load_mcp_config
@@ -44,8 +45,6 @@ from agent.tools.manager import ToolManager
 from agent.tools.terminal import TerminalTool
 
 logger = logging.getLogger("alpha-swe.loop")
-
-OBSERVATION_TRUNCATE = 2000
 
 
 class TaskInterrupted(Exception):
@@ -674,7 +673,7 @@ class AgentLoop:
                         for name, params in calls:
                             results.append(await self._run_tool(name, params, task))
                     for (name, params), result in zip(calls, results):
-                        obs = self._summarize_observation(name, result)
+                        obs = await self._summarize_observation(name, result)
                         task.history.append({"role": "observation", "content": obs})
                         self._emit("tool_call", task_id=task.id, tool=name,
                                    params=params, success=result.success,
@@ -990,16 +989,95 @@ class AgentLoop:
         text = str(params)
         return text if len(text) <= limit else text[:limit] + f"...({len(text)} chars)"
 
-    @staticmethod
-    def _summarize_observation(tool_name: str, result) -> str:
-        """过长工具输出截断为摘要（原始输出在完整日志中可查）。"""
-        if result.error:
-            text = f"[{tool_name}] 失败: {result.error}"
+    async def _summarize_observation(self, tool_name: str, result) -> str:
+        """工具输出三级处理（方案 2.2）：全文 / 头尾+存档 / LLM 摘要+关键行+存档。
+
+        - <= output_truncate：全文保留；
+        - <= 20_000：保留头 500 + 尾 500，完整输出存档 logs/outputs/；
+        - > 20_000：LLM 生成摘要 + 正则提取错误/警告行，完整输出存档。
+        """
+        text = (f"[{tool_name}] 失败: {result.error}"
+                if result.error else f"[{tool_name}] {result.output}")
+        truncate = int(getattr(self.config.context, "output_truncate", 2000))
+        if len(text) <= truncate:
+            return text
+
+        raw = result.error or result.output or ""
+        lines = raw.splitlines()
+        ref = self._archive_tool_output(tool_name, raw)
+        key_lines = self._extract_key_output_lines(raw)
+        self._decision.record(
+            "output.truncated", "context.output_truncate", truncate,
+            f"{tool_name} 输出 {len(text)} 字符/{len(lines)} 行已压缩"
+            f"{'（原始输出: ' + ref + '）' if ref else ''}",
+        )
+
+        if len(text) > 20_000:
+            summary = await self._llm_summarize_output(tool_name, raw)
+            if summary:
+                body = f"摘要: {summary}"
+            else:
+                body = ("关键行: " + ("；".join(key_lines[:12])
+                                      if key_lines else "(无法提取关键行)"))
         else:
-            text = f"[{tool_name}] {result.output}"
-        if len(text) > OBSERVATION_TRUNCATE:
-            text = text[:OBSERVATION_TRUNCATE] + "\n...[输出过长已截断]..."
-        return text
+            head = text[:500]
+            tail = text[-500:]
+            body = (f"关键行: {'；'.join(key_lines[:8]) if key_lines else '（无）'}\n"
+                    f"开头: {head}\n结尾: {tail}")
+        ref_note = f"，原始输出: {ref}" if ref else "（原始输出存档失败）"
+        return (f"{text[:200]}…(共 {len(text)} 字符/{len(lines)} 行，"
+                f"已压缩{ref_note})\n{body}")
+
+    def _archive_tool_output(self, tool_name: str, raw: str) -> str:
+        """长工具输出存档到 logs/outputs/，返回相对路径（失败返回空串）。"""
+        try:
+            out_dir = Path(self.config.context.archive_dir).parent / "outputs"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            name = f"{int(time.time())}_{tool_name.replace(':', '_')}_{len(raw)}.txt"
+            (out_dir / name).write_text(raw, encoding="utf-8", errors="replace")
+            return str(out_dir / name)
+        except OSError as e:
+            logger.warning("工具输出存档失败: %s", e)
+            return ""
+
+    @staticmethod
+    def _extract_key_output_lines(raw: str, max_lines: int = 12) -> List[str]:
+        """用正则提取错误/警告/关键状态行（保留文件路径与行号细节）。"""
+        patterns = [
+            re.compile(r"(?i)(error|traceback|exception|failed|failure|fatal|killed|timeout)"),
+            re.compile(r"(?i)(warning|warn|deprecat)"),
+            re.compile(r"(?i)(assert|expected|actual|got|exit\s*code|status\s*[:=])"),
+        ]
+        seen: set = set()
+        key_lines: List[str] = []
+        for ln in raw.splitlines():
+            s = ln.strip()
+            if not s or s in seen:
+                continue
+            if any(p.search(ln) for p in patterns):
+                seen.add(s)
+                key_lines.append(s[:300])
+            if len(key_lines) >= max_lines:
+                break
+        return key_lines
+
+    async def _llm_summarize_output(self, tool_name: str, raw: str) -> str:
+        """超长输出用 LLM 生成摘要；MockLLM（脚本化测试）不消费响应。"""
+        try:
+            from agent.llm import MockLLM
+            if isinstance(self.llm, MockLLM):
+                return ""
+            prompt = (
+                f"以下是工具 {tool_name} 的输出（可能截断）。"
+                f"请提取关键信息并输出 200 字以内要点，"
+                f"必须保留所有错误、警告、文件路径与行号。\n\n"
+                f"{raw[:30000]}"
+            )
+            resp = await self.llm.complete([{"role": "user", "content": prompt}])
+            return (resp or "").strip()[:800]
+        except Exception as e:
+            logger.warning("输出摘要生成失败: %s", e)
+            return ""
 
     async def _remember_experience(self, task: Task) -> None:
         """任务完成后生成经验摘要并写入长期记忆（设计 7.2 节）。
