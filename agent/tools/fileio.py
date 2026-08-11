@@ -17,6 +17,14 @@ from agent.tools.base import ErrorCategory, ExecutionContext, Tool, ToolResult
 
 TRAVERSAL_PATTERN = re.compile(r"(\.\./|\.\.\\)")
 
+# 搜索时自动排除的目录（方案 3.1：避免噪音与性能损耗）
+SEARCH_EXCLUDED_DIRS = {
+    "node_modules", ".git", "__pycache__", "dist", "build",
+    "venv", ".venv", ".idea", ".pytest_cache", ".mypy_cache",
+}
+# 搜索结果超过该数量时只返回前 N 条 + 统计
+SEARCH_RESULT_CAP = 50
+
 
 def resolve_workspace_path(workspace: str, path: str) -> Path:
     """把相对路径解析到工作区内；绝对路径必须落在工作区内。"""
@@ -271,30 +279,45 @@ class FileIOTool(Tool):
                               elapsed_ms=(time.time() - start) * 1000,
                               error_category=ErrorCategory.PERMANENT)
 
-        def _scan(path: Path) -> List[str]:
+        def _scan(path: Path):
+            """返回 (前 SEARCH_RESULT_CAP 条命中, 总命中数)。
+
+            全量计数保证统计准确，只保留前 N 条控制返回体积（方案 3.1）。
+            """
             hits: List[str] = []
+            total = 0
+
+            def _count(p: Path) -> None:
+                nonlocal total
+                for lineno, line in enumerate(
+                        p.read_text(encoding="utf-8", errors="ignore").splitlines(), 1):
+                    if regex.search(line):
+                        total += 1
+                        if len(hits) < SEARCH_RESULT_CAP:
+                            hits.append(
+                                f"{p.relative_to(target.parent) if target.is_dir() else p}"
+                                f":{lineno}: {line.strip()[:200]}")
+
             if path.is_file():
-                _match_in_file(path, regex, hits)
+                _count(path)
             elif path.is_dir():
                 for p in sorted(path.rglob("*")):
+                    if any(part in SEARCH_EXCLUDED_DIRS for part in p.parts):
+                        continue  # 跳过依赖/构建/版本控制目录（方案 3.1）
                     if p.is_file() and p.suffix in (".py", ".ts", ".js", ".tsx", ".jsx",
                                                     ".md", ".txt", ".json", ".yaml", ".yml"):
-                        _match_in_file(p, regex, hits)
-            return hits
+                        _count(p)
+            return hits, total
 
-        def _match_in_file(p: Path, rx: "re.Pattern[str]", hits: List[str]) -> None:
-            try:
-                for lineno, line in enumerate(p.read_text(encoding="utf-8", errors="ignore").splitlines(), 1):
-                    if rx.search(line):
-                        hits.append(f"{p.relative_to(target.parent) if target.is_dir() else p}:{lineno}: {line.strip()[:200]}")
-            except OSError:
-                pass
-
-        hits = await asyncio.to_thread(_scan, target)
-        if not hits:
-            return ToolResult(success=True, output=f"未匹配到 '{pattern}'",
+        shown, total = await asyncio.to_thread(_scan, target)
+        if not total:
+            return ToolResult(success=True, output=f"未匹配到 \'{pattern}\'",
                               metadata={"hits": 0}, elapsed_ms=(time.time() - start) * 1000)
+        suffix = ""
+        if total > SEARCH_RESULT_CAP:
+            suffix = (f"\n...（共 {total} 处，仅显示前 {SEARCH_RESULT_CAP} 条，"
+                      "建议缩小搜索范围或加更精确的关键词）")
         return ToolResult(success=True,
-                          output=f"匹配 {len(hits)} 处:\n" + "\n".join(hits[:100]),
-                          metadata={"hits": len(hits)},
+                          output=f"匹配 {total} 处:\n" + "\n".join(shown) + suffix,
+                          metadata={"hits": total, "truncated": total > SEARCH_RESULT_CAP},
                           elapsed_ms=(time.time() - start) * 1000)

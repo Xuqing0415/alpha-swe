@@ -41,6 +41,46 @@ def test_resolve_workspace_path_rejects_escape(ws_tmp):
 
 
 @pytest.mark.asyncio
+async def test_file_search_skips_excluded_dirs(ws_tmp):
+    """方案 3.1：搜索跳过 node_modules/.git/__pycache__ 等目录。"""
+    from agent.tools import fileio as fileio_mod
+
+    ctx = ExecutionContext(workspace=str(ws_tmp))
+    tool = FileIOTool()
+    (ws_tmp / "src").mkdir(parents=True)
+    (ws_tmp / "src" / "app.py").write_text("target_symbol\n", encoding="utf-8")
+    (ws_tmp / "node_modules").mkdir()
+    (ws_tmp / "node_modules" / "dep.py").write_text("target_symbol\n", encoding="utf-8")
+    (ws_tmp / "__pycache__").mkdir()
+    (ws_tmp / "__pycache__" / "cache.py").write_text("target_symbol\n", encoding="utf-8")
+
+    r = await tool.execute({"action": "search", "path": ".",
+                            "pattern": "target_symbol"}, ctx)
+    assert r.success
+    assert r.metadata["hits"] == 1  # 只有 src/app.py 命中
+    assert "app.py" in r.output and "node_modules" not in r.output
+
+
+@pytest.mark.asyncio
+async def test_file_search_caps_and_marks_truncated(ws_tmp, monkeypatch):
+    """方案 3.1：超过上限只返回前 N 条并给出统计提示。"""
+    from agent.tools import fileio as fileio_mod
+
+    monkeypatch.setattr(fileio_mod, "SEARCH_RESULT_CAP", 5)
+    ctx = ExecutionContext(workspace=str(ws_tmp))
+    tool = FileIOTool()
+    for i in range(8):
+        (ws_tmp / f"f{i}.py").write_text("needle\n", encoding="utf-8")
+    r = await tool.execute({"action": "search", "path": ".",
+                            "pattern": "needle"}, ctx)
+    assert r.success
+    assert r.metadata["hits"] == 8
+    assert r.metadata["truncated"] is True
+    assert "共 8 处，仅显示前 5 条" in r.output
+    assert r.output.count("f") >= 5  # 至少 5 条结果
+
+
+@pytest.mark.asyncio
 async def test_terminal_echo(ws_tmp):
     ctx = ExecutionContext(workspace=str(ws_tmp))
     tool = TerminalTool()
