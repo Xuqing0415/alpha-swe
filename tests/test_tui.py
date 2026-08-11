@@ -799,3 +799,110 @@ async def test_tui_f5_cycles_to_timeline_view(ws_tmp):
         text = str(view.content)
         assert "task:t0" in text or "总耗时" in text
 
+
+
+# ---- 可选项交互：时间线选中/详情 + 文件树增量更新 ----
+@pytest.mark.asyncio
+async def test_tui_timeline_select_and_detail(ws_tmp):
+    """时间线视图：上/下选中 span，Enter 弹出详情（参数/输出/错误）。"""
+    from tui.timeline_view import TimelineView
+
+    cfg = make_config(ws_tmp)
+    llm = ScriptedLLM('{"final_answer": "完成"}')
+    app = AlphaSWEApp("时间线交互", config=cfg, llm=llm,
+                      planner=StubPlanner())
+    async with app.run_test(size=(120, 40)) as pilot:
+        for _ in range(100):
+            await pilot.pause(0.05)
+            if app._finished is not None:
+                break
+        loop = app.runner.loop
+        s1 = loop.tracer.start_span("tool:terminal: ls", "tool",
+                                    params='{"command": "ls"}')
+        s1.end("ok", out="src/ tests/")
+        s2 = loop.tracer.start_span("task:t0", "task")
+        s2.end("error", "boom")
+        # 循环到时间线视图
+        for _ in range(len(__import__("tui.app",
+                                      fromlist=["_MAIN_VIEWS"])._MAIN_VIEWS)):
+            app.action_cycle_main_view()
+            await pilot.pause()
+            if app._main_view == "timeline":
+                break
+        app.refresh_views()
+        view = app.query_one("#timeline-view", TimelineView)
+        assert len(view._rows) >= 2
+        assert view._selected == 0
+        view.focus()  # 时间线视图接收键盘
+        await pilot.pause()
+        # 选中行应带 > 标记
+        assert ">" in str(view.content)
+        # 定位到工具 span（含 params/out），再上下移动验证选中
+        idx = next(i for i, r in enumerate(view._rows)
+                   if r["name"] == "tool:terminal: ls")
+        for _ in range(idx):
+            await pilot.press("down")
+        assert view._selected == idx
+        await pilot.press("up")
+        assert view._selected == idx - 1
+        await pilot.press("down")
+        assert view._selected == idx
+        # Enter 打开详情弹窗（轮询等挂载，弹窗组件挂在 app.screen）
+        await pilot.press("enter")
+        box = None
+        for _ in range(50):
+            await pilot.pause(0.05)
+            try:
+                box = app.screen.query_one("#timeline-detail-box", Static)
+                break
+            except Exception:
+                continue
+        assert box is not None, "详情弹窗未挂载"
+        text = str(box.render())
+        assert "tool:terminal: ls" in text
+        assert "参数" in text and "command" in text
+        assert "输出" in text and "src/ tests/" in text
+        # Esc 关闭
+        await pilot.press("escape")
+        await pilot.pause()
+        assert app.screen.__class__.__name__ != "TimelineDetailScreen"
+
+
+@pytest.mark.asyncio
+async def test_tui_file_tree_incremental_new_file(ws_tmp):
+    """文件树增量更新：Agent 新建文件后自动出现在树中并打 * 标记。"""
+    from tui.file_tree import FileTreeView
+
+    ws = ws_tmp / "ws"
+    (ws / "src").mkdir(parents=True, exist_ok=True)
+    (ws / "src" / "main.py").write_text("x = 1\n", encoding="utf-8")
+
+    cfg = make_config(ws_tmp)
+    app = AlphaSWEApp("文件树增量", config=cfg, llm=MockLLM(),
+                      planner=StubPlanner())
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        app.action_toggle_file_tree()  # 先构建一次
+        await pilot.pause()
+        tree = app.query_one("#file-tree", FileTreeView)
+        texts = "".join(str(item.children[0].content)
+                         for item in tree.children)
+        assert "main.py" in texts and "new.py" not in texts
+        # Agent 新建文件（真实事件，meta 为绝对路径）
+        new_file = ws / "src" / "new.py"
+        new_file.write_text("y = 2\n", encoding="utf-8")
+        record = {
+            "type": "tool_call",
+            "data": {"tool": "file_ops",
+                     "params": {"action": "write", "path": "src/new.py"},
+                     "success": True,
+                     "meta": {"path": str(new_file)}},
+        }
+        app.on_agent_event_message(type("E", (), {"record": record})())
+        await pilot.pause()
+        texts = "".join(str(item.children[0].content)
+                         for item in tree.children)
+        assert "new.py" in texts, texts
+        # 新文件应带 * 修改标记（绝对路径与树节点一致）
+        assert any("*" in str(item.children[0].content)
+                   for item in tree.children)

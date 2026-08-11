@@ -41,7 +41,7 @@ from tui.formatting import format_event
 from tui.vlog import VirtualLog
 from tui.diff_renderer import diff_summary, render_unified_diff
 from tui.file_tree import FileTreeView
-from tui.timeline_view import render_timeline
+from tui.timeline_view import TimelineDetailScreen, TimelineView
 from tui.messages import (AgentEventMessage, AgentFinishedMessage,
                           AgentStartedMessage, ConfirmationRequestMessage,
                           TerminalOutputMessage)
@@ -206,6 +206,18 @@ ConfirmationScreen {
 #confirm-input {
     height: 3;
 }
+
+TimelineDetailScreen {
+    align: center middle;
+}
+
+#timeline-detail-box {
+    width: 80;
+    height: auto;
+    border: round white;
+    padding: 1 2;
+    background: $panel;
+}
 """
 
 _HELP_TEXT = """[bold]Alpha-SWE 快捷键[/bold]
@@ -218,6 +230,7 @@ _HELP_TEXT = """[bold]Alpha-SWE 快捷键[/bold]
 [green]Ctrl+R[/green]  重试当前步骤 [green]Ctrl+S[/green]  跳过当前步骤
 [green]Ctrl+L[/green]  清空终端    [green]Tab[/green]    切换焦点
 [green]上/下[/green]  输入历史    [green]Esc[/green]    清空输入
+[green]时间线[/green]  上/下 选中，Enter 详情，Esc 关闭
 [green]Ctrl+C[/green] / [green]q[/green]  退出
 
 [bold]输入命令（/ 开头）[/bold]
@@ -440,7 +453,7 @@ class AlphaSWEApp(App[None]):
                     yield RichLog(id="diff-log", highlight=True, markup=True,
                                   wrap=True, auto_scroll=True)
                     yield Static("", id="metrics-view", markup=True)
-                    yield Static("", id="timeline-view", markup=True)
+                    yield TimelineView(id="timeline-view")
                     with Vertical(id="terminal-box"):
                         yield Label("终端输出", id="terminal-title")
                         yield RichLog(id="terminal-log", highlight=True,
@@ -758,15 +771,13 @@ class AlphaSWEApp(App[None]):
         if tracer is None:
             return
         rows = tracer.get_timeline_data(limit=200)
-        view = self.query_one("#timeline-view", Static)
-        width = max(self.size.width - 4, 40)
-        lines = render_timeline(rows, width=width,
-                                narrow=self._is_compact())
-        combined = Text()
-        for line in lines:
-            combined.append_text(line)
-            combined.append("\n")
-        view.update(combined)
+        view = self.query_one("#timeline-view", TimelineView)
+        view.set_rows(rows, width=max(self.size.width - 4, 40),
+                      narrow=self._is_compact())
+
+    def show_timeline_detail(self, row: dict) -> None:
+        """时间线 Enter：弹出 span 详情（参数/输出摘要/错误）。"""
+        self.push_screen(TimelineDetailScreen(row))
 
     def _estimate_tokens(self) -> int:
         runner = self.runner
@@ -963,12 +974,14 @@ class AlphaSWEApp(App[None]):
             return
         self._tree_modified.add(path)
         self._tree_active = path
-        if self._left_view == "tree":
-            try:
-                self.query_one("#file-tree", FileTreeView).set_marks(
-                    self._tree_modified, self._tree_active)
-            except Exception:
-                pass
+        if self._left_view != "tree":
+            return
+        tree = self.query_one("#file-tree", FileTreeView)
+        if tree._tree is None or not tree.has_path(path):
+            # 新文件 / 首次构建：重建树以显示新增路径
+            self._refresh_tree(force=True)
+        else:
+            tree.set_marks(self._tree_modified, self._tree_active)
 
     def action_show_terminal(self) -> None:
         if self._terminal_diff_mode and self._diff_lines:
@@ -986,14 +999,19 @@ class AlphaSWEApp(App[None]):
         self._apply_layout()
 
     def action_cycle_main_view(self) -> None:
+        prev = self._main_view
         idx = _MAIN_VIEWS.index(self._main_view)
         self._main_view = _MAIN_VIEWS[(idx + 1) % len(_MAIN_VIEWS)]
         self.query_one("#main-log", VirtualLog).display = self._main_view == "log"
         self.query_one("#diff-log", RichLog).display = self._main_view == "diff"
         self.query_one("#metrics-view", Static).display = (
             self._main_view == "metrics")
-        self.query_one("#timeline-view", Static).display = (
+        self.query_one("#timeline-view", TimelineView).display = (
             self._main_view == "timeline")
+        if self._main_view == "timeline":
+            self.query_one("#timeline-view", TimelineView).focus()
+        elif prev == "timeline":
+            self.query_one("#input-bar").focus()
 
     def action_focus_input(self) -> None:
         box = self.query_one("#input-bar", CommandInput)

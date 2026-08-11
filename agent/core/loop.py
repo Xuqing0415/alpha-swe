@@ -731,10 +731,14 @@ class AgentLoop:
                 ),
             )
             self.metrics.record_tool_result(result.success)
+            end_attrs = {}
+            if result.output:
+                end_attrs["out"] = (result.output or "")[:240]
             self.tracer.end_span(
                 span,
                 status="ok" if result.success else "error",
                 error=result.error or "",
+                **end_attrs,
             )
             return result
         except Exception:

@@ -123,13 +123,19 @@ class Tracer:
             for s in spans:
                 if s.end_ts is None:
                     continue
-                rows.append({
+                row = {
                     "name": s.name,
                     "kind": s.kind,
                     "start": s.start_ts,
                     "duration": s.duration_ms / 1000.0,
                     "status": s.status,
-                })
+                }
+                if s.error:
+                    row["error"] = s.error
+                for key in ("params", "out"):
+                    if s.attributes.get(key):
+                        row[key] = s.attributes[key]
+                rows.append(row)
         if not rows:
             return rows
         base = min(r["start"] for r in rows)

@@ -163,6 +163,19 @@ class FileTreeView(ListView):
         self._filter = text
         self.render_visible()
 
+    def has_path(self, path: str) -> bool:
+        """树中是否已存在该路径（增量更新：新文件才重建）。"""
+        target = str(Path(path))
+        if self._tree is None:
+            return False
+        stack = [self._tree]
+        while stack:
+            node = stack.pop()
+            if node.path == target:
+                return True
+            stack.extend(node.children)
+        return False
+
     def render_visible(self) -> None:
         self.clear()
         if self._tree is None:
