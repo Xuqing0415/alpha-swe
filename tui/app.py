@@ -446,7 +446,8 @@ class AlphaSWEApp(App[None]):
             with Horizontal(id="body"):
                 yield Static("", id="task-panel", markup=True)
                 with Vertical(id="file-tree-box"):
-                    yield Label("文件树（/ 搜索）", classes="pane-title")
+                    yield Label("文件树（/ 搜索）", id="file-tree-title",
+                                classes="pane-title")
                     yield FileTreeView(id="file-tree")
                 with Vertical(id="main-area"):
                     yield VirtualLog(id="main-log")
@@ -892,6 +893,34 @@ class AlphaSWEApp(App[None]):
                                    style="bold yellow"))
         for line in lines[:500]:
             self._append_terminal(Text(line))
+
+    def show_tree_files(self, paths: List[str]) -> None:
+        """批量打开选中文件：逐个预览到终端输出区。"""
+        if not paths:
+            return
+        self._append_terminal(Text(
+            f"--- 批量打开 {len(paths)} 个文件 ---", style="bold yellow"))
+        for path in paths:
+            self.show_tree_file(path)
+
+    def copy_tree_paths(self, paths: List[str]) -> None:
+        """把选中文件路径写入输入栏（供继续输入命令）。"""
+        if not paths:
+            return
+        box = self.query_one("#input-bar", CommandInput)
+        box.value = " ".join(paths)
+        box.focus()
+
+    def on_tree_selection_changed(self) -> None:
+        """文件树选择变化：刷新面板标题的已选计数。"""
+        try:
+            tree = self.query_one("#file-tree", FileTreeView)
+            title = self.query_one("#file-tree-title", Label)
+            count = tree.selection_count()
+            title.update(f"文件树（/ 搜索" +
+                         (f" · 已选 {count}" if count else "") + "）")
+        except Exception:
+            pass
 
     def focus_tree_search(self) -> None:
         """文件树搜索：输入栏进入过滤模式（/ 触发）。"""

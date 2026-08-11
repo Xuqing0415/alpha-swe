@@ -906,3 +906,76 @@ async def test_tui_file_tree_incremental_new_file(ws_tmp):
         # 新文件应带 * 修改标记（绝对路径与树节点一致）
         assert any("*" in str(item.children[0].content)
                    for item in tree.children)
+
+# ---- 文件树多选/批量操作（本迭代） ----
+def test_file_tree_render_selected_marker(ws_tmp):
+    """render_node：selected 路径渲染 [x] 标记（多选视觉反馈）。"""
+    from tui.file_tree import build_tree, render_node
+
+    ws = ws_tmp / "ft"
+    (ws / "src").mkdir(parents=True, exist_ok=True)
+    (ws / "src" / "a.py").write_text("x", encoding="utf-8")
+    tree = build_tree(str(ws))
+    assert tree is not None
+    node = tree.children[0].children[0]  # src/a.py
+    plain = render_node(node, 2, True, selected={node.path}).plain
+    assert "[x]" in plain
+    plain2 = render_node(node, 2, True, selected=set()).plain
+    assert "[x]" not in plain2
+
+
+@pytest.mark.asyncio
+async def test_tui_file_tree_multi_select_actions(ws_tmp):
+    """文件树多选：Space 连选 + [x] 标记 + 标题计数 + a/x/c/o 批量操作。"""
+    from tui.file_tree import FileTreeView
+
+    ws = ws_tmp / "ws"
+    (ws / "src").mkdir(parents=True, exist_ok=True)
+    (ws / "src" / "main.py").write_text("x = 1\n", encoding="utf-8")
+    (ws / "src" / "utils.py").write_text("y = 2\n", encoding="utf-8")
+
+    cfg = make_config(ws_tmp)
+    app = AlphaSWEApp("文件树多选", config=cfg, llm=MockLLM(),
+                      planner=StubPlanner())
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        app.action_toggle_file_tree()
+        await pilot.pause()
+        tree = app.query_one("#file-tree", FileTreeView)
+        assert tree.has_focus, "进入文件树后应获得焦点"
+        # 导航到 main.py 并按 Space 选中，再下移选中 utils.py
+        await pilot.press("down", "down")
+        await pilot.press("space")
+        await pilot.press("down")
+        await pilot.press("space")
+        await pilot.pause()
+        assert tree.selection_count() == 2
+        rendered = "".join(str(item.children[0].content)
+                           for item in tree.children)
+        assert rendered.count("[x]") == 2, rendered
+        # 标题显示已选计数
+        title = app.query_one("#file-tree-title")
+        assert "已选 2" in str(title.render())
+        # x 清空选择
+        await pilot.press("x")
+        await pilot.pause()
+        assert tree.selection_count() == 0
+        # a 全选当前可见文件
+        await pilot.press("a")
+        await pilot.pause()
+        assert tree.selection_count() >= 2
+        # c 复制路径到输入栏（供继续输入命令）
+        await pilot.press("c")
+        await pilot.pause()
+        box = app.query_one("#input-bar", Input)
+        assert "main.py" in box.value and "utils.py" in box.value
+        # o 批量打开：终端区预览各文件内容
+        # （c 已把焦点切到输入栏，先切回文件树再按 o）
+        tree.focus()
+        await pilot.pause()
+        before = len(app._terminal_lines)
+        await pilot.press("o")
+        await pilot.pause()
+        joined = "".join(str(t) for t in app._terminal_lines[before:])
+        assert "批量打开" in joined
+        assert "x = 1" in joined and "y = 2" in joined

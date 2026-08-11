@@ -106,9 +106,11 @@ def _fmt_size(size: int) -> str:
 
 def render_node(node: TreeNode, depth: int, is_last: bool, *,
                 modified: Optional[Set[str]] = None,
-                active: str = "") -> Text:
+                active: str = "",
+                selected: Optional[Set[str]] = None) -> Text:
     """把单个节点渲染为带缩进/连线/标记的 Text。"""
     modified = modified or set()
+    selected = selected or set()
     if depth == 0:
         prefix = ""
     else:
@@ -123,6 +125,8 @@ def render_node(node: TreeNode, depth: int, is_last: bool, *,
         parts.append(prefix + name, style="white")
         parts.append(" " * max(1, 30 - len(prefix + name))
                      + _fmt_size(node.size), style="bright_black")
+    if node.path in selected:
+        parts.append(" [x]", style="yellow")
     if node.path in modified:
         parts.append(" *", style="yellow")
     return parts
@@ -135,6 +139,11 @@ class FileTreeView(ListView):
         Binding("right", "toggle_node", "展开", show=False),
         Binding("left", "collapse_node", "折叠", show=False),
         Binding("/", "focus_search", "搜索", show=False),
+        Binding("space", "toggle_select", "多选", show=False),
+        Binding("a", "select_all_visible", "全选", show=False),
+        Binding("x", "clear_selection", "清空选择", show=False),
+        Binding("o", "open_selected", "打开选中", show=False),
+        Binding("c", "copy_selected_paths", "复制路径", show=False),
     ]
 
     def __init__(self, root: Optional[str] = None, **kwargs):
@@ -145,6 +154,7 @@ class FileTreeView(ListView):
         self._filter = ""
         self._modified: Set[str] = set()
         self._active = ""
+        self._selected_paths: Set[str] = set()
 
     def refresh_tree(self, root: Optional[str] = None) -> None:
         """重新扫描并渲染文件树（保持折叠/过滤状态）。"""
@@ -176,7 +186,65 @@ class FileTreeView(ListView):
             stack.extend(node.children)
         return False
 
+    def selection_count(self) -> int:
+        return len(self._selected_paths)
+
+    # ---- 多选与批量操作 ----
+    def _notify_host(self) -> None:
+        host = self.app
+        if hasattr(host, "on_tree_selection_changed"):
+            host.on_tree_selection_changed()
+
+    def action_toggle_select(self) -> None:
+        """Space：选中/取消选中当前高亮节点。"""
+        item = self.highlighted_child
+        node = getattr(item, "_tree_node", None) if item else None
+        if node is None:
+            return
+        if node.path in self._selected_paths:
+            self._selected_paths.discard(node.path)
+        else:
+            self._selected_paths.add(node.path)
+        self.render_visible()
+        self._notify_host()
+
+    def action_select_all_visible(self) -> None:
+        """A：全选当前可见文件（过滤结果内）。"""
+        if self._tree is None:
+            return
+        for node, _depth, _last in iter_visible(
+                self._tree, self._collapsed, self._filter):
+            if not node.is_dir:
+                self._selected_paths.add(node.path)
+        self.render_visible()
+        self._notify_host()
+
+    def action_clear_selection(self) -> None:
+        """X：清空所有选择。"""
+        self._selected_paths.clear()
+        self.render_visible()
+        self._notify_host()
+
+    def action_open_selected(self) -> None:
+        """O：批量打开选中文件（终端区预览）。"""
+        paths = sorted(self._selected_paths)
+        if not paths:
+            return
+        host = self.app
+        if hasattr(host, "show_tree_files"):
+            host.show_tree_files(paths)
+
+    def action_copy_selected_paths(self) -> None:
+        """C：把选中路径复制到输入栏供继续输入命令。"""
+        paths = sorted(self._selected_paths)
+        if not paths:
+            return
+        host = self.app
+        if hasattr(host, "copy_tree_paths"):
+            host.copy_tree_paths(paths)
+
     def render_visible(self) -> None:
+        keep = self.index if self.index is not None else 0
         self.clear()
         if self._tree is None:
             self.append(ListItem(Label("（工作区不可用）", classes="dim")))
@@ -184,10 +252,13 @@ class FileTreeView(ListView):
         for node, depth, is_last in iter_visible(
                 self._tree, self._collapsed, self._filter):
             row = render_node(node, depth, is_last,
-                              modified=self._modified, active=self._active)
+                              modified=self._modified, active=self._active,
+                              selected=self._selected_paths)
             item = ListItem(Label(row))
             item._tree_node = node  # type: ignore[attr-defined]
             self.append(item)
+        if self.children:
+            self.index = min(keep, len(self.children) - 1)
 
     # ---- 动作 ----
     def action_toggle_node(self) -> None:
