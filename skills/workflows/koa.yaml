@@ -1,0 +1,14 @@
+# 技能：Koa 后端约定（上下文建议）
+name: koa
+version: "1.0.0"
+description: Koa 后端开发规范（中间件、错误处理、响应结构）
+priority: 5
+requires: []
+permissions: [file_read, file_write]
+tags: [backend, koa]
+triggers:
+  project_dep: [koa]
+steps:
+  - name: apply-conventions
+    instruction: 按 Koa 约定实现中间件、错误处理与统一响应，并验证
+    dependencies: []

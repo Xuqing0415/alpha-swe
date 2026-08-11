@@ -1,0 +1,14 @@
+# 技能：Prisma 约定（上下文建议）
+name: prisma
+version: "1.0.0"
+description: Prisma schema/迁移约定（schema 定义、migrate、client 使用）
+priority: 4
+requires: []
+permissions: [file_read, file_write, terminal_execute]
+tags: [db, orm, prisma]
+triggers:
+  project_dep: [prisma]
+steps:
+  - name: apply-conventions
+    instruction: 按 Prisma 约定更新 schema、生成迁移并验证 client 可用
+    dependencies: []

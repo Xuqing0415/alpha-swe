@@ -1,0 +1,19 @@
+# 技能：Django 后端约定（上下文建议）
+name: django
+version: "1.0.0"
+description: Django 后端开发规范（模型、视图、URL、迁移）
+priority: 5
+requires: [python]
+permissions: [file_read, file_write, terminal_execute]
+tags: [backend, django]
+params:
+  app_name:
+    type: string
+    required: true
+    description: Django 应用名
+triggers:
+  project_dep: [django]
+steps:
+  - name: apply-conventions
+    instruction: 按 Django 约定实现模型/视图/URL 与迁移，并验证
+    dependencies: []

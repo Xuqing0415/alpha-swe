@@ -1,0 +1,14 @@
+# 技能：FastAPI 后端约定（上下文建议）
+name: fastapi
+version: "1.0.0"
+description: FastAPI 后端开发规范（Pydantic 校验、依赖注入、OpenAPI）
+priority: 5
+requires: [python]
+permissions: [file_read, file_write]
+tags: [backend, fastapi]
+triggers:
+  project_dep: [fastapi]
+steps:
+  - name: apply-conventions
+    instruction: 按 FastAPI 约定实现路由、Pydantic 模型校验与响应模型，并验证
+    dependencies: []

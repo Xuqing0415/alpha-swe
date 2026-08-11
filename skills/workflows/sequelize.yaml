@@ -1,0 +1,14 @@
+# 技能：Sequelize 约定（上下文建议）
+name: sequelize
+version: "1.0.0"
+description: Sequelize 模型/迁移约定（模型定义、迁移、关联）
+priority: 4
+requires: []
+permissions: [file_read, file_write, terminal_execute]
+tags: [db, orm, sequelize]
+triggers:
+  project_dep: [sequelize]
+steps:
+  - name: apply-conventions
+    instruction: 按 Sequelize 约定定义模型与迁移并验证数据库结构
+    dependencies: []

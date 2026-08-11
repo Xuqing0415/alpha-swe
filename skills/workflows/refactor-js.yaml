@@ -1,11 +1,19 @@
-# 技能：Python 小规模重构（示例工作流）
-name: python-refactor
+# 技能：JS/TS 小规模重构（语言范围 = file_ext，避免误触发）
+name: refactor-js
 version: "1.0.0"
-description: 对 Python 模块做小规模重构（分析 -> 拆分 -> 补测试 -> 验证）
+description: 对 JS/TS 模块做小规模重构（分析 -> 拆分 -> 补测试 -> 验证）
 priority: 6
+requires: []
+permissions: [file_read, file_write, terminal_execute]
+tags: [refactor, frontend]
+params:
+  target:
+    type: string
+    required: true
+    description: 目标模块/文件路径
 triggers:
   keywords: [重构, refactor, 拆分, 提取函数, 优化代码]
-  file_ext: [.py]
+  file_ext: [.js, .ts, .jsx, .tsx]
 steps:
   - name: analyze
     instruction: 分析目标代码的职责边界与坏味道，输出重构方案

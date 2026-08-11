@@ -1,4 +1,4 @@
-{
+﻿{
   "skills": {
     "python": {
       "version": "1.1.0",
@@ -223,6 +223,136 @@
       ],
       "author": "alpha-swe",
       "description": "修复 Bug 工作流"
+    },
+    "refactor-js": {
+      "version": "1.0.0",
+      "requires": [],
+      "permissions": [
+        "file_read",
+        "file_write",
+        "terminal_execute"
+      ],
+      "params": {
+        "target": {
+          "type": "string",
+          "required": true,
+          "description": "目标模块/文件路径"
+        }
+      },
+      "tags": [
+        "refactor",
+        "frontend"
+      ],
+      "author": "alpha-swe",
+      "description": "对 JS/TS 模块做小规模重构"
+    },
+    "koa": {
+      "version": "1.0.0",
+      "requires": [],
+      "permissions": [
+        "file_read",
+        "file_write"
+      ],
+      "tags": [
+        "backend",
+        "koa"
+      ],
+      "author": "alpha-swe",
+      "description": "Koa 后端开发规范"
+    },
+    "fastapi": {
+      "version": "1.0.0",
+      "requires": [
+        "python"
+      ],
+      "permissions": [
+        "file_read",
+        "file_write"
+      ],
+      "tags": [
+        "backend",
+        "fastapi"
+      ],
+      "author": "alpha-swe",
+      "description": "FastAPI 后端开发规范"
+    },
+    "typeorm": {
+      "version": "1.0.0",
+      "requires": [],
+      "permissions": [
+        "file_read",
+        "file_write",
+        "terminal_execute"
+      ],
+      "tags": [
+        "db",
+        "orm",
+        "typeorm"
+      ],
+      "author": "alpha-swe",
+      "description": "TypeORM 实体/迁移约定"
+    },
+    "prisma": {
+      "version": "1.0.0",
+      "requires": [],
+      "permissions": [
+        "file_read",
+        "file_write",
+        "terminal_execute"
+      ],
+      "tags": [
+        "db",
+        "orm",
+        "prisma"
+      ],
+      "author": "alpha-swe",
+      "description": "Prisma schema/迁移约定"
+    },
+    "sequelize": {
+      "version": "1.0.0",
+      "requires": [],
+      "permissions": [
+        "file_read",
+        "file_write",
+        "terminal_execute"
+      ],
+      "tags": [
+        "db",
+        "orm",
+        "sequelize"
+      ],
+      "author": "alpha-swe",
+      "description": "Sequelize 模型/迁移约定"
+    },
+    "jest": {
+      "version": "1.0.0",
+      "requires": [],
+      "permissions": [
+        "file_read",
+        "file_write",
+        "terminal_execute"
+      ],
+      "tags": [
+        "testing",
+        "jest"
+      ],
+      "author": "alpha-swe",
+      "description": "Jest 测试规范"
+    },
+    "vitest": {
+      "version": "1.0.0",
+      "requires": [],
+      "permissions": [
+        "file_read",
+        "file_write",
+        "terminal_execute"
+      ],
+      "tags": [
+        "testing",
+        "vitest"
+      ],
+      "author": "alpha-swe",
+      "description": "Vitest 测试规范"
     }
   },
   "global": {

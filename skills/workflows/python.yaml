@@ -1,0 +1,19 @@
+# 技能：Python 开发约定（语言级，作为其他技能 requires 依赖）
+name: python
+version: "1.1.0"
+description: Python 开发规范与最佳实践（作为依赖技能被引入）
+priority: 1
+requires: []
+permissions: [file_read, file_write, terminal_execute]
+tags: [language, python]
+params:
+  python_version:
+    type: string
+    required: false
+    default: "3.11"
+    description: 目标 Python 版本
+triggers: {}
+steps:
+  - name: apply-conventions
+    instruction: 按 Python 项目约定（版本、格式化、导入规范）实现并验证
+    dependencies: []

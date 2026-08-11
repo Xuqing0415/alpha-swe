@@ -1,0 +1,14 @@
+# 技能：TypeORM 约定（上下文建议）
+name: typeorm
+version: "1.0.0"
+description: TypeORM 实体/迁移约定（实体装饰器、迁移生成、仓库模式）
+priority: 4
+requires: []
+permissions: [file_read, file_write, terminal_execute]
+tags: [db, orm, typeorm]
+triggers:
+  project_dep: [typeorm]
+steps:
+  - name: apply-conventions
+    instruction: 按 TypeORM 约定定义实体、生成迁移并验证 schema 生效
+    dependencies: []

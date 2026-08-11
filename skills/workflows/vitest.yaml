@@ -1,0 +1,14 @@
+# 技能：Vitest 测试约定（上下文建议）
+name: vitest
+version: "1.0.0"
+description: Vitest 测试规范（describe/it、mock、coverage）
+priority: 4
+requires: []
+permissions: [file_read, file_write, terminal_execute]
+tags: [testing, vitest]
+triggers:
+  project_dep: [vitest]
+steps:
+  - name: apply-conventions
+    instruction: 按 Vitest 约定编写/调整测试并运行验证
+    dependencies: []
