@@ -19,6 +19,7 @@ class TaskStatus(str, Enum):
     RUNNING = "running"
     WAITING = "waiting"
     RETRYING = "retrying"  # 失败后等待重试（方案 1.1）
+    SKIPPED = "skipped"    # 非关键步骤失败后跳过（方案 1.2）
     COMPLETED = "completed"
     FAILED = "failed"
 
@@ -37,8 +38,9 @@ class Task:
     max_retries: int = 3
     retry_count: int = 0
     retry_strategy: str = "backoff"
-    # 步骤级降级（方案 1.2）：critical 失败上抛 / normal 标记 SKIPPED / optional 静默跳过
-    criticality: str = "normal"
+    # 步骤级降级（方案 1.2）：critical 失败上抛 / normal 标记 SKIPPED / optional 静默跳过。
+    # 默认 critical：未显式声明的任务失败即会话失败（跳过必须由规划器显式授权）。
+    criticality: str = "critical"
     result: Any = None
     error: Optional[str] = None
     history: List[Dict[str, Any]] = field(default_factory=list)
@@ -124,7 +126,8 @@ class TaskDAG:
             dep = self._tasks.get(dep_id)
             if dep is None:
                 continue  # 缺失依赖按满足处理（宽松）
-            if dep.status != TaskStatus.COMPLETED:
+            # SKIPPED 视为已完成：非关键步骤被跳过不阻塞后续步骤（方案 1.2）
+            if dep.status not in (TaskStatus.COMPLETED, TaskStatus.SKIPPED):
                 return False
         return True
 
@@ -139,7 +142,8 @@ class TaskDAG:
     def pending(self) -> bool:
         """是否仍有未终结的任务。"""
         return any(
-            t.status not in (TaskStatus.COMPLETED, TaskStatus.FAILED)
+            t.status not in (TaskStatus.COMPLETED, TaskStatus.FAILED,
+                             TaskStatus.SKIPPED)
             for t in self._tasks.values()
         )
 

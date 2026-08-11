@@ -22,8 +22,10 @@ class StubPlanner:
         self.max_retries = max_retries
 
     async def plan(self, prompt, context=""):
+        # 单任务代表整个会话：默认 critical，失败即会话失败
         return [Task(id="t0", instruction=prompt,
-                     max_retries=self.max_retries)]
+                     max_retries=self.max_retries,
+                     criticality="critical")]
 
 
 class ScriptedLLM(MockLLM):

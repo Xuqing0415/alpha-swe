@@ -67,8 +67,12 @@ class Scheduler:
         return self.dag.ready_tasks()
 
     def on_task_done(self, task: Task) -> None:
-        """任务终结后提升依赖者；失败时触发失败回调（技能步骤决策点）。"""
-        if task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED):
+        """任务终结后提升依赖者；失败时触发失败回调（技能步骤决策点）。
+
+        SKIPPED 视为终结且不阻塞后续步骤（方案 1.2）。
+        """
+        if task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED,
+                           TaskStatus.SKIPPED):
             self.dag.promote_dependents(task.id)
             if task.status == TaskStatus.FAILED and self._on_task_failed is not None:
                 try:

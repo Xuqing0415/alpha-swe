@@ -18,9 +18,11 @@ class StubPlanner:
         self.task_id = task_id
 
     async def plan(self, prompt, context=""):
+        # 重试语义面向关键步骤：预算耗尽应保持 FAILED 而非降级跳过
         return [Task(id=self.task_id, instruction=prompt,
                      max_retries=self.max_retries,
-                     retry_strategy=self.strategy)]
+                     retry_strategy=self.strategy,
+                     criticality="critical")]
 
 
 class ScriptedLLM(MockLLM):
@@ -46,7 +48,7 @@ def test_task_retry_defaults_and_serialization():
     assert t.max_retries == 3
     assert t.retry_count == 0
     assert t.retry_strategy == "backoff"
-    assert t.criticality == "normal"
+    assert t.criticality == "critical"
     d = t.to_dict()
     assert d["max_retries"] == 3 and d["retry_strategy"] == "backoff"
     assert TaskStatus.RETRYING.value == "retrying"

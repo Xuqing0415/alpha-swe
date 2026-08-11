@@ -439,9 +439,11 @@ class AgentLoop:
             )
             return result
 
-        failed = [t for t in self.scheduler.dag.all() if t.status == TaskStatus.FAILED]
-        completed = [t for t in self.scheduler.dag.all() if t.status == TaskStatus.COMPLETED]
-        final = self._collect_final(completed, failed, prompt)
+        all_tasks = self.scheduler.dag.all()
+        failed = [t for t in all_tasks if t.status == TaskStatus.FAILED]
+        completed = [t for t in all_tasks if t.status == TaskStatus.COMPLETED]
+        skipped = [t for t in all_tasks if t.status == TaskStatus.SKIPPED]
+        final = self._collect_final(completed, failed, skipped, prompt)
 
         phase = AgentPhase.COMPLETED if not failed else AgentPhase.FAILED
         self.state.transition(phase)
@@ -452,6 +454,7 @@ class AgentLoop:
         self.metrics.set("tasks_total", len(plan))
         self.metrics.set("tasks_completed", len(completed))
         self.metrics.set("tasks_failed", len(failed))
+        self.metrics.set("tasks_skipped", len(skipped))
         self.tracer.end_span(
             run_span,
             status="ok" if phase == AgentPhase.COMPLETED else "error",
@@ -480,7 +483,8 @@ class AgentLoop:
                 if task.status != TaskStatus.FAILED:
                     return
                 if not self._retry_available(task):
-                    return  # 重试预算耗尽，保持 FAILED
+                    self._apply_criticality(task)
+                    return  # 重试预算耗尽：critical 保持 FAILED，其余转 SKIPPED
                 task.retry_count += 1
                 strategy = task.retry_strategy
                 self._decision.record(
@@ -520,7 +524,7 @@ class AgentLoop:
         return 0.0  # immediate / retry_with_context 立即重试
 
     def _on_task_failure(self, task: Task) -> None:
-        """任务失败但可能重试：有预算时推迟失败计数与反例记忆。"""
+        """任务失败但可能重试/降级：有预算时推迟失败计数与反例记忆。"""
         if self._retry_available(task):
             self._decision.record(
                 "task.retry_pending", "agent.max_retries", task.max_retries,
@@ -528,8 +532,35 @@ class AgentLoop:
                 f"{str(task.error or '')[:120]}",
             )
             return
+        # 预算耗尽：normal/optional 将由 _apply_criticality 转 SKIPPED，
+        # 不记失败与反例；只有 critical 才真正失败。
+        if (task.criticality or "normal") != "critical":
+            return
         self.metrics.inc("tasks_failed")
         self._remember_error(task)
+
+    def _apply_criticality(self, task: Task) -> None:
+        """方案 1.2：重试耗尽后按 criticality 降级/跳过。
+
+        critical   -> 保持 FAILED 向上传播；
+        normal     -> 标记 SKIPPED（后续步骤继续，汇总报告列出原因）；
+        optional   -> 同样标记 SKIPPED，不产生失败告警。
+        """
+        crit = task.criticality or "normal"
+        if crit == "critical":
+            return
+        reason = task.error or "执行失败（重试耗尽）"
+        task.mark(TaskStatus.SKIPPED, error=reason)
+        self.metrics.inc("tasks_skipped")
+        self._decision.record(
+            "task.skipped", "agent.criticality", crit,
+            f"任务 {task.id}（criticality={crit}）失败后跳过: "
+            f"{str(reason)[:120]}",
+        )
+        self._emit("task_skipped", task_id=task.id, criticality=crit,
+                   reason=str(reason))
+        logger.warning("任务 %s 已跳过（criticality=%s）: %s",
+                       task.id, crit, str(reason)[:120])
 
     # ---- Docker 任务包装：任务前快照，失败自动回滚（设计 12 节） ----
     async def _docker_task_worker(self, task: Task) -> None:
@@ -1271,13 +1302,24 @@ class AgentLoop:
         if self.docker.running:
             await self.docker.stop()
 
-    def _collect_final(self, completed: List[Task], failed: List[Task], prompt: str) -> str:
+    def _collect_final(self, completed: List[Task], failed: List[Task],
+                       skipped: Optional[List[Task]] = None,
+                       prompt: str = "") -> str:
+        """汇总最终答案；被跳过的步骤（方案 1.2）附在报告末尾并说明原因。"""
         answers = [t.result for t in completed if isinstance(t.result, str) and t.result]
+        skipped = skipped or []
+        note = ""
+        if skipped:
+            note = "\n\n[已跳过步骤]\n" + "\n".join(
+                f"- {t.instruction}: {t.error or '重试耗尽'}"
+                for t in skipped[:5]
+            )
         if answers:
-            return "\n".join(answers)
+            return "\n".join(answers) + note
         if failed:
-            return f"任务失败: {'; '.join(t.error or t.instruction for t in failed[:3])}"
-        return f"（未产生最终结果）: {prompt}"
+            return (f"任务失败: {'; '.join(t.error or t.instruction for t in failed[:3])}"
+                    + note)
+        return f"（未产生最终结果）: {prompt}" + note
 
     def _record_config_fallbacks(self) -> None:
         """把配置加载阶段的降级信息写入决策日志（跨 run 去重）。
