@@ -179,3 +179,38 @@ class TaskDAG:
         for t in self._tasks.values():
             by_status[t.status.value] = by_status.get(t.status.value, 0) + 1
         return {"total": len(self._tasks), "by_status": by_status}
+
+    # ---- 快照（方案 1.3 断点续跑） ----
+    def to_snapshot(self) -> Dict[str, Any]:
+        """序列化整个 DAG（含状态/结果/重试/降级字段，不含完整 history）。"""
+        return {
+            "version": 1,
+            "created_at": datetime.now().isoformat(),
+            "tasks": [t.to_dict() for t in self._tasks.values()],
+        }
+
+    @classmethod
+    def from_snapshot(cls, data: Dict[str, Any]) -> "TaskDAG":
+        """从快照恢复 DAG；字段缺失时用保守默认值。"""
+        dag = cls()
+        for item in data.get("tasks", []):
+            task = Task(
+                id=item.get("id", uuid.uuid4().hex[:8]),
+                instruction=item.get("instruction", ""),
+                status=TaskStatus(item.get("status", "idle")),
+                dependencies=list(item.get("dependencies", [])),
+                priority=item.get("priority", 0),
+                role=item.get("role", ""),
+                parent_id=item.get("parent_id"),
+                max_retries=item.get("max_retries", 3),
+                retry_count=item.get("retry_count", 0),
+                retry_strategy=item.get("retry_strategy", "backoff"),
+                criticality=item.get("criticality", "critical"),
+                result=item.get("result"),
+                error=item.get("error"),
+                metadata=dict(item.get("metadata", {})),
+                round_count=item.get("round_count", 0),
+            )
+            dag.add(task)
+        return dag
+

@@ -197,6 +197,9 @@ class AgentLoop:
         # 方案 1.1：任务级重试包装（失败且有预算时 RETRYING -> READY 重跑）
         self.scheduler.set_worker(self._wrap_with_retry(worker))
         self.scheduler.set_on_task_failed(self._on_task_failed)
+        if self.config.agent.snapshot_enabled:
+            # 方案 1.3：每完成一个子步骤自动落盘快照（断点续跑）
+            self.scheduler.set_on_snapshot(self._save_snapshot)
         self.plugins = plugin_manager or PluginManager(
             plugins_dir=self.config.plugin.dir,
             whitelist=self.config.active_plugins,
@@ -290,7 +293,8 @@ class AgentLoop:
             self.scheduler.wake()
 
     # ---- 主入口 ----
-    async def run(self, prompt: str) -> LoopResult:
+    async def run(self, prompt: str, resume: bool = False) -> LoopResult:
+        self._current_prompt = prompt
         # 配置降级记录（决策日志/TUI 可见，去重）
         self._record_config_fallbacks()
 
@@ -412,13 +416,20 @@ class AgentLoop:
         if memory_text:
             self.prompt_builder.set_memory(memory_text)
 
-        # 规划 -> READY（技能命中时按工作流展开，否则走 LLM 规划器）
-        plan = self._expand_skills(prompt)
+        # 规划 -> READY（技能命中时按工作流展开，否则走 LLM 规划器；
+        # resume=True 时跳过技能展开，优先从快照恢复任务树）
+        plan = [] if resume else self._expand_skills(prompt)
+        restored = False
+        if resume and not plan:
+            plan, restored = self._restore_snapshot_plan()
         if not plan:
             # 注入项目调用图与约定摘要到拆分提示（阶段一 1.2/1.3）；
             # 对不支持新参数的 Planner 实现自动降级
             plan = await self._plan_with_context(prompt)
-        self.scheduler.submit_plan(plan)
+            restored = False
+        if not restored:
+            # 快照恢复路径已直接把恢复的 DAG 挂到 scheduler，无需重复提交
+            self.scheduler.submit_plan(plan)
         self._emit("plan_created", total=len(plan),
                    tasks=[t.instruction for t in plan])
         self.state.transition(AgentPhase.READY)
@@ -476,6 +487,91 @@ class AgentLoop:
             self._decision.records(), self.metrics.snapshot(), result,
         )
         return result
+
+    # ---- 断点续跑（方案 1.3）：任务快照落盘 / 读取 / 恢复 ----
+    def _save_snapshot(self) -> None:
+        """每完成一个子步骤后把任务树快照落盘，保留最近 N 个。"""
+        if not self.config.agent.snapshot_enabled:
+            return
+        dag = getattr(self.scheduler, "dag", None)
+        if dag is None:
+            return
+        try:
+            snapshot_dir = Path(self.config.agent.snapshot_dir)
+            snapshot_dir.mkdir(parents=True, exist_ok=True)
+            data = dag.to_snapshot()
+            data["prompt"] = getattr(self, "_current_prompt", "")
+            ts = time.strftime("%Y%m%d-%H%M%S")
+            step = sum(1 for t in dag.all()
+                       if t.status in (TaskStatus.COMPLETED, TaskStatus.FAILED,
+                                       TaskStatus.SKIPPED))
+            path = snapshot_dir / f"task_{ts}_step{step}.json"
+            path.write_text(json.dumps(data, ensure_ascii=False, default=str),
+                            encoding="utf-8")
+            keep = int(getattr(self.config.agent, "snapshot_keep", 5))
+            files = sorted(snapshot_dir.glob("task_*.json"),
+                           key=lambda p: (p.stat().st_mtime, p.name),
+                           reverse=True)
+            for old in files[keep:]:
+                try:
+                    old.unlink()
+                except OSError:
+                    pass
+        except Exception:
+            logger.exception("任务快照保存失败")
+
+    def _latest_snapshot(self) -> Optional[Dict[str, Any]]:
+        """返回最新快照 dict；无快照或读取失败返回 None。"""
+        try:
+            snapshot_dir = Path(self.config.agent.snapshot_dir)
+            files = sorted(snapshot_dir.glob("task_*.json"),
+                           key=lambda p: (p.stat().st_mtime, p.name),
+                           reverse=True)
+            if not files:
+                return None
+            data = json.loads(files[0].read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else None
+        except Exception:
+            logger.exception("读取最近快照失败")
+            return None
+
+    def _restore_snapshot_plan(self) -> tuple:
+        """从最近快照恢复任务树；成功返回 (plan, True)，否则 (空, False) 触发重新规划。
+
+        恢复策略：已终结任务保持原状（结果/错误保留），未终结任务统一回到 READY
+        由调度器重新执行，避免断点处任务卡死在 RUNNING/WAITING。
+        """
+        snapshot = self._latest_snapshot()
+        if snapshot is None:
+            self._decision.record(
+                "resume.no_snapshot", "agent.snapshot_enabled", True,
+                "未找到可恢复的任务快照，重新规划任务",
+            )
+            return [], False
+        try:
+            dag = TaskDAG.from_snapshot(snapshot)
+            terminal = (TaskStatus.COMPLETED, TaskStatus.FAILED,
+                        TaskStatus.SKIPPED)
+            for t in dag.all():
+                if t.status not in terminal:
+                    t.status = TaskStatus.READY
+            self.scheduler.dag = dag
+            plan = dag.all()
+            done = sum(1 for t in plan if t.status in terminal)
+            self._decision.record(
+                "resume.restored", "agent.snapshot_enabled", True,
+                f"从断点恢复任务树：共 {len(plan)} 个子任务（已完成 {done}）",
+            )
+            logger.info("从快照恢复任务树: %d 个子任务（已完成 %d）",
+                        len(plan), done)
+            return plan, True
+        except Exception as e:
+            logger.exception("快照恢复失败，回退重新规划: %s", e)
+            self._decision.record(
+                "resume.fallback", "agent.snapshot_enabled", True,
+                f"快照恢复失败已回退重新规划: {str(e)[:100]}",
+            )
+            return [], False
 
     # ---- 任务级重试（方案 1.1）：immediate / backoff / retry_with_context ----
     def _wrap_with_retry(self, worker) -> Callable[[Task], Any]:

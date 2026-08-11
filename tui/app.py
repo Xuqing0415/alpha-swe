@@ -27,6 +27,7 @@ from textual import work
 from textual.app import App
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
+from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widgets import Footer, Input, Label, RichLog, Static
 
@@ -641,12 +642,16 @@ class AlphaSWEApp(App[None]):
     def refresh_status(self) -> None:
         if not self.is_mounted:  # 挂载完成前定时器/事件可能先触发
             return
-        self._update_task_panel()
-        self._update_status_bar()
-        self._update_compact_header()
-        self.refresh_views()
-        if self._left_view == "tree":
-            self._refresh_tree()
+        try:
+            self._update_task_panel()
+            self._update_status_bar()
+            self._update_compact_header()
+            self.refresh_views()
+            if self._left_view == "tree":
+                self._refresh_tree()
+        except NoMatches:
+            # 挂载竞态：定时器先于部分组件就绪触发，跳过本轮刷新
+            return
 
     def _update_task_panel(self) -> None:
         panel = self.query_one("#task-panel", Static)

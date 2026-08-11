@@ -25,6 +25,11 @@ class Scheduler:
         self.max_concurrency = max(max_concurrency, 1)
         self._worker: Optional[Callable[[Task], Awaitable[None]]] = None
         self._on_task_failed = on_task_failed
+        self._on_snapshot: Optional[Callable[[], None]] = None
+
+    def set_on_snapshot(self, callback: Callable[[], None]) -> None:
+        """注册任务终结后的快照回调（方案 1.3：每步完成后落盘）。"""
+        self._on_snapshot = callback
 
     def set_on_task_failed(self, callback: Callable[[Task], None]) -> None:
         """注册任务失败回调（技能步骤 fallback / 升级介入用）。"""
@@ -74,6 +79,11 @@ class Scheduler:
         if task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED,
                            TaskStatus.SKIPPED):
             self.dag.promote_dependents(task.id)
+            if self._on_snapshot is not None:
+                try:
+                    self._on_snapshot()
+                except Exception:
+                    logger.exception("快照回调异常")
             if task.status == TaskStatus.FAILED and self._on_task_failed is not None:
                 try:
                     self._on_task_failed(task)
