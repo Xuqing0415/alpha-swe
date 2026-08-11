@@ -343,6 +343,26 @@ class AgentLoop:
             skip={"venv", ".venv", "node_modules", "dist", "build",
                   "__pycache__", ".git", ".idea"},
         )
+        # 项目约定/技术栈注入 + 调用图挂载（阶段一 1.1/1.3）
+        if self._project_ctx.profile_text:
+            self.prompt_builder.set_project_profile(
+                self._project_ctx.profile_text)
+            self._decision.record(
+                "profile.injected", "code.project_profile", True,
+                "注入项目约定与技术栈摘要",
+            )
+        if self._project_ctx.call_graph is not None and \
+                self._project_ctx.call_graph.symbol_count():
+            self._decision.record(
+                "call_graph.indexed", "code.call_graph",
+                self._project_ctx.call_graph.symbol_count(),
+                f"构建调用图: {self._project_ctx.call_graph.symbol_count()} 个符号，"
+                f"{self._project_ctx.call_graph.edge_count()} 条调用边",
+            )
+        file_tool = self.tools.get("file_ops")
+        if file_tool is not None:
+            file_tool.call_graph = self._project_ctx.call_graph
+            file_tool.decision_logger = self._decision
         skill = self._build_injected_context(prompt)
         if skill:
             self.prompt_builder.set_skill(skill)

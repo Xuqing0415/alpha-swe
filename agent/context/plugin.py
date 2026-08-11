@@ -19,6 +19,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set
 
+from agent.code.call_graph import CallGraph, build_call_graph
+from agent.code.project_profile import ProjectProfile, build_profile
+
 logger = logging.getLogger("alpha-swe.context.plugin")
 
 FRONT_MATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
@@ -104,10 +107,19 @@ class ProjectContext:
 
     def __init__(self, files: Optional[List[str]] = None,
                  deps: Optional[Set[str]] = None,
-                 root: str = ""):
+                 root: str = "",
+                 profile: Optional["ProjectProfile"] = None,
+                 call_graph: Optional["CallGraph"] = None):
         self.files = [str(f) for f in (files or [])]
         self.deps = set(str(d) for d in (deps or []))
         self.root = root
+        self.profile = profile
+        self.call_graph = call_graph
+
+    @property
+    def profile_text(self) -> str:
+        """项目约定摘要文本（阶段一 1.3，注入 Prompt 用）。"""
+        return self.profile.to_text() if self.profile is not None else ""
 
     @property
     def exts(self) -> Set[str]:
@@ -121,7 +133,11 @@ class ProjectContext:
                 seen.add(f)
                 files.append(f)
         return ProjectContext(files=files, deps=self.deps | other.deps,
-                              root=self.root)
+                              root=self.root,
+                              profile=self.profile if other.profile is None
+                              else other.profile,
+                              call_graph=self.call_graph if other.call_graph is None
+                              else other.call_graph)
 
     @classmethod
     def scan(cls, workspace: str, max_depth: int = 2,
@@ -148,7 +164,11 @@ class ProjectContext:
                 files.append(str(Path(*rel_parts)))
         except OSError as e:
             logger.warning("工作区扫描失败: %s", e)
-        return cls(files=files, deps=cls._detect_deps(files, root), root=str(root))
+        root_s = str(root)
+        profile = build_profile(root_s, files)
+        call_graph = build_call_graph(root_s, files, max_files=max_files)
+        return cls(files=files, deps=cls._detect_deps(files, root),
+                   root=root_s, profile=profile, call_graph=call_graph)
 
     @staticmethod
     def _detect_deps(files: List[str], root: Path) -> Set[str]:

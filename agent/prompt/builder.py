@@ -45,6 +45,7 @@ class PromptBuilder:
         self.memory_context = ""
         self.skill_context = ""
         self.resources_context = ""
+        self.project_profile = ""
 
     def _resolve_system_template(self) -> str:
         """按 llm.provider 选择系统提示风格并记录决策。"""
@@ -80,6 +81,10 @@ class PromptBuilder:
         """注入 MCP 资源内容（外部知识库/文件/Schema）。"""
         self.resources_context = context
 
+    def set_project_profile(self, context: str) -> None:
+        """注入项目约定与技术栈摘要（阶段一 1.3）。"""
+        self.project_profile = context
+
     def build(self, task: Task, upstream: List[Task] = None) -> List[Dict[str, str]]:
         # 决策点：temperature 决定解析器宽松度
         if self.llm_config is not None and self.decision_logger is not None:
@@ -94,6 +99,7 @@ class PromptBuilder:
             memory=self.memory_context,
             skill=self.skill_context,
             mcp_resources=self.resources_context,
+            project_profile=self.project_profile,
         )
         upstream_text = ""
         if upstream:

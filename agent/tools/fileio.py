@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from agent.code.ast_summary import is_code_file, summarize_file
 from agent.sandbox.audit import FileAuditStore
 from agent.tools.base import ExecutionContext, Tool, ToolResult
 
@@ -49,11 +50,14 @@ class FileIOTool(Tool):
     }
 
     def __init__(self, workspace: str = "", read_only: bool = False,
-                 audit_store: Optional[FileAuditStore] = None, docker=None):
+                 audit_store: Optional[FileAuditStore] = None, docker=None,
+                 call_graph=None, decision_logger=None):
         self.workspace = workspace
         self.read_only = read_only
         self.audit_store = audit_store
         self.docker = docker  # DockerSandbox；running 时文件操作路由进容器
+        self.call_graph = call_graph  # 项目级调用图（读取时注入影响范围）
+        self.decision_logger = decision_logger
 
     async def execute(self, params: Dict[str, Any], context: ExecutionContext) -> ToolResult:
         action = str(params.get("action", ""))
@@ -82,9 +86,10 @@ class FileIOTool(Tool):
             try:
                 if action == "read":
                     content = await self.docker.read_file(rel)
-                    return ToolResult(success=True, output=content,
+                    output, meta = self._augment_read(str(target), content)
+                    return ToolResult(success=True, output=output,
                                       metadata={"path": str(target), "docker": True,
-                                                "size": len(content)},
+                                                "size": len(content), **meta},
                                       elapsed_ms=(time.time() - start) * 1000)
                 if action == "write":
                     before = await self._docker_before(rel)
@@ -139,8 +144,49 @@ class FileIOTool(Tool):
             return ToolResult(success=False, error=f"文件不存在: {target}",
                               elapsed_ms=(time.time() - start) * 1000)
         data = await asyncio.to_thread(target.read_text, encoding="utf-8", errors="ignore")
-        return ToolResult(success=True, output=data, metadata={"path": str(target), "size": len(data)},
+        output, meta = self._augment_read(str(target), data)
+        return ToolResult(success=True, output=output,
+                          metadata={"path": str(target), "size": len(data), **meta},
                           elapsed_ms=(time.time() - start) * 1000)
+
+    def _augment_read(self, path: str, content: str):
+        """读取代码文件时附加 AST 摘要与调用图影响面（阶段一 1.1/1.2）。
+
+        返回 (augmented_output, extra_metadata)；非代码文件原样返回。
+        """
+        meta: Dict[str, Any] = {}
+        if not is_code_file(path) or not content:
+            return content, meta
+        summary = summarize_file(path, content)
+        block = summary.to_text()
+        if not block:
+            return content, meta
+        meta["ast_summary"] = True
+        if self.decision_logger is not None:
+            self.decision_logger.record(
+                "symbol.retrieved", "code.ast", True,
+                f"读取 {path} 提取 {len(summary.symbols)} 个符号"
+                f"（{len(summary.imports)} 个依赖）",
+            )
+        if self.call_graph is not None:
+            impact = []
+            for s in summary.symbols[:20]:
+                callers = self.call_graph.callers_of(s.name)
+                if callers:
+                    impact.append(f"{s.name} 被 {len(callers)} 处调用")
+                callees = [c for c in self.call_graph.callees_of(s.name)
+                           if self.call_graph.defs.get(c)]
+                if callees:
+                    impact.append(
+                        f"{s.name} 调用 {','.join(callees[:4])}")
+            if impact:
+                block += "\n影响范围: " + ", ".join(impact[:10])
+                if self.decision_logger is not None:
+                    self.decision_logger.record(
+                        "call_graph.hit", "code.call_graph", len(impact),
+                        f"符号影响面: {', '.join(impact[:5])}",
+                    )
+        return f"{content}\n\n{block}", meta
 
     async def _write(self, target: Path, content: str, start: float,
                      task_id: str = "") -> ToolResult:
