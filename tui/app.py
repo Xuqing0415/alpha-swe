@@ -19,6 +19,7 @@ import json
 import logging
 import time
 import uuid
+from pathlib import Path
 from typing import Any, List, Optional
 
 from rich.text import Text
@@ -39,6 +40,7 @@ from tui.bridge import AgentRunner
 from tui.formatting import format_event
 from tui.vlog import VirtualLog
 from tui.diff_renderer import diff_summary, render_unified_diff
+from tui.file_tree import FileTreeView
 from tui.messages import (AgentEventMessage, AgentFinishedMessage,
                           AgentStartedMessage, ConfirmationRequestMessage,
                           TerminalOutputMessage)
@@ -91,6 +93,18 @@ Screen {
     border: round white;
     padding: 0 1;
     margin: 0 1 0 0;
+}
+
+#file-tree-box {
+    width: 30;
+    border: round white;
+    padding: 0 1;
+    margin: 0 1 0 0;
+    display: none;
+}
+
+#file-tree {
+    height: 1fr;
 }
 
 #main-area {
@@ -198,6 +212,7 @@ _HELP_TEXT = """[bold]Alpha-SWE 快捷键[/bold]
 [green]F1[/green]  帮助      [green]F2[/green]  任务面板显示/隐藏
 [green]F3[/green]  终端全屏  [green]F4[/green]  宽屏/窄屏切换
 [green]F5[/green]  主区视图（日志/文件变更/监控）
+[green]F6[/green]  任务面板/文件树切换
 [green]Ctrl+I[/green]  注入指令    [green]Ctrl+P[/green]  暂停/继续
 [green]Ctrl+R[/green]  重试当前步骤 [green]Ctrl+S[/green]  跳过当前步骤
 [green]Ctrl+L[/green]  清空终端    [green]Tab[/green]    切换焦点
@@ -236,6 +251,7 @@ class CommandInput(Input):
 
     def action_clear_value(self) -> None:
         self.value = ""
+        self._host._maybe_exit_tree_filter()
 
 
 class ConfirmationScreen(ModalScreen[Any]):
@@ -346,6 +362,7 @@ class AlphaSWEApp(App[None]):
         Binding("f4", "toggle_layout", "宽/窄"),
         Binding("f5", "cycle_main_view", "主区视图"),
         Binding("d", "toggle_terminal_diff", "变更切换"),
+        Binding("f6", "toggle_file_tree", "文件树"),
         Binding("ctrl+i", "focus_input", "注入指令"),
         Binding("ctrl+p", "toggle_pause", "暂停/继续"),
         Binding("ctrl+r", "retry_step", "重试"),
@@ -388,6 +405,11 @@ class AlphaSWEApp(App[None]):
         self._diff_path = ""  # 最近一次文件变更（D 键切换用）
         self._diff_lines: List[Text] = []
         self._terminal_diff_mode = False  # 终端区显示 diff 而非原始输出
+        self._left_view = "tasks"  # 左侧面板：任务 / 文件树
+        self._tree_modified: set = set()  # 被 Agent 修改过的文件
+        self._tree_active = ""  # 当前正在操作的文件
+        self._tree_filter_mode = False  # 文件树搜索模式（输入栏过滤）
+        self._last_tree_build = 0.0
         self._layout_override: Optional[str] = None
         self._task_panel_visible = True
         self._session_id = uuid.uuid4().hex[:6]
@@ -409,6 +431,9 @@ class AlphaSWEApp(App[None]):
             yield Static("", id="compact-header", markup=True)
             with Horizontal(id="body"):
                 yield Static("", id="task-panel", markup=True)
+                with Vertical(id="file-tree-box"):
+                    yield Label("文件树（/ 搜索）", classes="pane-title")
+                    yield FileTreeView(id="file-tree")
                 with Vertical(id="main-area"):
                     yield VirtualLog(id="main-log")
                     yield RichLog(id="diff-log", highlight=True, markup=True,
@@ -470,6 +495,7 @@ class AlphaSWEApp(App[None]):
                 Text(f"--- {record['data'].get('tool', '')} ---------------",
                      style="dim"))
             self._append_diff_event(record["data"])
+            self._mark_tree_from_data(record["data"])
         self.refresh_status()
 
     def on_terminal_output_message(self, msg: TerminalOutputMessage) -> None:
@@ -588,7 +614,9 @@ class AlphaSWEApp(App[None]):
 
     def _apply_layout(self) -> None:
         compact = self._is_compact() or not self._task_panel_visible
-        self.query_one("#task-panel", Static).display = not compact
+        tree_visible = self._left_view == "tree" and not compact
+        self.query_one("#task-panel", Static).display = not compact and not tree_visible
+        self.query_one("#file-tree-box", Vertical).display = tree_visible
         self.query_one("#compact-header", Static).display = compact
 
     # ---- 状态刷新（0.5s 定时 + 事件触发） ----
@@ -599,6 +627,8 @@ class AlphaSWEApp(App[None]):
         self._update_status_bar()
         self._update_compact_header()
         self.refresh_views()
+        if self._left_view == "tree":
+            self._refresh_tree()
 
     def _update_task_panel(self) -> None:
         panel = self.query_one("#task-panel", Static)
@@ -648,11 +678,13 @@ class AlphaSWEApp(App[None]):
                 view_hint += "[跟随]" if vlog.follow else "[浏览中]"
             except Exception:
                 pass  # 挂载早期查询失败则省略提示
+        left_names = {"tasks": "任务", "tree": "文件树"}
+        left_hint = f"[{left_names.get(self._left_view, '任务')}]"
         bar.update(
             f"tokens: [{t_style}]{tokens:,}[/] | "
             f"round: [{r_style}]{rounds}/{max_rounds}[/] | "
             f"mem: {self._memory_usage()} | session: {self._session_id}"
-            f" | {view_hint}"
+            f" | {left_hint} | {view_hint}"
         )
 
     def _update_compact_header(self) -> None:
@@ -729,6 +761,11 @@ class AlphaSWEApp(App[None]):
             return
         box = self.query_one("#input-bar", CommandInput)
         value = box.value.strip()
+        if self._tree_filter_mode:  # 文件树搜索：Enter 应用过滤并交还焦点
+            self._tree_filter_mode = False
+            box.placeholder = "输入指令：/ 开头为命令（/status /pause /skip ...）"
+            self.query_one("#file-tree", FileTreeView).focus()
+            return
         box.value = ""
         if not value:
             return
@@ -737,6 +774,11 @@ class AlphaSWEApp(App[None]):
             self._handle_command(value)
         else:
             self._inject(value)
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if (self._tree_filter_mode
+                and getattr(event.input, "id", None) == "input-bar"):
+            self.query_one("#file-tree", FileTreeView).set_filter(event.value)
 
     def _push_history(self, value: str) -> None:
         if not self._input_history or self._input_history[-1] != value:
@@ -803,6 +845,40 @@ class AlphaSWEApp(App[None]):
             f"任务[{bits}] 会话={self._session_id}",
             style="bright_black"))
 
+    def show_tree_file(self, path: str) -> None:
+        """文件树 Enter：在终端区展示文件内容（等同 cat）。"""
+        try:
+            content = Path(path).read_text(encoding="utf-8",
+                                           errors="replace")
+        except OSError as e:
+            self._append_terminal(Text(f"读取失败: {e}", style="red"))
+            return
+        lines = content.splitlines()
+        self._append_terminal(Text(f"--- {path}（{len(lines)} 行）---",
+                                   style="bold yellow"))
+        for line in lines[:500]:
+            self._append_terminal(Text(line))
+
+    def focus_tree_search(self) -> None:
+        """文件树搜索：输入栏进入过滤模式（/ 触发）。"""
+        if self._left_view != "tree":
+            return
+        self._tree_filter_mode = True
+        box = self.query_one("#input-bar", CommandInput)
+        box.placeholder = "过滤文件树，Enter 应用，Esc 恢复"
+        box.focus()
+
+    def _maybe_exit_tree_filter(self) -> None:
+        """输入栏清空（Esc）时退出过滤并恢复完整树。"""
+        if not self._tree_filter_mode:
+            return
+        self._tree_filter_mode = False
+        box = self.query_one("#input-bar", CommandInput)
+        box.placeholder = "输入指令：/ 开头为命令（/status /pause /skip ...）"
+        tree = self.query_one("#file-tree", FileTreeView)
+        tree.set_filter("")
+        tree.focus()
+
     def _inject(self, value: str) -> None:
         runner = self.runner
         if runner is None or runner.loop is None:
@@ -821,6 +897,55 @@ class AlphaSWEApp(App[None]):
     def action_toggle_task_panel(self) -> None:
         self._task_panel_visible = not self._task_panel_visible
         self._apply_layout()
+
+    def action_toggle_file_tree(self) -> None:
+        """F6：左侧面板在任务树 / 文件树之间切换。"""
+        if self._left_view == "tasks":
+            self._left_view = "tree"
+            self._refresh_tree(force=True)
+        else:
+            self._left_view = "tasks"
+            self._maybe_exit_tree_filter()
+        self._apply_layout()
+        if self._left_view == "tree":
+            self.query_one("#file-tree", FileTreeView).focus()
+        self.refresh_status()
+
+    def _workspace_root(self) -> Optional[str]:
+        """当前工作区根目录（沙箱配置）。"""
+        sandbox = getattr(self.config, "sandbox", None)
+        if sandbox is not None and getattr(sandbox, "workspace", ""):
+            return sandbox.workspace
+        return None
+
+    def _refresh_tree(self, *, force: bool = False) -> None:
+        """重建文件树（2 秒节流）；保持折叠/过滤/标记状态。"""
+        root = self._workspace_root()
+        if not root:
+            return
+        now = time.monotonic()
+        if not force and now - self._last_tree_build < 2.0:
+            return
+        self._last_tree_build = now
+        tree = self.query_one("#file-tree", FileTreeView)
+        tree.refresh_tree(root)
+        tree.set_marks(self._tree_modified, self._tree_active)
+
+    def _mark_tree_from_data(self, data: dict) -> None:
+        """从 tool_call 数据更新文件树标记（修改 */活动 >）。"""
+        params = data.get("params", {}) or {}
+        meta = data.get("meta") or {}
+        path = str(meta.get("path") or params.get("path", "")).strip()
+        if not path:
+            return
+        self._tree_modified.add(path)
+        self._tree_active = path
+        if self._left_view == "tree":
+            try:
+                self.query_one("#file-tree", FileTreeView).set_marks(
+                    self._tree_modified, self._tree_active)
+            except Exception:
+                pass
 
     def action_show_terminal(self) -> None:
         if self._terminal_diff_mode and self._diff_lines:

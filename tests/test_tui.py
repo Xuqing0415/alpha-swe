@@ -612,3 +612,117 @@ async def test_tui_diff_event_and_d_toggle(ws_tmp):
         await pilot.pause()
         assert app._terminal_diff_mode is False
 
+
+# ---- 文件树视图：构建/渲染 + F6 切换 + 搜索 + 标记 ----
+def test_file_tree_build_render_collapse_filter(ws_tmp):
+    """build_tree / iter_visible / render_node：目录优先、忽略、折叠、过滤。"""
+    from tui.file_tree import build_tree, iter_visible, render_node
+
+    ws = ws_tmp / "ft"
+    (ws / "src").mkdir(parents=True)
+    (ws / "src" / "a.py").write_text("x", encoding="utf-8")
+    (ws / "src" / "b.ts").write_text("yy", encoding="utf-8")
+    (ws / "node_modules").mkdir()
+    (ws / "node_modules" / "pkg").write_text("z", encoding="utf-8")
+    (ws / "README.md").write_text("hi", encoding="utf-8")
+
+    tree = build_tree(str(ws))
+    assert tree is not None
+    rows = list(iter_visible(tree))
+    names = [r[0].name for r in rows]
+    assert "node_modules" not in names  # 默认忽略
+    assert names.index("src") < names.index("README.md")  # 目录在前
+    # 折叠
+    collapsed_rows = list(iter_visible(tree, collapsed={str(ws / "src")}))
+    assert "a.py" not in [r[0].name for r in collapsed_rows]
+    # 过滤
+    filtered = list(iter_visible(tree, filter_text="a.py"))
+    assert "a.py" in [r[0].name for r in filtered]
+    # 渲染标记：* 标记修改过的路径
+    row = render_node(tree, 0, True, modified={str(ws)})
+    assert "*" in row.plain
+    txt = render_node(tree.children[0], 1, False, active=str(ws / "src"))
+    assert ">" in txt.plain and "|-- " in txt.plain
+
+
+@pytest.mark.asyncio
+async def test_tui_file_tree_toggle_and_search(ws_tmp):
+    """F6 切换任务面板/文件树；/ 进入搜索实时过滤；Esc 恢复。"""
+    from textual.containers import Vertical
+    from textual.widgets import Input, Static
+
+    from tui.file_tree import FileTreeView
+
+    ws = ws_tmp / "ws"
+    (ws / "src").mkdir(parents=True, exist_ok=True)
+    (ws / "src" / "main.py").write_text("x = 1\n", encoding="utf-8")
+    (ws / "src" / "utils.py").write_text("y = 2\n", encoding="utf-8")
+
+    cfg = make_config(ws_tmp)
+    app = AlphaSWEApp("文件树测试", config=cfg, llm=MockLLM(),
+                      planner=StubPlanner())
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        assert app._left_view == "tasks"
+        app.action_toggle_file_tree()
+        await pilot.pause()
+        assert app._left_view == "tree"
+        assert app.query_one("#file-tree-box", Vertical).display is True
+        assert app.query_one("#task-panel", Static).display is False
+        tree = app.query_one("#file-tree", FileTreeView)
+        assert tree._tree is not None
+        # 搜索：/ 进入过滤模式
+        tree.action_focus_search()
+        await pilot.pause()
+        assert app._tree_filter_mode is True
+        box = app.query_one("#input-bar", Input)
+        box.value = "utils"
+        app.on_input_changed(type("C", (), {"value": "utils",
+                                            "input": box})())
+        await pilot.pause()
+        texts = [str(item.children[0].content) for item in tree.children]
+        rendered = "".join(texts)
+        assert "utils.py" in rendered and "main.py" not in rendered
+        # Esc 恢复完整树
+        app._maybe_exit_tree_filter()
+        await pilot.pause()
+        assert app._tree_filter_mode is False
+        rendered2 = "".join(str(item.children[0].content)
+                             for item in tree.children)
+        assert "main.py" in rendered2
+
+
+@pytest.mark.asyncio
+async def test_tui_file_tree_marks_from_tool_call(ws_tmp):
+    """tool_call 事件更新文件树修改/活动标记。"""
+    from textual.containers import Vertical
+
+    from tui.file_tree import FileTreeView
+
+    ws = ws_tmp / "ws"
+    (ws / "src").mkdir(parents=True, exist_ok=True)
+    (ws / "src" / "main.py").write_text("x\n", encoding="utf-8")
+
+    cfg = make_config(ws_tmp)
+    app = AlphaSWEApp("文件树标记", config=cfg, llm=MockLLM(),
+                      planner=StubPlanner())
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        record = {
+            "type": "tool_call",
+            "data": {"tool": "file_ops", "params": {"action": "write",
+                     "path": "src/main.py"},
+                    "success": True,
+                    "meta": {"path": "src/main.py"}},
+        }
+        app.on_agent_event_message(type("E", (), {"record": record})())
+        await pilot.pause()
+        assert "src/main.py" in app._tree_modified
+        assert app._tree_active == "src/main.py"
+        app.action_toggle_file_tree()
+        await pilot.pause()
+        tree = app.query_one("#file-tree", FileTreeView)
+        rendered = "".join(str(item.children[0].content)
+                             for item in tree.children)
+        assert "main.py" in rendered
+
