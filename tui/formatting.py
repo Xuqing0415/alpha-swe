@@ -138,7 +138,7 @@ def _join(items: Any, limit: int = 6) -> str:
 
 
 def _truncate(text: str, limit: int) -> str:
-    text = text.replace("\n", "\\n ")
+    text = text.replace("\n", "\n ")
     return text if len(text) <= limit else text[:limit] + "..."
 
 
