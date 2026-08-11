@@ -4,6 +4,20 @@ name: add-rest-endpoint
 version: "1.0.0"
 description: 添加一个 REST API 端点（路由 -> 校验 -> 控制器 -> 测试 -> 运行测试）
 priority: 8
+requires: []
+permissions: [file_read, file_write, terminal_execute]
+tags: [web, api]
+author: alpha-swe
+params:
+  method:
+    type: string
+    required: false
+    default: GET
+    description: HTTP 方法
+  path:
+    type: string
+    required: true
+    description: 端点路径，如 /api/users
 triggers:
   keywords: [rest, api, 端点, endpoint, 路由, 接口]
   file_ext: [.py, .ts, .js]

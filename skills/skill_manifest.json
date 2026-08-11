@@ -1,52 +1,164 @@
 {
   "skills": {
     "python": {
-      "version": "1.0.0",
-      "priority": 10,
-      "triggers": ["python", "py", "django", "flask", "fastapi", "pytest", ".py"],
-      "exclude_triggers": [],
+      "version": "1.1.0",
       "requires": [],
+      "permissions": [
+        "file_read",
+        "file_write",
+        "terminal_execute"
+      ],
+      "params": {
+        "python_version": {
+          "type": "string",
+          "required": false,
+          "default": "3.11",
+          "description": "目标 Python 版本"
+        }
+      },
+      "tags": [
+        "language",
+        "python"
+      ],
+      "author": "alpha-swe",
       "description": "Python 开发规范与最佳实践"
     },
     "react": {
       "version": "1.0.0",
-      "priority": 8,
-      "triggers": ["react", "jsx", "javascript", "component", "前端", "frontend", ".jsx", ".tsx"],
-      "exclude_triggers": [],
       "requires": [],
+      "permissions": [
+        "file_read",
+        "file_write"
+      ],
+      "params": {},
+      "tags": [
+        "language",
+        "frontend"
+      ],
+      "author": "alpha-swe",
       "description": "React 前端开发规范"
     },
     "django": {
       "version": "1.0.0",
-      "priority": 9,
-      "triggers": ["django", "orm", "model", "migration", "manage.py", "wsgi"],
-      "exclude_triggers": [],
-      "requires": ["python"],
+      "requires": [
+        "python"
+      ],
+      "permissions": [
+        "file_read",
+        "file_write",
+        "terminal_execute"
+      ],
+      "params": {
+        "app_name": {
+          "type": "string",
+          "required": true,
+          "description": "Django 应用名"
+        }
+      },
+      "tags": [
+        "backend",
+        "django"
+      ],
+      "author": "alpha-swe",
       "description": "Django 后端开发规范"
     },
     "git": {
       "version": "1.0.0",
-      "priority": 5,
-      "triggers": ["git", "commit", "branch", "merge", "pr", "pull request", "push", ".git"],
-      "exclude_triggers": [],
       "requires": [],
+      "permissions": [
+        "terminal_execute"
+      ],
+      "params": {},
+      "tags": [
+        "vcs"
+      ],
+      "author": "alpha-swe",
       "description": "Git 版本控制操作规范"
     },
     "docker": {
       "version": "1.0.0",
-      "priority": 5,
-      "triggers": ["docker", "container", "image", "compose", "Dockerfile"],
-      "exclude_triggers": [],
       "requires": [],
+      "permissions": [
+        "terminal_execute"
+      ],
+      "params": {},
+      "tags": [
+        "infra"
+      ],
+      "author": "alpha-swe",
       "description": "Docker 容器化操作规范"
     },
     "testing": {
       "version": "1.0.0",
-      "priority": 6,
-      "triggers": ["test", "pytest", "jest", "unittest", "测试", "coverage"],
-      "exclude_triggers": [],
       "requires": [],
+      "permissions": [
+        "terminal_execute",
+        "file_read"
+      ],
+      "params": {
+        "framework": {
+          "type": "string",
+          "required": false,
+          "default": "pytest",
+          "description": "测试框架"
+        }
+      },
+      "tags": [
+        "testing"
+      ],
+      "author": "alpha-swe",
       "description": "测试框架与策略"
+    },
+    "add-rest-endpoint": {
+      "version": "1.0.0",
+      "requires": [],
+      "permissions": [
+        "file_read",
+        "file_write",
+        "terminal_execute"
+      ],
+      "params": {
+        "method": {
+          "type": "string",
+          "required": false,
+          "default": "GET",
+          "description": "HTTP 方法"
+        },
+        "path": {
+          "type": "string",
+          "required": true,
+          "description": "端点路径，如 /api/users"
+        }
+      },
+      "tags": [
+        "web",
+        "api"
+      ],
+      "author": "alpha-swe",
+      "description": "添加一个 REST API 端点"
+    },
+    "python-refactor": {
+      "version": "1.0.0",
+      "requires": [
+        "python"
+      ],
+      "permissions": [
+        "file_read",
+        "file_write",
+        "terminal_execute"
+      ],
+      "params": {
+        "target": {
+          "type": "string",
+          "required": true,
+          "description": "目标模块/文件路径"
+        }
+      },
+      "tags": [
+        "refactor"
+      ],
+      "author": "alpha-swe",
+      "description": "对 Python 模块做小规模重构"
     }
   },
   "global": {

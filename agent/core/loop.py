@@ -208,6 +208,8 @@ class AgentLoop:
             max_active=self.config.skills.max_active,
             enabled=self.config.skills.enabled,
             decision_logger=self._decision,
+            registry_file=self.config.skills.registry_file,
+            usage_log=self.config.skills.usage_log,
         )
         self._project_ctx: Optional[ProjectContext] = None
 
@@ -911,8 +913,13 @@ class AgentLoop:
             for skill in matched:
                 self._decision.record(
                     "skill.activate", "skills.enabled", True,
-                    f"技能 {skill.name}（{len(skill.steps)} 步）命中激活",
+                    f"技能 {skill.name} v{skill.version}"
+                    f"（{len(skill.steps)} 步）命中激活",
                 )
+                # 阶段二 2.1：记录技能使用历史（版本管理）
+                self.skill_library.record_usage(
+                    skill.name, skill.version, "activated",
+                    note=str(prompt)[:120])
                 plan.extend(self.skill_library.expand(skill, prompt))
             self._emit("skills_activated",
                        skills=[s.name for s in matched], total=len(plan))

@@ -209,6 +209,9 @@ class SkillConfig(BaseModel):
     workflow_enabled: bool = True  # 技能命中时展开为子任务序列，替代 LLM 规划
     max_active: int = 3            # 单次最多激活技能数
     allow_fallback: bool = True    # 步骤失败允许按 fallback 回退重试
+    # 阶段二 2.1：技能注册表（JSON，按技能名合并 requires/permissions/params）
+    registry_file: str = "./skills/skill_manifest.json"
+    usage_log: str = "./logs/skill_usage.jsonl"  # 技能使用/成败历史（版本管理）
 
 
 class MCPOptions(BaseModel):
