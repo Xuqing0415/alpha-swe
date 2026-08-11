@@ -67,6 +67,8 @@ class SandboxPolicy:
             return self._check_file(params, context)
         if tool_name == "terminal_execute":
             return self._check_terminal(params, context)
+        if tool_name == "git_ops":
+            return self._check_git(params)
         return True, ""
 
     # ---- 文件 ----
@@ -95,6 +97,23 @@ class SandboxPolicy:
             if self._is_protected(path):
                 self._violate(f"写入受保护路径: {path}")
                 return False, f"禁止修改受保护文件: {path}"
+        return True, ""
+
+    # ---- Git ----
+    def _check_git(self, params: Dict[str, Any]) -> Tuple[bool, str]:
+        """git push 视为网络命令，遵守网络策略；其余操作放行。"""
+        if params.get("action") != "push":
+            return True, ""
+        if not self.network_enabled:
+            self._violate("git push 被网络策略拦截")
+            if self.decision_logger is not None:
+                self.decision_logger.record(
+                    "block_network_command", "sandbox.network_policy",
+                    self.network_policy,
+                    "git push 需要启用网络（git_ops 工具）",
+                )
+            return False, (f"网络已禁用（策略 {self.network_policy}），"
+                           "禁止 git push（请先启用网络）")
         return True, ""
 
     # ---- 终端 ----

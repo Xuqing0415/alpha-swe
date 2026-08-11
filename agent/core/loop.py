@@ -42,6 +42,7 @@ from agent.sandbox.policy import SandboxPolicy
 from agent.tools.base import ExecutionContext, ToolResult
 from agent.tools.background import BackgroundTaskTool
 from agent.tools.fileio import FileIOTool
+from agent.tools.git_tool import GitTool
 from agent.tools.manager import ToolManager
 from agent.tools.terminal import TerminalTool
 from agent.tools.test_tool import TestRunnerTool
@@ -248,6 +249,8 @@ class AgentLoop:
             decision_logger=self._decision,
         )
         manager.register(self._background_tasks)
+        # 方案 3.4：Git 版本管理（写操作走确认策略）
+        manager.register(GitTool(decision_logger=self._decision))
         raw = self.config.tools.model_dump()
         self._tool_enabled = {name: cfg["enabled"] for name, cfg in raw.items()}
         return manager
@@ -920,6 +923,8 @@ class AgentLoop:
                     "edit": 10.0}.get(action, 30.0)
         if name == "background_task":
             return 10.0  # 管理类动作必须快速返回，不阻塞循环
+        if name == "git_ops":
+            return 30.0
         return 30.0
 
     def _track_timeout(self, name: str, params: Dict[str, Any],
@@ -1060,6 +1065,13 @@ class AgentLoop:
         # file_write 规则同时覆盖精确行编辑 edit
         if (tool_name == "file_ops" and rule == "file_write"
                 and params.get("action") in ("write", "edit")):
+            return True
+        git_map = {
+            "git_status": "status", "git_diff": "diff", "git_log": "log",
+            "git_branch": "branch", "git_commit": "commit",
+            "git_push": "push", "git_branch_delete": "branch_delete",
+        }
+        if tool_name == "git_ops" and git_map.get(rule) == params.get("action"):
             return True
         return False
 

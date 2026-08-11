@@ -251,9 +251,11 @@ class AgentConfig(BaseModel):
     parallel_tool_calls: bool = True  # 单次响应多工具是否并行执行
     require_confirmation: List[str] = Field(default_factory=lambda: [
         "file_write", "terminal:rm", "terminal:git push",
+        "git_commit", "git_push", "git_branch_delete",
     ])
     auto_approve: List[str] = Field(default_factory=lambda: [
         "file_read", "terminal:ls", "terminal:cat",
+        "git_status", "git_diff", "git_log", "git_branch",
     ])
     trace_dir: str = "./logs/traces"        # OTel 风格 span JSONL 导出目录
     trace_enabled: bool = True              # 分布式追踪开关
