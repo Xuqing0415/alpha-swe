@@ -194,7 +194,8 @@ class AgentLoop:
         )
         worker = (self._docker_task_worker if self.config.sandbox.docker_enabled
                   else self._execute_task)
-        self.scheduler.set_worker(worker)
+        # 方案 1.1：任务级重试包装（失败且有预算时 RETRYING -> READY 重跑）
+        self.scheduler.set_worker(self._wrap_with_retry(worker))
         self.scheduler.set_on_task_failed(self._on_task_failed)
         self.plugins = plugin_manager or PluginManager(
             plugins_dir=self.config.plugin.dir,
@@ -470,6 +471,66 @@ class AgentLoop:
         )
         return result
 
+    # ---- 任务级重试（方案 1.1）：immediate / backoff / retry_with_context ----
+    def _wrap_with_retry(self, worker) -> Callable[[Task], Any]:
+        """把任意任务 worker 包装成带重试循环的执行器。"""
+        async def _run(task: Task) -> None:
+            while True:
+                await worker(task)
+                if task.status != TaskStatus.FAILED:
+                    return
+                if not self._retry_available(task):
+                    return  # 重试预算耗尽，保持 FAILED
+                task.retry_count += 1
+                strategy = task.retry_strategy
+                self._decision.record(
+                    "task.retry", "agent.max_retries", task.max_retries,
+                    f"任务 {task.id} 第 {task.retry_count} 次重试"
+                    f"（策略 {strategy}）: {str(task.error or '')[:120]}",
+                )
+                if strategy == "retry_with_context":
+                    # 把失败原因回写进下一轮 Prompt（对应方案 1.1）
+                    task.history.append({
+                        "role": "user",
+                        "content": f"[上一步失败原因] {task.error}",
+                    })
+                task.mark(TaskStatus.RETRYING)
+                self._emit("task_retry", task_id=task.id,
+                           retry_count=task.retry_count, strategy=strategy,
+                           error=str(task.error))
+                delay = self._retry_delay(task)
+                if delay > 0:
+                    logger.warning("任务 %s 重试前等待 %.1fs（%d/%d）",
+                                   task.id, delay, task.retry_count,
+                                   task.max_retries)
+                    await asyncio.sleep(delay)
+                task.mark(TaskStatus.READY)
+        return _run
+
+    @staticmethod
+    def _retry_available(task: Task) -> bool:
+        """是否还有重试预算。"""
+        return task.retry_count < task.max_retries
+
+    @staticmethod
+    def _retry_delay(task: Task) -> float:
+        """按策略计算重试等待秒数（backoff: 1s/2s/4s/8s，其余立即）。"""
+        if task.retry_strategy == "backoff":
+            return min(2.0 ** (task.retry_count - 1), 8.0)
+        return 0.0  # immediate / retry_with_context 立即重试
+
+    def _on_task_failure(self, task: Task) -> None:
+        """任务失败但可能重试：有预算时推迟失败计数与反例记忆。"""
+        if self._retry_available(task):
+            self._decision.record(
+                "task.retry_pending", "agent.max_retries", task.max_retries,
+                f"任务 {task.id} 第 {task.retry_count + 1} 次失败待重试: "
+                f"{str(task.error or '')[:120]}",
+            )
+            return
+        self.metrics.inc("tasks_failed")
+        self._remember_error(task)
+
     # ---- Docker 任务包装：任务前快照，失败自动回滚（设计 12 节） ----
     async def _docker_task_worker(self, task: Task) -> None:
         snapshot = None
@@ -556,10 +617,9 @@ class AgentLoop:
                         if degenerate_streak >= 3:
                             task.mark(TaskStatus.FAILED,
                                       error=f"工具调用参数持续为空（{degenerate_streak} 次），已中止以避免无效循环")
-                            self.metrics.inc("tasks_failed")
                             self.tracer.end_span(task_span, status="error",
                                                  error=task.error)
-                            self._remember_error(task)
+                            self._on_task_failure(task)
                             return
                         continue
                     degenerate_streak = 0
@@ -594,10 +654,9 @@ class AgentLoop:
                                   error="工具执行连续超时，触发熔断（见上一步观察）")
                         self._emit("task_failed", task_id=task.id,
                                    reason="timeout_circuit_breaker")
-                        self.metrics.inc("tasks_failed")
                         self.tracer.end_span(task_span, status="error",
                                              error=task.error)
-                        self._remember_error(task)
+                        self._on_task_failure(task)
                         return
                     if any(r.metadata.get("waiting") for r in results):
                         task.mark(TaskStatus.WAITING)  # 挂起，释放控制权
@@ -619,10 +678,9 @@ class AgentLoop:
                 if parse_failures >= self.parser.max_retries:
                     task.mark(TaskStatus.FAILED,
                               error=f"输出解析失败 {parse_failures} 次: {parsed.error}")
-                    self.metrics.inc("tasks_failed")
                     self.tracer.end_span(task_span, status="error",
                                          error=task.error)
-                    self._remember_error(task)
+                    self._on_task_failure(task)
                     return
                 task.history.append({
                     "role": "user",
@@ -630,9 +688,8 @@ class AgentLoop:
                 })
 
             task.mark(TaskStatus.FAILED, error=f"超过最大轮数 {self._max_rounds}")
-            self.metrics.inc("tasks_failed")
             self.tracer.end_span(task_span, status="error", error=task.error)
-            self._remember_error(task)
+            self._on_task_failure(task)
         except TaskInterrupted:
             task.mark(TaskStatus.READY)  # 中断后回到就绪，等待重新调度
             self._emit("task_interrupted", task_id=task.id)
@@ -641,9 +698,8 @@ class AgentLoop:
         except Exception as e:
             logger.exception("任务执行异常: %s", task.id)
             task.mark(TaskStatus.FAILED, error=str(e))
-            self.metrics.inc("tasks_failed")
             self.tracer.end_span(task_span, status="error", error=str(e))
-            self._remember_error(task)
+            self._on_task_failure(task)
 
     # ---- 工具 ----
     def _inject_exec_env(self) -> None:

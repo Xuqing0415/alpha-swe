@@ -59,6 +59,8 @@ _TASK_MARKS = {
     "completed": ("完成 ", "green"),
     "running": ("进行>", "yellow"),
     "waiting": ("等待 ", "bright_black"),
+    "retrying": ("重试 ", "yellow"),
+    "skipped": ("跳过 ", "bright_black"),
     "ready": ("就绪 ", "bright_black"),
     "failed": ("失败 ", "red"),
     "idle": ("空闲 ", "bright_black"),

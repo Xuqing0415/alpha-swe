@@ -18,6 +18,7 @@ class TaskStatus(str, Enum):
     READY = "ready"
     RUNNING = "running"
     WAITING = "waiting"
+    RETRYING = "retrying"  # 失败后等待重试（方案 1.1）
     COMPLETED = "completed"
     FAILED = "failed"
 
@@ -32,6 +33,12 @@ class Task:
     priority: int = 0
     role: str = ""  # 多 Agent 协作：coder / reviewer / tester ...
     parent_id: Optional[str] = None
+    # 任务级重试（方案 1.1）：max_retries 默认 3，策略 immediate/backoff/retry_with_context
+    max_retries: int = 3
+    retry_count: int = 0
+    retry_strategy: str = "backoff"
+    # 步骤级降级（方案 1.2）：critical 失败上抛 / normal 标记 SKIPPED / optional 静默跳过
+    criticality: str = "normal"
     result: Any = None
     error: Optional[str] = None
     history: List[Dict[str, Any]] = field(default_factory=list)
@@ -60,6 +67,10 @@ class Task:
             "priority": self.priority,
             "role": self.role,
             "parent_id": self.parent_id,
+            "max_retries": self.max_retries,
+            "retry_count": self.retry_count,
+            "retry_strategy": self.retry_strategy,
+            "criticality": self.criticality,
             "result": self.result,
             "error": self.error,
             "metadata": dict(self.metadata),

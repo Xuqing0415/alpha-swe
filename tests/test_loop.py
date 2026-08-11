@@ -12,10 +12,18 @@ from agent.llm import MockLLM
 
 
 class StubPlanner:
-    """固定返回单个任务，避免消耗脚本化 LLM 的响应。"""
+    """固定返回单个任务，避免消耗脚本化 LLM 的响应。
+
+    max_retries 默认 0：既有用例只验证单次执行语义；
+    任务级重试用例显式传入 >0 的预算。
+    """
+
+    def __init__(self, max_retries: int = 0):
+        self.max_retries = max_retries
 
     async def plan(self, prompt, context=""):
-        return [Task(id="t0", instruction=prompt)]
+        return [Task(id="t0", instruction=prompt,
+                     max_retries=self.max_retries)]
 
 
 class ScriptedLLM(MockLLM):
