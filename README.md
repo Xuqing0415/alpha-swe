@@ -70,6 +70,29 @@ loop.py, scheduler.py, ... 旧版七层原型（保留，作为对照参考）
 - **嵌入器**：`memory.embedder` 支持 `tfidf`（默认）、`sentence-transformers`（本地模型）、
   `openai`（Embeddings API，`embedding_api_key_env` 指定密钥环境变量）。
 
+## 代码语义理解层（阶段一）
+
+让 Agent 拥有程序员级别的代码感知能力，入口 `agent/code/`：
+
+- **AST 感知读取**（`ast_summary.py`）：`file_ops` 读取代码文件时除原文外附加结构摘要——类/函数/方法签名、
+  参数、装饰器、导入与导出符号；Python 用标准库 `ast`，JS/TS 优先 tree-sitter 精确提取，
+  未安装时回退正则近似（决策日志 `symbol.retrieved`）。
+- **调用图**（`call_graph.py`）：项目启动时构建 `caller -> callee` 有向边（Python `ast`、JS/TS tree-sitter），
+  修改符号前可查"谁调用了它 / 它调用了谁"（`callers_of` / `callees_of`），
+  FileIO 读取时注入影响范围，决策日志 `call_graph.hit` / `call_graph.indexed`。
+- **项目约定提取**（`project_profile.py`）：扫描 `package.json` / `pyproject.toml` / `tsconfig.json` 等，
+  自动识别技术栈（含版本）、lint/严格模式约定、顶层目录结构，作为持久化上下文注入 System Prompt
+  （决策日志 `profile.injected`）。
+- **Planner 注入**：`planner.plan(..., call_graph, project_context)` 把高频符号影响面与项目约定
+  注入拆分提示，让子任务拆分考虑连带修改（决策日志 `planner.call_graph.injected`）。
+
+安装 tree-sitter（可选，未安装自动回退正则）：
+```powershell
+pip install tree-sitter tree-sitter-javascript tree-sitter-typescript
+```
+
+验证：`tests/test_code_semantics.py`（AST 摘要 / 调用图 / 项目约定 / 工具与 Prompt 注入 / tree-sitter 与回退）。
+
 ## 技能与插件（第 10 节）
 
 ### 插件动态注入（`agent/context/plugin.py`）
@@ -102,6 +125,12 @@ steps:
     fallback: 改用最简参数校验并重试
 ```
 
+- **技能注册表（阶段二 2.1）**：每个技能可声明 `requires`（依赖技能）、`permissions`（所需工具权限）、
+  `params`（参数定义）、`version` / `tags` / `author`；`skills/skill_manifest.json` 注册表按技能名补缺省元数据
+  （YAML 显式键优先）；`validate()` 校验步骤依赖/`on_failure`/重复名；`discover()` 返回命中 + requires 依赖闭包；
+  `record_usage()` / `usage_summary()` 记录使用与成败历史（版本管理，写入 `skills.usage_log`）。
+  决策日志：`skill.registry.loaded` / `skill.registry.invalid` / `skill.discovered`；
+  展开时 `Task.metadata` 携带 `skill_version` / `requires` / `permissions`。
 - 技能命中时由 `SkillLibrary.expand()` 展开为 Task DAG（步骤依赖 -> 任务依赖），替代 LLM 规划器；
 - 步骤决策点写入 `Task.metadata`：`on_failure=fallback` 时失败自动 `spawn` 回退任务（`skill.step_fallback`），
   `orchestrate` 时发出 `skill_intervention` 事件请求介入；
@@ -162,6 +191,8 @@ steps:
 pip install pyyaml pydantic jinja2 pytest pytest-asyncio litellm
 # 可选：真实向量库后端
 pip install qdrant-client    # 或 chromadb
+# 可选：JS/TS 精确代码解析（未安装时回退正则）
+pip install tree-sitter tree-sitter-javascript tree-sitter-typescript
 
 # 运行测试（终端工具测试会真实创建子进程）
 python -X utf8 -m pytest tests -q
@@ -264,6 +295,8 @@ python -m tui --config config/agent.yaml "修复失败的测试"
 1. ~~MCP 客户端（`mcp` Python SDK）初始化握手、工具合并与资源订阅~~（已完成，见 `agent/mcp/` 与第 13 节）；
 2. ~~长期记忆升级为 Chroma/Qdrant 向量检索 + 自动经验摘要写入~~（已完成，见上节）；
 3. ~~多 Agent 协作（Orchestrator/Worker + 黑板）与 Critic 仲裁~~（已完成，见 `agent/multiagent/` 与第 8 节）；
+3.1 ~~代码语义理解层：AST 摘要 / 调用图 / 项目约定提取，Planner 注入影响范围~~（已完成，阶段一，见 `agent/code/`）；
+3.2 ~~技能注册表规范化：requires/permissions/params、注册表合并、校验、发现、使用记录~~（已完成，阶段二，见 `agent/context/skill.py`）；
 
 4. ~~Docker 沙箱完整生命周期（网络隔离、资源限制、快照/回滚）~~（已完成，见 `agent/sandbox/docker_sandbox.py`）；工具层安全加固（网络细粒度策略/假网络/受保护路径/审计回滚/资源熔断）已完成（阶段五）；
 5. ~~MCP 生态打通（断连重连/降级、资源缓存 TTL、自研 TS 服务器）~~（已完成，阶段六，见 `agent/mcp/manager.py` 与 `mcp-servers/`）；
