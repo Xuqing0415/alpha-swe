@@ -95,7 +95,7 @@ class TerminalTool(Tool):
                 "chcp 65001 | Out-Null; "
             )
             return ["powershell", "-NoProfile", "-NonInteractive",
-                    "-Command", prefix + command]
+                    "-Command", prefix + command + "; exit $LASTEXITCODE"]
         return ["/bin/sh", "-c", command]
 
     async def execute(self, params: Dict[str, Any], context: ExecutionContext) -> ToolResult:

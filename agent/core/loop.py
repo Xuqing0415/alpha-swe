@@ -40,6 +40,7 @@ from agent.sandbox.audit import FileAuditStore
 from agent.sandbox.docker_sandbox import DockerSandbox
 from agent.sandbox.policy import SandboxPolicy
 from agent.tools.base import ExecutionContext, ToolResult
+from agent.tools.background import BackgroundTaskTool
 from agent.tools.fileio import FileIOTool
 from agent.tools.manager import ToolManager
 from agent.tools.terminal import TerminalTool
@@ -242,6 +243,11 @@ class AgentLoop:
         manager.register(TestRunnerTool(
             decision_logger=self._decision,
         ))
+        # 方案 2.4：后台任务生命周期管理（start/status/logs/stop）
+        self._background_tasks = BackgroundTaskTool(
+            decision_logger=self._decision,
+        )
+        manager.register(self._background_tasks)
         raw = self.config.tools.model_dump()
         self._tool_enabled = {name: cfg["enabled"] for name, cfg in raw.items()}
         return manager
@@ -911,6 +917,8 @@ class AgentLoop:
         if name == "file_ops":
             action = params.get("action") if isinstance(params, dict) else None
             return {"read": 5.0, "write": 10.0, "append": 10.0}.get(action, 30.0)
+        if name == "background_task":
+            return 10.0  # 管理类动作必须快速返回，不阻塞循环
         return 30.0
 
     def _track_timeout(self, name: str, params: Dict[str, Any],
