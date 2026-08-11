@@ -1,0 +1,29 @@
+# 技能：单元测试生成（阶段二真实技能库示例）
+name: test-generation
+version: "1.0.0"
+description: 单元测试生成（分析目标 -> 编写用例 -> 运行 -> 修复失败）
+priority: 7
+requires: []
+permissions: [file_read, file_write, terminal_execute]
+tags: [testing]
+params:
+  target:
+    type: string
+    required: true
+    description: 被测模块/函数
+triggers:
+  keywords: [测试, 单测, 用例, unittest, jest, pytest, test, coverage, 单元测试]
+  file_ext: [.py, .ts, .js]
+  project_dep: [pytest, jest, vitest, mocha, unittest]
+steps:
+  - name: analyze-target
+    instruction: 分析被测代码的输入输出与边界，确定测试策略
+    dependencies: []
+  - name: write-cases
+    instruction: 编写测试用例（正常 + 非法输入 + 边界）
+    dependencies: [analyze-target]
+  - name: run-tests
+    instruction: 运行测试套件并确认全部通过
+    dependencies: [write-cases]
+    on_failure: fallback
+    fallback: 分析失败原因并修复测试/实现后重试

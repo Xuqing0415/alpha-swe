@@ -1,0 +1,31 @@
+# 技能：修复 Bug（阶段二真实技能库示例）
+name: bug-fix
+version: "1.0.0"
+description: 修复 Bug（复现 -> 定位根因 -> 修复 -> 回归验证）
+priority: 9
+requires: []
+permissions: [file_read, file_write, terminal_execute]
+tags: [bugfix]
+params:
+  target:
+    type: string
+    required: false
+    description: 出问题的文件/模块
+triggers:
+  keywords: [bug, 修复, 报错, error, 崩溃, crash, 异常, exception, 失灵, 不工作, 出问题]
+  file_ext: [.py, .ts, .js]
+steps:
+  - name: reproduce
+    instruction: 复现问题并收集错误信息（栈/日志/复现步骤）
+    dependencies: []
+  - name: diagnose
+    instruction: 定位根因并输出修复方案
+    dependencies: [reproduce]
+  - name: patch
+    instruction: 实施最小修复
+    dependencies: [diagnose]
+  - name: regression
+    instruction: 运行相关测试/验证确认修复且无回归
+    dependencies: [patch]
+    on_failure: fallback
+    fallback: 根据失败信息调整修复后重试

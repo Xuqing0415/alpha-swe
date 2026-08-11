@@ -210,6 +210,7 @@ class AgentLoop:
             decision_logger=self._decision,
             registry_file=self.config.skills.registry_file,
             usage_log=self.config.skills.usage_log,
+            require_task_intent=self.config.skills.require_task_intent,
         )
         self._project_ctx: Optional[ProjectContext] = None
 

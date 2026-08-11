@@ -97,12 +97,16 @@ class SkillLibrary:
                  enabled: bool = True,
                  decision_logger=None,
                  registry_file: str = "./skills/skill_manifest.json",
-                 usage_log: str = "./logs/skill_usage.jsonl"):
+                 usage_log: str = "./logs/skill_usage.jsonl",
+                 require_task_intent: bool = True):
         self.skills_dir = skills_dir
         self.whitelist = set(whitelist or [])
         self.max_active = max(1, max_active)
         self.enabled = enabled
         self.decision_logger = decision_logger
+        # 工作流激活是否要求"任务意图"命中（keywords/file_ext）；
+        # project_dep/project_file 仅作上下文建议，避免无关任务误触发工作流
+        self.require_task_intent = require_task_intent
         self.registry_file = registry_file
         self.usage_log = usage_log
         self._skills: Dict[str, Skill] = {}
@@ -211,28 +215,54 @@ class SkillLibrary:
     def match(self, instruction: str,
               files: Optional[Iterable[str]] = None,
               deps: Optional[Iterable[str]] = None) -> List[Skill]:
-        """按指令 + 项目上下文匹配技能，按优先级降序返回（上限 max_active）。"""
+        """按指令 + 项目上下文匹配技能，按优先级降序返回（上限 max_active）。
+
+        require_task_intent=True 时，工作流激活要求命中"任务意图"
+        （keywords 或 file_ext）；project_dep/project_file 单独命中只作为
+        上下文建议（见 discover），避免无关任务误触发工作流展开。
+        """
         if not self.enabled:
             return []
         self.refresh()
         candidates = list(self._skills.values())
         if self.whitelist:
             candidates = [s for s in candidates if s.name in self.whitelist]
-        matched = [s for s in candidates
-                   if match_triggers(s.triggers, instruction, files or [], deps or [])]
+        intent = {"keywords", "file_ext"}
+        matched = []
+        for s in candidates:
+            hits = match_triggers(s.triggers, instruction, files or [], deps or [])
+            if not hits:
+                continue
+            if self.require_task_intent and not (set(hits) & intent):
+                continue
+            matched.append(s)
         matched.sort(key=lambda s: (-s.priority, s.name))
         return matched[: self.max_active]
 
     def discover(self, instruction: str,
                  files: Optional[Iterable[str]] = None,
                  deps: Optional[Iterable[str]] = None) -> List[Skill]:
-        """技能发现：匹配技能 + requires 依赖闭包（供 Orchestrator 建议使用）。"""
+        """技能发现：任务意图命中 + requires 闭包 + 上下文建议。
+
+        上下文建议 = 仅 project_dep/project_file 命中（无任务意图）的技能，
+        排在任务命中之后，供 Orchestrator/Prompt 参考而不自动展开。
+        """
         matched = self.match(instruction, files, deps)
         if not matched:
             return []
         by_name = {s.name: s for s in self.list_skills()}
+        intent_names = {s.name for s in matched}
+        # 上下文建议：候选里未命中任务意图、但命中 project_dep/project_file
+        context_candidates: List[Skill] = []
+        if self.require_task_intent:
+            for s in self._skills.values():
+                if s.name in intent_names:
+                    continue
+                hits = match_triggers(s.triggers, instruction, files or [], deps or [])
+                if hits and not (set(hits) & {"keywords", "file_ext"}):
+                    context_candidates.append(s)
         out: Dict[str, Skill] = {}
-        for s in matched:
+        for s in matched + context_candidates:
             out[s.name] = s
             for dep in s.requires:
                 if dep in by_name and dep not in out:
@@ -241,7 +271,8 @@ class SkillLibrary:
         if self.decision_logger is not None:
             self.decision_logger.record(
                 "skill.discovered", "skills.enabled", True,
-                f"发现技能 {len(result)} 个（命中 {[s.name for s in matched]}）",
+                f"发现技能 {len(result)} 个（任务命中 {len(matched)}"
+                f"{' + 上下文建议 ' + str(len(context_candidates)) if context_candidates else ''}）",
             )
         return result
 

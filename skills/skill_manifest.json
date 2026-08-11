@@ -159,6 +159,70 @@
       ],
       "author": "alpha-swe",
       "description": "对 Python 模块做小规模重构"
+    },
+    "db-migration": {
+      "version": "1.0.0",
+      "requires": [],
+      "permissions": [
+        "file_read",
+        "file_write",
+        "terminal_execute"
+      ],
+      "params": {
+        "target": {
+          "type": "string",
+          "required": true,
+          "description": "迁移目标（模型/表）"
+        }
+      },
+      "tags": [
+        "db",
+        "migration"
+      ],
+      "author": "alpha-swe",
+      "description": "数据库迁移工作流"
+    },
+    "test-generation": {
+      "version": "1.0.0",
+      "requires": [],
+      "permissions": [
+        "file_read",
+        "file_write",
+        "terminal_execute"
+      ],
+      "params": {
+        "target": {
+          "type": "string",
+          "required": true,
+          "description": "被测模块/函数"
+        }
+      },
+      "tags": [
+        "testing"
+      ],
+      "author": "alpha-swe",
+      "description": "单元测试生成工作流"
+    },
+    "bug-fix": {
+      "version": "1.0.0",
+      "requires": [],
+      "permissions": [
+        "file_read",
+        "file_write",
+        "terminal_execute"
+      ],
+      "params": {
+        "target": {
+          "type": "string",
+          "required": false,
+          "description": "出问题的文件/模块"
+        }
+      },
+      "tags": [
+        "bugfix"
+      ],
+      "author": "alpha-swe",
+      "description": "修复 Bug 工作流"
     }
   },
   "global": {

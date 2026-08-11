@@ -1,0 +1,31 @@
+# 技能：数据库迁移（阶段二真实技能库示例）
+name: db-migration
+version: "1.0.0"
+description: 数据库迁移（模型变更 -> 生成迁移 -> 执行迁移 -> 回滚方案）
+priority: 7
+requires: []
+permissions: [file_read, file_write, terminal_execute]
+tags: [db, migration]
+params:
+  target:
+    type: string
+    required: true
+    description: 迁移目标（模型/表）
+triggers:
+  keywords: [迁移, migration, migrate, schema, alembic, 建表, 加字段, 数据库, 数据表]
+  project_dep: [sqlalchemy, django, prisma, sequelize, typeorm]
+steps:
+  - name: analyze-schema
+    instruction: 分析当前模型/Schema 变更点，确定迁移目标与影响面
+    dependencies: []
+  - name: generate-migration
+    instruction: 生成数据库迁移脚本（Alembic/Django makemigrations/手工 SQL）
+    dependencies: [analyze-schema]
+  - name: apply-migration
+    instruction: 执行迁移并确认数据库结构生效
+    dependencies: [generate-migration]
+    on_failure: fallback
+    fallback: 检查迁移冲突与模型定义一致性后重试
+  - name: rollback-plan
+    instruction: 编写迁移回滚方案（downgrade/反向 SQL）
+    dependencies: [apply-migration]

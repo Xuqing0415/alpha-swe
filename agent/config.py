@@ -212,6 +212,9 @@ class SkillConfig(BaseModel):
     # 阶段二 2.1：技能注册表（JSON，按技能名合并 requires/permissions/params）
     registry_file: str = "./skills/skill_manifest.json"
     usage_log: str = "./logs/skill_usage.jsonl"  # 技能使用/成败历史（版本管理）
+    # 阶段二 2.4：工作流激活是否要求任务意图（keywords/file_ext）命中；
+    # False 时 project_dep/project_file 单独命中也会自动展开（可能误触发）
+    require_task_intent: bool = True
 
 
 class MCPOptions(BaseModel):

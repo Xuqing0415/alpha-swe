@@ -117,3 +117,4 @@ skills:
   allow_fallback: true          # 步骤失败允许按 fallback 回退重试
   registry_file: "./skills/skill_manifest.json"  # 技能注册表（requires/permissions/params）
   usage_log: "./logs/skill_usage.jsonl"          # 技能使用/成败历史（版本管理）
+  require_task_intent: true                      # 工作流激活需任务意图命中，避免误触发
