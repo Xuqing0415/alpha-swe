@@ -1,4 +1,4 @@
-﻿"""TUI 测试：事件格式化、事件订阅、终端实时输出桥接、Textual 无头运行。"""
+"""TUI 测试：事件格式化、事件订阅、终端实时输出桥接、Textual 无头运行。"""
 import asyncio
 from pathlib import Path
 
@@ -415,3 +415,58 @@ def test_layout_render_helpers():
                        "step_index": 0, "step_total": 3})
     row = _task_row(t)
     assert "进行>" in row and "step 1/3" in row
+
+
+
+def test_logbridge_posts_log_message():
+    """日志桥把 logging 记录转成 LogMessage，绝不向 stdout 打印。"""
+    import logging
+    from tui.logbridge import TuiLogHandler
+    from tui.messages import LogMessage
+
+    captured = []
+
+    class FakeApp:
+        def post_message(self, msg):
+            captured.append(msg)
+
+    handler = TuiLogHandler()
+    handler.set_app(FakeApp())
+    record = logging.LogRecord(
+        "alpha-swe.mcp", logging.WARNING, "", 0,
+        "MCP 服务器 custom-knowledge 连接失败", None, None,
+    )
+    handler.emit(record)
+    assert len(captured) == 1
+    msg = captured[0]
+    assert isinstance(msg, LogMessage)
+    assert msg.level == "WARNING"
+    assert "alpha-swe.mcp" in msg.content
+
+
+def test_logbridge_install_removes_stdout_handlers(ws_tmp):
+    """install_tui_logging 应移除既有 stdout handler 并挂上文件/桥接 handler。
+
+    只验证调用时刻的清理效果：pytest 自身的日志插件会在用例期间动态重新挂载，
+    因此不要求调用后整个 root.handlers 里完全没有 StreamHandler。
+    """
+    import logging
+    from tui.logbridge import TuiLogHandler, install_tui_logging
+
+    root = logging.getLogger()
+    before_all = list(root.handlers)
+    before_stream = [h for h in before_all
+                     if isinstance(h, logging.StreamHandler)]
+    before_level = root.level
+    try:
+        bridge = install_tui_logging(verbose=False,
+                                     log_file=str(ws_tmp / "tui.log"))
+        assert isinstance(bridge, TuiLogHandler)
+        for h in before_stream:
+            assert h not in root.handlers, f"stdout handler 未移除: {h}"
+        assert any(isinstance(h, logging.FileHandler) for h in root.handlers)
+        assert bridge in root.handlers
+        assert (ws_tmp / "tui.log").exists()
+    finally:
+        root.handlers = before_all
+        root.setLevel(before_level)

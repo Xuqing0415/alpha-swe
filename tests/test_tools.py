@@ -56,3 +56,19 @@ async def test_terminal_timeout(ws_tmp):
     r = await tool.execute({"command": "Start-Sleep -Seconds 5", "timeout": 1}, ctx)
     assert r.success is False
     assert r.metadata.get("timed_out") is True
+
+def test_terminal_decode_utf8_and_gbk_fallback():
+    """终端输出解码：UTF-8 直通，GBK 字节自动回退，杜绝乱码。"""
+    assert TerminalTool._decode("中文".encode("utf-8")) == "中文"
+    assert TerminalTool._decode("测试".encode("gbk")) == "测试"
+
+
+def test_terminal_build_argv_forces_utf8_on_windows():
+    """Windows 上 PowerShell 命令应强制 UTF-8 输出（避免 GBK 乱码）。"""
+    tool = TerminalTool()
+    argv = tool._build_argv("dir")
+    if argv[0].lower() == "powershell":
+        joined = " ".join(argv)
+        assert "[Console]::OutputEncoding" in joined
+        assert "chcp 65001" in joined
+

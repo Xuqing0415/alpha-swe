@@ -48,5 +48,9 @@ def test_tools_model_dump_keys():
 def test_load_mcp_config():
     mcp = load_mcp_config()
     names = [s.name for s in mcp.mcp_servers]
-    assert "github" in names
-    assert "custom-knowledge" in names
+    # github / custom-knowledge 在默认配置中已注释（需外网 GITHUB_TOKEN / 本地 SSE 服务），
+    # 避免启动时报错噪音；本地自研服务器应保留。
+    assert "github" not in names
+    assert "custom-knowledge" not in names
+    assert "knowledge-base" in names
+    assert "issue-tracker" in names

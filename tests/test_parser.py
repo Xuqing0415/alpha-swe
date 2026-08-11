@@ -42,3 +42,13 @@ def test_retry_feedback_records_failure():
     assert "无法解析" in feedback
     assert len(parser.failures) == 1
     assert parser.failures[0]["attempt"] == 1
+
+def test_json_think_with_tool_keeps_think_text():
+    """同一 JSON 同时含 think 与 tool：保留思考文本，params 缺省为空。"""
+    out = '{"think": "先看看目录", "tool": "file_ops"}'
+    p = Parser().parse(out)
+    assert p.action_type == "tool_call"
+    assert p.tool_name == "file_ops"
+    assert p.params == {}
+    assert p.content == "先看看目录"
+

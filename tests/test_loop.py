@@ -144,3 +144,45 @@ async def test_memory_remembered_on_completion(ws_tmp):
     await loop.run("记忆测试")
     hits = loop.memory.retrieve("记忆测试", top_k=3)
     assert any("任务: 记忆测试" in h["text"] for h in hits)
+
+@pytest.mark.asyncio
+async def test_degenerate_empty_tool_calls_abort(ws_tmp):
+    """连续 3 次空参数工具调用应立即中止，而不是烧光所有轮次。"""
+    cfg = make_config(ws_tmp)
+    llm = ScriptedLLM(
+        '{"tool": "file_ops"}',
+        '{"tool": "file_ops"}',
+        '{"tool": "file_ops"}',
+    )
+    loop = AgentLoop(config=cfg, llm=llm, planner=StubPlanner())
+    result = await loop.run("空参数测试")
+    assert result.ok is False
+    assert "参数持续为空" in result.final_answer
+
+
+@pytest.mark.asyncio
+async def test_think_with_tool_executes_and_emits_think(ws_tmp):
+    """同一 JSON 中 think+tool：先展示思考再执行工具。"""
+    cfg = make_config(ws_tmp)
+    llm = ScriptedLLM(
+        '{"think": "先写文件", "tool": "file_ops", '
+        '"params": {"action": "write", "path": "a.txt", "content": "x"}}',
+        '{"final_answer": "完成"}',
+    )
+    loop = AgentLoop(config=cfg, llm=llm, planner=StubPlanner())
+    result = await loop.run("组合调用测试")
+    assert result.ok
+    assert (ws_tmp / "ws" / "a.txt").read_text(encoding="utf-8") == "x"
+    assert any(e["type"] == "think" for e in loop.events)
+
+
+@pytest.mark.asyncio
+async def test_exec_env_injected_on_windows_fallback(ws_tmp):
+    """非 Docker 回退时应向提示词注入 Windows PowerShell 环境说明。"""
+    cfg = make_config(ws_tmp)
+    llm = ScriptedLLM('{"final_answer": "完成"}')
+    loop = AgentLoop(config=cfg, llm=llm, planner=StubPlanner())
+    await loop.run("环境说明测试")
+    assert loop.prompt_builder.exec_env
+    assert "PowerShell" in loop.prompt_builder.exec_env
+
