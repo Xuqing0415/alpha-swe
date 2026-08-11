@@ -473,6 +473,19 @@ class AlphaSWEApp(App[None]):
         self._finished = msg.result
         self.refresh_status()
 
+    def on_log_message(self, msg: LogMessage) -> None:
+        """Python logging 记录渲染进主日志区（INFO/WARN/ERROR）。"""
+        level = msg.level.upper()
+        tag = {"DEBUG": "INFO", "INFO": "INFO", "WARNING": "WARN",
+               "ERROR": "ERROR", "CRITICAL": "ERROR"}.get(level, "INFO")
+        style = {"WARNING": "yellow", "ERROR": "red",
+                 "CRITICAL": "red"}.get(level, "bright_black")
+        line = Text()
+        line.append(f"[{time.strftime('%H:%M:%S')}] ", style="bright_black")
+        line.append(f"{tag.rjust(5)} ", style=style)
+        line.append(Text(msg.content))
+        self._append_thought(line)
+
     # ---- 确认弹窗 ----
     def on_confirmation_request_message(
             self, msg: ConfirmationRequestMessage) -> None:
@@ -543,6 +556,8 @@ class AlphaSWEApp(App[None]):
 
     # ---- 状态刷新（0.5s 定时 + 事件触发） ----
     def refresh_status(self) -> None:
+        if not self.is_mounted:  # 挂载完成前定时器/事件可能先触发
+            return
         self._update_task_panel()
         self._update_status_bar()
         self._update_compact_header()

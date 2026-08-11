@@ -8,13 +8,13 @@
 from __future__ import annotations
 
 import argparse
-import logging
 import sys
 
 from agent.config import load_config, load_mcp_config
 from agent.mcp.manager import MCPManager
 
 from tui.app import AlphaSWEApp
+from tui.logbridge import install_tui_logging
 
 
 def main(argv=None) -> int:
@@ -30,16 +30,15 @@ def main(argv=None) -> int:
     if args.replay:
         return replay_session(args.replay)
 
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+    # logging 重定向到文件并转发 WARNING+ 到 TUI：杜绝向 stdout 打印导致屏幕乱码
+    bridge = install_tui_logging(args.verbose)
 
     prompt = " ".join(args.prompt).strip() or "分析当前项目结构并给出改进建议"
     config = load_config(args.config)
     mcp_manager = MCPManager.from_config(load_mcp_config(), config.mcp)
 
     app = AlphaSWEApp(prompt, config=config, mcp_manager=mcp_manager)
+    bridge.set_app(app)
     app.run()
     return 0
 

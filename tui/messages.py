@@ -1,4 +1,4 @@
-﻿"""TUI 消息 —— 从 AgentLoop/终端到 Textual 界面的事件消息。
+"""TUI 消息 —— 从 AgentLoop/终端到 Textual 界面的事件消息。
 
 所有消息都通过 Textual 的 Message 传递，保证在事件循环内被 UI 安全消费。
 """
@@ -42,6 +42,15 @@ class AgentStartedMessage(Message):
         super().__init__()
 
 
+class LogMessage(Message):
+    """Python logging 记录转发到主日志区（隔离 stdout，避免屏幕乱码）。"""
+
+    def __init__(self, level: str, content: str) -> None:
+        self.level = level
+        self.content = content
+        super().__init__()
+
+
 class ConfirmationRequestMessage(Message):
     """请求用户确认高风险工具调用（阶段八 8.2）。"""
 
@@ -58,5 +67,6 @@ __all__ = [
     "TerminalOutputMessage",
     "AgentFinishedMessage",
     "AgentStartedMessage",
+    "LogMessage",
     "ConfirmationRequestMessage",
 ]
