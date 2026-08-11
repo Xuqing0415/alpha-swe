@@ -147,6 +147,26 @@ async def test_pause_resume_suspends_loop(ws_tmp):
 
 
 @pytest.mark.asyncio
+async def test_execution_completed_event_emitted(ws_tmp):
+    """方案 2.3：每个工具执行完成发布 execution_completed 事件。"""
+    cfg = make_config(ws_tmp)
+    llm = ScriptedLLM(
+        '{"tool": "file_ops", "params": {"action": "write", '
+        '"path": "ev.txt", "content": "x"}}',
+        '{"final_answer": "done"}',
+    )
+    loop = AgentLoop(config=cfg, llm=llm, planner=StubPlanner())
+    await loop.run("进度事件测试")
+    events = [e for e in loop.events if e["type"] == "execution_completed"]
+    assert len(events) >= 1
+    ev = events[0]
+    assert ev["data"]["tool"] == "file_ops"
+    assert ev["data"]["task_id"] == "t0"
+    assert ev["data"]["success"] is True
+    assert "elapsed_ms" in ev["data"]
+
+
+@pytest.mark.asyncio
 async def test_memory_remembered_on_completion(ws_tmp):
     cfg = make_config(ws_tmp)
     llm = ScriptedLLM('{"final_answer": "完成"}')

@@ -432,6 +432,20 @@ def test_layout_render_helpers():
 
 
 
+def test_task_row_retry_indicator():
+    """方案 1.1/2.3：重试中的任务显示 (重试 x/y)。"""
+    from agent.core.task import Task, TaskStatus
+    from tui.app import _task_row
+
+    t = Task(id="t", instruction="重试任务", status=TaskStatus.RETRYING,
+             retry_count=2, max_retries=3, criticality="critical")
+    row = _task_row(t)
+    assert "重试 " in row and "(重试 2/3)" in row
+    # 未重试过的任务不显示
+    t2 = Task(id="t2", instruction="普通任务", status=TaskStatus.RUNNING)
+    assert "(重试" not in _task_row(t2)
+
+
 def test_logbridge_posts_log_message():
     """日志桥把 logging 记录转成 LogMessage，绝不向 stdout 打印。"""
     import logging

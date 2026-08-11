@@ -880,6 +880,16 @@ class AgentLoop:
             if result.metadata.get("timed_out"):
                 self._track_timeout(name, params, task, result)
             self.metrics.record_tool_result(result.success)
+            # 方案 2.3：进度回写事件（TUI 任务面板/状态栏实时刷新）
+            self._emit(
+                "execution_completed",
+                task_id=task.id,
+                tool=name,
+                success=result.success,
+                elapsed_ms=result.elapsed_ms,
+                timed_out=bool(result.metadata.get("timed_out")),
+                circuit_broken=bool(result.metadata.get("circuit_broken")),
+            )
             end_attrs = {}
             if result.output:
                 end_attrs["out"] = (result.output or "")[:240]

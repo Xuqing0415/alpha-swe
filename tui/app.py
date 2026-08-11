@@ -659,7 +659,11 @@ class AlphaSWEApp(App[None]):
         lines.append("任务树:")
         tasks = list(loop.scheduler.dag.all()) if loop else []
         if tasks:
-            done = sum(1 for t in tasks if t.status.value == "completed")
+            # 方案 2.3：进度按「已完成 + 已跳过」占总数计算，跳过不拖慢进度
+            done = sum(
+                1 for t in tasks
+                if t.status.value in ("completed", "skipped")
+            )
             for t in tasks[:8]:
                 lines.append(_task_row(t))
             if len(tasks) > 8:
@@ -1092,6 +1096,11 @@ def _task_row(t: Any) -> str:
         idx = (meta.get("step_index") or 0) + 1
         total = meta.get("step_total") or 0
         label += f" [{meta.get('skill_step')} {idx}/{total}]"
+    # 方案 1.1：重试中/已重试的任务显示 (重试 x/y)
+    if st == "retrying" or (getattr(t, "retry_count", 0) or 0) > 0:
+        retries = getattr(t, "retry_count", 0) or 0
+        total = getattr(t, "max_retries", 3) or 0
+        label += f" (重试 {retries}/{total})"
     return f"[{color}]{mark}[/{color}] {label}"
 
 
