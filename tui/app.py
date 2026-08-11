@@ -41,6 +41,7 @@ from tui.bridge import AgentRunner
 from tui.formatting import format_event
 from tui.vlog import VirtualLog
 from tui.diff_renderer import diff_summary, render_unified_diff
+from tui.logbridge import TuiLogHandler
 from tui.file_tree import FileTreeView
 from tui.timeline_view import TimelineDetailScreen, TimelineView
 from tui.messages import (AgentEventMessage, AgentFinishedMessage,
@@ -231,7 +232,8 @@ _HELP_TEXT = """[bold]Alpha-SWE 快捷键[/bold]
 [green]F6[/green]  任务面板/文件树切换
 [green]Ctrl+I[/green]  注入指令    [green]Ctrl+P[/green]  暂停/继续
 [green]Ctrl+R[/green]  重试当前步骤 [green]Ctrl+S[/green]  跳过当前步骤
-[green]Ctrl+L[/green]  清空终端    [green]Tab[/green]    切换焦点
+[green]Ctrl+L[/green]  日志级别过滤 [green]Ctrl+U[/green]  清空终端
+[green]Tab[/green]    切换焦点
 [green]上/下[/green]  输入历史    [green]Esc[/green]    清空输入
 [green]时间线[/green]  上/下 选中，Enter 详情，Esc 关闭
 [green]Ctrl+C[/green] / [green]q[/green]  退出
@@ -384,7 +386,8 @@ class AlphaSWEApp(App[None]):
         Binding("ctrl+p", "toggle_pause", "暂停/继续"),
         Binding("ctrl+r", "retry_step", "重试"),
         Binding("ctrl+s", "skip_step", "跳过"),
-        Binding("ctrl+l", "clear_terminal", "清空终端"),
+        Binding("ctrl+l", "cycle_log_level", "日志级别过滤"),
+        Binding("ctrl+u", "clear_terminal", "清空终端"),
         Binding("tab", "focus_next", "切换窗格"),
         Binding("q", "quit", "退出"),
         Binding("ctrl+c", "quit", "退出", priority=True),
@@ -400,6 +403,7 @@ class AlphaSWEApp(App[None]):
         llm: Optional[BaseLLM] = None,
         planner: Optional[Planner] = None,
         mcp_manager: Optional[MCPManager] = None,
+        log_handler: Optional[TuiLogHandler] = None,
     ) -> None:
         super().__init__()
         self.prompt = prompt
@@ -408,6 +412,7 @@ class AlphaSWEApp(App[None]):
         self._inject_llm = llm
         self._inject_planner = planner
         self._inject_mcp = mcp_manager
+        self._log_handler = log_handler  # 日志桥（Ctrl+L 切换界面过滤级别）
         self.runner: Optional[AgentRunner] = None
         self._started_at = time.monotonic()
         self._finished: Optional[Any] = None
@@ -1077,6 +1082,23 @@ class AlphaSWEApp(App[None]):
 
     def action_skip_step(self) -> None:
         self._inject("跳过当前步骤，继续后续工作")
+
+    def action_cycle_log_level(self) -> None:
+        """Ctrl+L：循环切换主日志区的级别过滤（INFO/WARN/DEBUG/CRITICAL）。
+
+        仅影响界面转发，logs/tui.log 始终保存全量日志（方案 4.2）。
+        """
+        handler = self._log_handler
+        if handler is None:
+            self._append_thought(Text("未挂载日志桥，无法切换过滤级别",
+                                      style="yellow"))
+            return
+        lvl = handler.cycle_level()
+        self._append_thought(Text(
+            f"日志级别过滤: {handler.level_label()}"
+            f"（Ctrl+L 继续切换，全量日志仍在 logs/tui.log）",
+            style="cyan"))
+        self.refresh_status()
 
     def action_clear_terminal(self) -> None:
         self.query_one("#terminal-log", RichLog).clear()

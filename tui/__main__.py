@@ -37,7 +37,8 @@ def main(argv=None) -> int:
     config = load_config(args.config)
     mcp_manager = MCPManager.from_config(load_mcp_config(), config.mcp)
 
-    app = AlphaSWEApp(prompt, config=config, mcp_manager=mcp_manager)
+    app = AlphaSWEApp(prompt, config=config, mcp_manager=mcp_manager,
+                      log_handler=bridge)
     bridge.set_app(app)
     app.run()
     return 0
