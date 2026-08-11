@@ -46,6 +46,7 @@ class PromptBuilder:
         self.skill_context = ""
         self.resources_context = ""
         self.project_profile = ""
+        self.exec_env = ""
 
     def _resolve_system_template(self) -> str:
         """按 llm.provider 选择系统提示风格并记录决策。"""
@@ -81,6 +82,10 @@ class PromptBuilder:
         """注入 MCP 资源内容（外部知识库/文件/Schema）。"""
         self.resources_context = context
 
+    def set_exec_env(self, context: str) -> None:
+        """注入实际执行环境（Windows PowerShell / Linux bash），避免 shell 语法误用。"""
+        self.exec_env = context
+
     def set_project_profile(self, context: str) -> None:
         """注入项目约定与技术栈摘要（阶段一 1.3）。"""
         self.project_profile = context
@@ -100,6 +105,7 @@ class PromptBuilder:
             skill=self.skill_context,
             mcp_resources=self.resources_context,
             project_profile=self.project_profile,
+            exec_env=self.exec_env,
         )
         upstream_text = ""
         if upstream:

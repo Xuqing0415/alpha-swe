@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -478,6 +479,7 @@ class AgentLoop:
     async def _execute_task(self, task: Task) -> None:
         """每个任务的内部 ReAct 循环：Think -> Act -> Observe -> Parse。"""
         task.mark(TaskStatus.RUNNING)
+        self._inject_exec_env()
         self._emit(
             "task_start",
             task_id=task.id,
@@ -494,6 +496,7 @@ class AgentLoop:
         self._load_task_memory(task)
         self._load_task_plugins(task)
         parse_failures = 0
+        degenerate_streak = 0  # 连续空参数工具调用计数（防无效循环）
 
         try:
             while task.round_count < self._max_rounds:
@@ -529,6 +532,30 @@ class AgentLoop:
                          c.get("params") if isinstance(c.get("params"), dict) else {})
                         for c in parsed.extra_tool_calls
                     )
+                    # 空参数保护：连续空/缺参调用给出明确纠正，达阈值即中止
+                    if parsed.content:
+                        self._emit("think", task_id=task.id,
+                                   content=str(parsed.content)[:300])
+                    bad = self._first_degenerate_call(calls)
+                    if bad is not None:
+                        degenerate_streak += 1
+                        name, params, reason, example = bad
+                        obs = (f"[{name}] 参数错误: {reason}。"
+                               f"请输出完整参数 JSON，例如 {example}")
+                        task.history.append({"role": "observation",
+                                              "content": obs})
+                        self._emit("tool_call", task_id=task.id, tool=name,
+                                   params=params, success=False, output=obs[:300])
+                        if degenerate_streak >= 3:
+                            task.mark(TaskStatus.FAILED,
+                                      error=f"工具调用参数持续为空（{degenerate_streak} 次），已中止以避免无效循环")
+                            self.metrics.inc("tasks_failed")
+                            self.tracer.end_span(task_span, status="error",
+                                                 error=task.error)
+                            self._remember_error(task)
+                            return
+                        continue
+                    degenerate_streak = 0
                     parallel = self.config.agent.parallel_tool_calls and len(calls) > 1
                     if parallel:
                         self._decision.record(
@@ -602,6 +629,65 @@ class AgentLoop:
             self._remember_error(task)
 
     # ---- 工具 ----
+    def _inject_exec_env(self) -> None:
+        """按实际沙箱模式注入执行环境说明，避免模型误用 bash 语法。"""
+        if getattr(self.docker, "running", False):
+            text = ("沙箱为 Linux（Docker 容器）：shell 为 bash (/bin/sh)，"
+                    "支持 && / || / 管道与 POSIX 工具（ls、grep、find、cat 等）。")
+        else:
+            text = ("本机为 Windows PowerShell 5.1：不支持 && 与 ||，命令之间请用 ; 分隔；"
+                    "路径分隔符用 \\；列目录用 Get-ChildItem，读文件用 Get-Content，"
+                    "搜索用 Select-String，不要使用 bash 语法（如 ls -la / find / cat）。")
+        self.prompt_builder.set_exec_env(text)
+
+    def _first_degenerate_call(
+        self, calls: List[tuple]
+    ) -> Optional[Tuple[str, Dict[str, Any], str, str]]:
+        """返回首个缺必需参数的工具调用 (name, params, reason, example)。
+
+        全部合法或工具 schema 未知时返回 None（未知工具交给执行器报错）。
+        """
+        schemas = {s["name"]: s.get("parameters", {}) for s in
+                   self.tools.schemas(enabled=self._tool_enabled)}
+        placeholders = {
+            "command": "Get-ChildItem",
+            "action": "read",
+            "path": "src/main.py",
+            "pattern": "TODO",
+            "content": "...",
+        }
+        for name, params in calls:
+            params = params if isinstance(params, dict) else {}
+            schema = schemas.get(name)
+            if schema is None:
+                continue
+            required = schema.get("required", [])
+            missing = [
+                key for key in required
+                if params.get(key) is None
+                or (isinstance(params.get(key), str) and not params.get(key).strip())
+            ]
+            if not missing:
+                continue
+            props = schema.get("properties", {})
+            example = {"tool": name, "params": {}}
+            for key in required:
+                if key in params and key not in missing:
+                    example["params"][key] = params[key]
+                else:
+                    ptype = props.get(key, {}).get("type", "string")
+                    if key in placeholders:
+                        example["params"][key] = placeholders[key]
+                    elif ptype in ("number", "integer"):
+                        example["params"][key] = 1
+                    elif ptype == "boolean":
+                        example["params"][key] = True
+                    else:
+                        example["params"][key] = "..."
+            return (name, params, f"缺少必需参数 {missing}",
+                    json.dumps(example, ensure_ascii=False))
+        return None
+
     async def _run_tool(self, name: str, params: Dict[str, Any],
                         task: Task) -> ToolResult:
         """带确认策略执行单个工具（require_confirmation / auto_approve）。

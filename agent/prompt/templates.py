@@ -13,6 +13,10 @@ SYSTEM_TEMPLATE = """你是 Alpha-SWE，一个运行在安全沙箱中的软件�
 1. 需要调用工具时，输出 fenced JSON: ```json {"tool": "工具名", "params": {...}}```
 2. 需要思考时: ```json {"think": "你的分析"}```
 3. 任务完成时: ```json {"final_answer": "最终回答"}```
+{% if exec_env %}
+## 执行环境
+{{ exec_env }}
+{% endif %}
 {% if memory %}
 ## 检索到的历史记忆
 {{ memory }}
@@ -45,6 +49,9 @@ SYSTEM_TEMPLATE_ANTHROPIC = """<system-role>你是 Alpha-SWE，一个运行在�
 2. 需要思考时：```json {"think": "你的分析"}```
 3. 任务完成时：```json {"final_answer": "最终回答"}```
 </output-format>
+{% if exec_env %}
+<exec-env>{{ exec_env }}</exec-env>
+{% endif %}
 {% if memory %}
 <retrieved-memory>{{ memory }}</retrieved-memory>
 {% endif %}

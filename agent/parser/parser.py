@@ -132,12 +132,17 @@ class Parser:
             params = data.get("params")
             if not isinstance(params, dict):
                 params = {}
-            return ParsedAction(
+            action = ParsedAction(
                 action_type="tool_call",
                 tool_name=str(data["tool"]),
                 params=params,
                 raw=raw,
             )
+            if "think" in data:
+                # 模型把思考与工具调用写在同一个 JSON：保留思考文本，
+                # 循环先展示思考再执行工具（避免思考被吞掉）。
+                action.content = str(data["think"])
+            return action
         if "think" in data:
             return ParsedAction(action_type="think", content=str(data["think"]), raw=raw)
         if "final_answer" in data:
