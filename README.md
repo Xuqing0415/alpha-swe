@@ -127,14 +127,49 @@ steps:
 
 - **技能注册表（阶段二 2.1）**：每个技能可声明 `requires`（依赖技能）、`permissions`（所需工具权限）、
   `params`（参数定义）、`version` / `tags` / `author`；`skills/skill_manifest.json` 注册表按技能名补缺省元数据
-  （YAML 显式键优先）；`validate()` 校验步骤依赖/`on_failure`/重复名；`discover()` 返回命中 + requires 依赖闭包；
-  `record_usage()` / `usage_summary()` 记录使用与成败历史（版本管理，写入 `skills.usage_log`）。
-  决策日志：`skill.registry.loaded` / `skill.registry.invalid` / `skill.discovered`；
-  展开时 `Task.metadata` 携带 `skill_version` / `requires` / `permissions`。
-- 技能命中时由 `SkillLibrary.expand()` 展开为 Task DAG（步骤依赖 -> 任务依赖），替代 LLM 规划器；
-- 步骤决策点写入 `Task.metadata`：`on_failure=fallback` 时失败自动 `spawn` 回退任务（`skill.step_fallback`），
+  （YAML 显式键优先）；`validate()` 校验步骤依赖/`on_failure`/重复名/`when` 条件键；`discover()` 返回命中 +
+  requires 依赖闭包 + 上下文建议；`record_usage()` / `usage_summary()` 记录使用与成败历史（版本管理，写入
+  `skills.usage_log`）。决策日志：`skill.registry.loaded` / `skill.registry.invalid` / `skill.discovered`；
+  展开时 `Task.metadata` 携带 `skill_version` / `requires` / `permissions` / `step_index` / `step_total`。
+- **技能意图过滤（真实项目防误触发）**：`skills.require_task_intent: true`（默认）时，工作流激活要求任务指令命中
+  `keywords` / `file_ext`；`project_dep` / `project_file` 单独命中仅在 `discover()` 中作为「上下文建议」返回，
+  避免「把 README 翻译成英文」这类无关任务误展开 Express 工作流（决策日志 `skill.discovered` 区分两类命中）。
+- 技能命中时由 `SkillLibrary.expand()` / `expand_pipeline()` 展开为 Task DAG（步骤依赖 -> 任务依赖），
+  替代 LLM 规划器；多技能按给定顺序管道串联，前一个技能的最后一步链接到后一个技能的第一步（决策日志 `skill.pipeline`）；
+- **步骤条件分支（阶段二 2.2）**：`SkillStep.when` 支持 `file_exists` / `not_file_exists` / `keyword` /
+  `project_dep` / `always`（AND 语义），条件不满足的步骤跳过并记录 `skill.step_skip`；
+  步骤决策点写入 `Task.metadata`：`on_failure=fallback` 时失败自动 `spawn` 回退任务（`skill.step_fallback`），
   `orchestrate` 时发出 `skill_intervention` 事件请求介入；
-- 决策日志：`skill.activate` / `skill.expand` / `skill.step_fallback` / `skill.step_intervention`。
+- 决策日志：`skill.activate` / `skill.expand` / `skill.pipeline` / `skill.step_skip` /
+  `skill.step_fallback` / `skill.step_intervention`。
+
+### 自然语言创建技能（阶段二 2.3，`agent/context/skill_author.py`）
+
+- **确定性轨迹转换**：`SkillAuthor.from_trajectory()` 把已执行 Task 列表（含 `skill_step` 元数据）转换为技能
+  YAML——步骤按顺序依赖，失败步骤自动标 `on_failure: fallback` 并带重试指令，触发器从技能名/描述自动提取关键词
+  （含中文 2-3 字窗口）。
+- **LLM 生成**：`SkillAuthor.from_llm()` 用 LLM 把自然语言/轨迹生成为更规范、带条件的技能 YAML（只接受
+  ```yaml 代码块），失败自动回退确定性转换。
+- **落盘热加载**：`SkillAuthor.save()` 写入技能库目录并立即用 `SkillLibrary` 校验，可被 `discover()` / `match()`
+  马上发现（决策日志 `skill.authored` / `skill.saved`）。
+- **入口**：`AgentLoop.save_skill(name, description)`（保存最近任务轨迹）与
+  `AgentLoop.save_skill_from_natural_language(name, description, prompt)`（LLM 生成）；CLI 见 `scripts/save_skill.py`：
+  ```powershell
+  # trajectory.json: [{"step": "reproduce", "instruction": "复现问题", "outcome": "completed"}, ...]
+  python -X utf8 scripts/save_skill.py --name fix-login-bug --description "修复登录失败" --trajectory trajectory.json
+  python -X utf8 scripts/save_skill.py --name setup-env --description "初始化环境" --llm-prompt "把设置本地开发环境的步骤做成技能"
+  ```
+
+### 真实技能库与项目测试集（阶段二 2.4 验证）
+
+- `skills/workflows/` 内置真实工作流：`add-rest-endpoint`、`bug-fix`（复现→定位→修复→回归）、
+  `db-migration`（分析→生成→执行→回滚方案）、`test-generation`（分析→写用例→运行→修复失败）、
+  `python-refactor`；`skills/skill_manifest.json` 注册表补齐 requires/permissions/params/tags。
+- `tests/test_real_project_suite.py`（9 用例）：用 Express / Django+SQLAlchemy / pytest / Flask 迷你项目验证
+  陌生项目上的技能发现、优先级排序、无关任务零误触发，以及 `AgentLoop` 端到端激活顺序与 `skills_activated` 事件。
+- **技能执行进度可视化（阶段二 2.4）**：`task_start` 事件携带 `skill` / `skill_step` / `step_index` / `step_total`；
+  TUI 任务树视图为技能步骤显示 `[技能 name::step i/N]` 徽标，底部状态栏与思维流同步显示当前技能进度
+  （`skills_activated` 事件渲染为「技能工作流激活: ...（展开 N 个子任务）」）。
 
 ## 多 Agent 协作（第 8 节）
 
@@ -297,6 +332,7 @@ python -m tui --config config/agent.yaml "修复失败的测试"
 3. ~~多 Agent 协作（Orchestrator/Worker + 黑板）与 Critic 仲裁~~（已完成，见 `agent/multiagent/` 与第 8 节）；
 3.1 ~~代码语义理解层：AST 摘要 / 调用图 / 项目约定提取，Planner 注入影响范围~~（已完成，阶段一，见 `agent/code/`）；
 3.2 ~~技能注册表规范化：requires/permissions/params、注册表合并、校验、发现、使用记录~~（已完成，阶段二，见 `agent/context/skill.py`）；
+3.3 ~~阶段二后续项：真实技能库 + 意图过滤、技能管道与条件分支、自然语言创建技能、执行进度可视化~~（已完成，见 `agent/context/skill_author.py`、`scripts/save_skill.py`、`tests/test_real_project_suite.py`、`tests/test_skill_author.py`）；
 
 4. ~~Docker 沙箱完整生命周期（网络隔离、资源限制、快照/回滚）~~（已完成，见 `agent/sandbox/docker_sandbox.py`）；工具层安全加固（网络细粒度策略/假网络/受保护路径/审计回滚/资源熔断）已完成（阶段五）；
 5. ~~MCP 生态打通（断连重连/降级、资源缓存 TTL、自研 TS 服务器）~~（已完成，阶段六，见 `agent/mcp/manager.py` 与 `mcp-servers/`）；
