@@ -37,6 +37,7 @@ from agent.prompt.builder import estimate_tokens
 
 from tui.bridge import AgentRunner
 from tui.formatting import format_event
+from tui.vlog import VirtualLog
 from tui.messages import (AgentEventMessage, AgentFinishedMessage,
                           AgentStartedMessage, ConfirmationRequestMessage,
                           TerminalOutputMessage)
@@ -403,8 +404,7 @@ class AlphaSWEApp(App[None]):
             with Horizontal(id="body"):
                 yield Static("", id="task-panel", markup=True)
                 with Vertical(id="main-area"):
-                    yield RichLog(id="main-log", highlight=True, markup=True,
-                                  wrap=True, auto_scroll=True)
+                    yield VirtualLog(id="main-log")
                     yield RichLog(id="diff-log", highlight=True, markup=True,
                                   wrap=True, auto_scroll=True)
                     yield Static("", id="metrics-view", markup=True)
@@ -511,7 +511,7 @@ class AlphaSWEApp(App[None]):
 
     # ---- 视图 ----
     def _append_thought(self, renderable) -> None:
-        self.query_one("#main-log", RichLog).write(renderable)
+        self.query_one("#main-log", VirtualLog).write(renderable)
 
     def _append_terminal(self, renderable) -> None:
         self.query_one("#terminal-log", RichLog).write(renderable)
@@ -602,10 +602,20 @@ class AlphaSWEApp(App[None]):
         rounds = runner.total_rounds() if runner else 0
         max_rounds = getattr(loop, "_max_rounds", 0) if loop else 0
         r_style = "yellow" if (max_rounds and rounds / max_rounds >= 0.9) else "white"
+        view_names = {"log": "日志", "diff": "变更",
+                      "metrics": "监控", "timeline": "时间线"}
+        view_hint = f"[{view_names.get(self._main_view, self._main_view)}]"
+        if self._main_view == "log":
+            try:
+                vlog = self.query_one("#main-log", VirtualLog)
+                view_hint += "[跟随]" if vlog.follow else "[浏览中]"
+            except Exception:
+                pass  # 挂载早期查询失败则省略提示
         bar.update(
             f"tokens: [{t_style}]{tokens:,}[/] | "
             f"round: [{r_style}]{rounds}/{max_rounds}[/] | "
             f"mem: {self._memory_usage()} | session: {self._session_id}"
+            f" | {view_hint}"
         )
 
     def _update_compact_header(self) -> None:
@@ -788,7 +798,7 @@ class AlphaSWEApp(App[None]):
     def action_cycle_main_view(self) -> None:
         idx = _MAIN_VIEWS.index(self._main_view)
         self._main_view = _MAIN_VIEWS[(idx + 1) % len(_MAIN_VIEWS)]
-        self.query_one("#main-log", RichLog).display = self._main_view == "log"
+        self.query_one("#main-log", VirtualLog).display = self._main_view == "log"
         self.query_one("#diff-log", RichLog).display = self._main_view == "diff"
         self.query_one("#metrics-view", Static).display = (
             self._main_view == "metrics")

@@ -470,3 +470,79 @@ def test_logbridge_install_removes_stdout_handlers(ws_tmp):
     finally:
         root.handlers = before_all
         root.setLevel(before_level)
+
+
+# ---- 虚拟滚动主日志区（DataTable 三列） ----
+@pytest.mark.asyncio
+async def test_virtual_log_write_lines_and_follow(ws_tmp):
+    """VirtualLog 三列写入、lines 兼容、跟随/浏览模式切换。"""
+    from rich.text import Text
+    from textual.app import App
+
+    from tui.vlog import VirtualLog
+
+    class LogApp(App[None]):
+        def compose(self):
+            yield VirtualLog(id="log", max_lines=50)
+
+    async with LogApp().run_test(size=(100, 20)) as pilot:
+        vlog = pilot.app.query_one("#log", VirtualLog)
+        vlog.write(Text("[12:00:01] THINK 分析任务", style=""))
+        vlog.write(Text("[12:00:02] ACT terminal: ls", style=""))
+        vlog.write(Text("已暂停", style="yellow"))
+        assert vlog.row_count == 3
+        rendered = "".join(str(line) for line in vlog.lines)
+        assert "THINK" in rendered and "分析任务" in rendered
+        assert vlog.lines[-1].plain == "已暂停"
+        # 跟随 -> 浏览 -> 恢复
+        assert vlog.follow is True
+        vlog.watch_scroll_y(30, 10)
+        assert vlog.follow is False
+        vlog.watch_scroll_y(10, 30)
+        assert vlog.follow is True
+
+
+@pytest.mark.asyncio
+async def test_virtual_log_ring_buffer_prunes(ws_tmp):
+    """环形缓冲：超过 max_lines 批量裁剪最旧行。"""
+    from rich.text import Text
+    from textual.app import App
+
+    from tui.vlog import VirtualLog
+
+    class LogApp(App[None]):
+        def compose(self):
+            yield VirtualLog(id="log", max_lines=50)
+
+    async with LogApp().run_test(size=(100, 20)) as pilot:
+        vlog = pilot.app.query_one("#log", VirtualLog)
+        for i in range(90):
+            vlog.write(Text(f"[00:00:{i % 60:02d}] INFO 第 {i} 行", style=""))
+        # 批量裁剪：行数保持在 max_lines 与 max_lines+阈值之间
+        assert 50 <= vlog.row_count <= 75, vlog.row_count
+        rendered = "".join(str(line) for line in vlog.lines)
+        assert "第 0 行" not in rendered  # 最旧行已被裁剪
+        assert "第 40 行" in rendered
+        assert "第 89 行" in rendered
+
+
+@pytest.mark.asyncio
+async def test_tui_status_bar_shows_follow_hint(ws_tmp):
+    """状态栏在日志视图显示 [跟随]/[浏览中] 提示。"""
+    from textual.widgets import Static
+
+    from tui.vlog import VirtualLog
+
+    cfg = make_config(ws_tmp)
+    app = AlphaSWEApp("跟随提示测试", config=cfg, llm=MockLLM(),
+                      planner=StubPlanner())
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        vlog = app.query_one("#main-log", VirtualLog)
+        vlog.watch_scroll_y(50, 10)  # 模拟上滚 -> 浏览中
+        app.refresh_status()
+        bar = app.query_one("#status-bar", Static)
+        assert "[浏览中]" in str(bar.content)
+        vlog.watch_scroll_y(10, 60)  # 到底 -> 恢复跟随
+        app.refresh_status()
+        assert "[跟随]" in str(bar.content)
