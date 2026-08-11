@@ -932,6 +932,40 @@ class AgentLoop:
             logger.warning("技能工作流展开失败，回退 LLM 规划: %s", e)
             return []
 
+    def save_skill(self, name: str, description: str,
+                   tasks: Optional[List[Task]] = None) -> str:
+        """把最近执行的技能步骤保存为新技能（阶段二 2.3）。
+
+        返回落盘后的 YAML 路径；技能可被 SkillLibrary 热加载立即发现。
+        """
+        from agent.context.skill_author import SkillAuthor
+        if tasks is None:
+            tasks = list(self.scheduler.dag.all()) if self.scheduler else []
+        author = SkillAuthor(
+            skills_dir=self.config.skills.dir,
+            registry_file=self.config.skills.registry_file,
+            decision_logger=self._decision,
+        )
+        trajectory = SkillAuthor.trajectory_from_tasks(tasks)
+        skill = author.from_trajectory(name, description, trajectory)
+        return str(author.save(skill))
+
+    async def save_skill_from_natural_language(self, name: str,
+                                               description: str,
+                                               prompt: str) -> str:
+        """用 LLM 把自然语言/最近轨迹生成为技能并落盘（阶段二 2.3）。"""
+        from agent.context.skill_author import SkillAuthor
+        author = SkillAuthor(
+            skills_dir=self.config.skills.dir,
+            registry_file=self.config.skills.registry_file,
+            llm=self.llm,
+            decision_logger=self._decision,
+        )
+        tasks = list(self.scheduler.dag.all()) if self.scheduler else []
+        trajectory = SkillAuthor.trajectory_from_tasks(tasks)
+        skill = await author.from_llm(name, description, prompt, trajectory)
+        return str(author.save(skill))
+
     def _load_task_plugins(self, task: Task) -> None:
         """按子任务指令刷新插件上下文（文件类型/项目依赖触发按任务感知）。"""
         try:
