@@ -9,11 +9,43 @@ from agent.config import (AppConfig, CONFIG_FILE, ToolsConfig,
 WS_ROOT = Path(__file__).resolve().parent.parent / "test_workspace"
 
 
-def test_defaults_when_file_missing():
+def test_explicit_missing_falls_back_to_project_config():
+    """显式路径缺失时按三层降级链回落到项目根 config/agent.yaml。"""
     cfg = load_config(str(WS_ROOT / "missing_config.yaml"))
+    # 项目配置 agent.max_rounds=30；回落后仍是项目配置而非硬编码默认
     assert cfg.agent.max_rounds == 30
     assert cfg.tools.terminal_execute.enabled is True
+    assert cfg.sandbox.workspace.endswith("workspace")
+
+
+def test_full_fallback_to_defaults_when_all_missing(monkeypatch):
+    """项目配置也缺失时回落到内置默认值，且记录降级原因。"""
+    from agent import config as config_mod
+
+    monkeypatch.setattr(config_mod, "CONFIG_FILE", WS_ROOT / "no_such_dir" / "agent.yaml")
+    cfg = config_mod.load_config()
+    assert cfg.agent.max_rounds == 30
     assert cfg.llm.provider == "mock"
+    # 降级原因应被登记（文件不存在）
+    assert any(
+        n["module"] == "agent" and "文件不存在" in n["reason"]
+        for n in config_mod.CONFIG_FALLBACKS
+    )
+
+
+def test_broken_yaml_falls_back(monkeypatch, tmp_path):
+    """YAML 语法损坏时降级到默认值而不是抛异常。"""
+    from agent import config as config_mod
+
+    bad = tmp_path / "agent.yaml"
+    bad.write_text('agent: [unclosed\n  bad: [yaml', encoding="utf-8")
+    monkeypatch.setattr(config_mod, "CONFIG_FILE", bad)
+    cfg = config_mod.load_config()
+    assert cfg.agent.max_rounds == 30
+    assert any(
+        n["module"] == "agent" and "YAML" in n["reason"]
+        for n in config_mod.CONFIG_FALLBACKS
+    )
 
 
 def test_load_project_config():

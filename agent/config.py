@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import logging
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -14,6 +15,12 @@ from pydantic import BaseModel, Field, model_validator
 CONFIG_FILE = Path(__file__).resolve().parent.parent / "config" / "agent.yaml"
 DEFAULT_MCP_FILE = Path(__file__).resolve().parent.parent / "config" / "mcp.yaml"
 DEFAULT_TEAM_FILE = Path(__file__).resolve().parent.parent / "config" / "team.yaml"
+
+logger = logging.getLogger("alpha-swe.config")
+
+# 配置加载降级记录（模块级注册表）：每发生一次降级追加一条，
+# 供 AgentLoop 在 run() 时写入决策日志，让 TUI / analyze_decisions 可见。
+CONFIG_FALLBACKS: List[Dict[str, str]] = []
 
 
 class ToolEntry(BaseModel):
@@ -291,30 +298,75 @@ class AppConfig(BaseModel):
 
 
 def load_config(path: Optional[str] = None) -> AppConfig:
-    """从 YAML 加载配置；文件缺失或部分缺失时回退到默认值。"""
-    cfg_path = Path(path) if path else CONFIG_FILE
-    if not cfg_path.exists():
-        return AppConfig()
-    with open(cfg_path, "r", encoding="utf-8") as f:
-        data = yaml.safe_load(f) or {}
-    return AppConfig.from_dict(data)
+    """三层降级加载配置，保证任意情况下都能得到可运行配置。
+
+    第一层：用户显式指定的路径；
+    第二层：项目根目录 config/agent.yaml；
+    第三层：内置默认值。
+    每一层失败都会记录 WARN 日志与 CONFIG_FALLBACKS（供决策日志汇总）。
+    """
+    candidates: List[Path] = []
+    if path:
+        candidates.append(Path(path))
+    candidates.append(CONFIG_FILE)
+    for cfg_path in candidates:
+        data = _read_yaml_safe(cfg_path, "agent")
+        if data is not None:
+            return AppConfig.from_dict(data)
+    return AppConfig()
 
 
 def load_mcp_config(path: Optional[str] = None) -> MCPConfig:
-    """加载 MCP 服务器清单。"""
+    """加载 MCP 服务器清单；文件缺失/损坏时降级为空清单（不崩溃）。"""
     cfg_path = Path(path) if path else DEFAULT_MCP_FILE
-    if not cfg_path.exists():
+    data = _read_yaml_safe(cfg_path, "mcp")
+    if data is None:
         return MCPConfig()
-    with open(cfg_path, "r", encoding="utf-8") as f:
-        data = yaml.safe_load(f) or {}
     return MCPConfig(**data)
 
 
 def load_team_config(path: Optional[str] = None) -> TeamConfig:
-    """加载多 Agent 团队配置（config/team.yaml）。"""
+    """加载多 Agent 团队配置（config/team.yaml）；失败时降级为默认团队。"""
     cfg_path = Path(path) if path else DEFAULT_TEAM_FILE
-    if not cfg_path.exists():
+    data = _read_yaml_safe(cfg_path, "team")
+    if data is None:
         return TeamConfig()
-    with open(cfg_path, "r", encoding="utf-8") as f:
-        data = yaml.safe_load(f) or {}
     return TeamConfig(**data)
+
+
+def _read_yaml_safe(cfg_path: Path, module: str) -> Optional[Dict[str, Any]]:
+    """读取并解析 YAML 配置；任何异常都降级返回 None 并记录原因。
+
+    覆盖 FileNotFoundError / yaml.YAMLError / PermissionError 及未知异常，
+    保证「配置坏了也不能让 Agent 崩」。
+    """
+    def _fallback(reason: str) -> None:
+        CONFIG_FALLBACKS.append({
+            "module": module,
+            "path": str(cfg_path),
+            "reason": reason,
+        })
+        logger.warning("%s 配置降级: %s（%s）", module, cfg_path, reason)
+
+    try:
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+    except FileNotFoundError:
+        _fallback("文件不存在")
+        return None
+    except PermissionError as e:
+        _fallback(f"无读取权限: {e}")
+        return None
+    except yaml.YAMLError as e:
+        _fallback(f"YAML 解析失败: {str(e)[:120]}")
+        return None
+    except OSError as e:
+        _fallback(f"IO 错误: {e}")
+        return None
+    except Exception as e:
+        _fallback(f"未知异常: {str(e)[:120]}")
+        return None
+    if not isinstance(data, dict):
+        _fallback(f"顶层必须是映射，实际为 {type(data).__name__}")
+        return None
+    return data

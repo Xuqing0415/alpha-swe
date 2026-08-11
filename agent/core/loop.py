@@ -283,6 +283,9 @@ class AgentLoop:
 
     # ---- 主入口 ----
     async def run(self, prompt: str) -> LoopResult:
+        # 配置降级记录（决策日志/TUI 可见，去重）
+        self._record_config_fallbacks()
+
         self.state.transition(AgentPhase.PLANNING)
         self._emit("run_start", prompt=prompt)
         self.metrics.set("phase", "planning")
@@ -1159,3 +1162,25 @@ class AgentLoop:
         if failed:
             return f"任务失败: {'; '.join(t.error or t.instruction for t in failed[:3])}"
         return f"（未产生最终结果）: {prompt}"
+
+    def _record_config_fallbacks(self) -> None:
+        """把配置加载阶段的降级信息写入决策日志（跨 run 去重）。
+
+        对应方案 1.4：配置容错 —— 降级原因要能被用户与分析脚本看见。
+        """
+        try:
+            from agent.config import CONFIG_FALLBACKS
+        except Exception:
+            return
+        seen = getattr(self, "_config_fallbacks_recorded", set())
+        for note in CONFIG_FALLBACKS:
+            key = (note.get("module"), note.get("path"), note.get("reason"))
+            if key in seen:
+                continue
+            seen.add(key)
+            self._decision.record(
+                "config.fallback", f"{note.get('module')}.path",
+                note.get("path", ""),
+                f"配置降级为默认值: {note.get('reason', '')}",
+            )
+        self._config_fallbacks_recorded = seen
