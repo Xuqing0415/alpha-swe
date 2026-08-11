@@ -41,6 +41,7 @@ from tui.formatting import format_event
 from tui.vlog import VirtualLog
 from tui.diff_renderer import diff_summary, render_unified_diff
 from tui.file_tree import FileTreeView
+from tui.timeline_view import render_timeline
 from tui.messages import (AgentEventMessage, AgentFinishedMessage,
                           AgentStartedMessage, ConfirmationRequestMessage,
                           TerminalOutputMessage)
@@ -48,7 +49,7 @@ from tui.messages import (AgentEventMessage, AgentFinishedMessage,
 logger = logging.getLogger("alpha-swe.tui")
 
 _NARROW_WIDTH = 100
-_MAIN_VIEWS = ["log", "diff", "metrics"]
+_MAIN_VIEWS = ["log", "diff", "metrics", "timeline"]
 _PHASE_COLORS = {
     "idle": "bright_black", "planning": "cyan", "ready": "cyan",
     "running": "yellow", "waiting": "yellow",
@@ -112,11 +113,11 @@ Screen {
     layout: vertical;
 }
 
-#main-log, #diff-log, #metrics-view {
+#main-log, #diff-log, #metrics-view, #timeline-view {
     height: 1fr;
 }
 
-#diff-log, #metrics-view {
+#diff-log, #metrics-view, #timeline-view {
     display: none;
 }
 
@@ -211,7 +212,7 @@ _HELP_TEXT = """[bold]Alpha-SWE 快捷键[/bold]
 
 [green]F1[/green]  帮助      [green]F2[/green]  任务面板显示/隐藏
 [green]F3[/green]  终端全屏  [green]F4[/green]  宽屏/窄屏切换
-[green]F5[/green]  主区视图（日志/文件变更/监控）
+[green]F5[/green]  主区视图（日志/变更/监控/时间线）
 [green]F6[/green]  任务面板/文件树切换
 [green]Ctrl+I[/green]  注入指令    [green]Ctrl+P[/green]  暂停/继续
 [green]Ctrl+R[/green]  重试当前步骤 [green]Ctrl+S[/green]  跳过当前步骤
@@ -439,6 +440,7 @@ class AlphaSWEApp(App[None]):
                     yield RichLog(id="diff-log", highlight=True, markup=True,
                                   wrap=True, auto_scroll=True)
                     yield Static("", id="metrics-view", markup=True)
+                    yield Static("", id="timeline-view", markup=True)
                     with Vertical(id="terminal-box"):
                         yield Label("终端输出", id="terminal-title")
                         yield RichLog(id="terminal-log", highlight=True,
@@ -720,7 +722,7 @@ class AlphaSWEApp(App[None]):
         return "-"
 
     def refresh_views(self) -> None:
-        """刷新监控视图（主区 F5 视图之一）。"""
+        """刷新监控/时间线视图（主区 F5 视图）。"""
         runner = self.runner
         if runner is None or runner.loop is None:
             return
@@ -744,6 +746,27 @@ class AlphaSWEApp(App[None]):
             lines.append("")
             lines.extend(a for a in alerts)
         mon.update("\n".join(lines))
+        if self._main_view == "timeline":
+            self._update_timeline()
+
+    def _update_timeline(self) -> None:
+        """把 tracer span 渲染为 ASCII 时间线（宽屏横向 / 窄屏瀑布）。"""
+        runner = self.runner
+        if runner is None or runner.loop is None:
+            return
+        tracer = getattr(runner.loop, "tracer", None)
+        if tracer is None:
+            return
+        rows = tracer.get_timeline_data(limit=200)
+        view = self.query_one("#timeline-view", Static)
+        width = max(self.size.width - 4, 40)
+        lines = render_timeline(rows, width=width,
+                                narrow=self._is_compact())
+        combined = Text()
+        for line in lines:
+            combined.append_text(line)
+            combined.append("\n")
+        view.update(combined)
 
     def _estimate_tokens(self) -> int:
         runner = self.runner
@@ -969,6 +992,8 @@ class AlphaSWEApp(App[None]):
         self.query_one("#diff-log", RichLog).display = self._main_view == "diff"
         self.query_one("#metrics-view", Static).display = (
             self._main_view == "metrics")
+        self.query_one("#timeline-view", Static).display = (
+            self._main_view == "timeline")
 
     def action_focus_input(self) -> None:
         box = self.query_one("#input-bar", CommandInput)

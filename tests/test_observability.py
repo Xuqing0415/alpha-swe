@@ -124,3 +124,27 @@ def test_archive_disabled_returns_none(ws_tmp):
     arch = SessionArchive(str(ws_tmp / "sessions"), enabled=False)
     path = arch.write("p", [], [], [])
     assert path is None
+
+
+def test_tracer_get_timeline_data_relative():
+    """get_timeline_data 返回相对起点的简化 span 列表。"""
+    from agent.observability.trace import Tracer
+
+    tr = Tracer(trace_dir=None, enabled=True)
+    s1 = tr.start_span("task:a", "task")
+    s1.end("ok")
+    s2 = tr.start_span("tool:ls", "tool")
+    s2.end("error")
+    rows = tr.get_timeline_data()
+    assert len(rows) == 2
+    # 相对起点：第一条 start 为 0
+    assert rows[0]["start"] == 0.0
+    assert rows[0]["name"] == "task:a"
+    assert rows[1]["kind"] == "tool"
+    assert rows[1]["status"] == "error"
+    assert rows[0]["duration"] >= 0
+    # 进行中的 span 不出现
+    s3 = tr.start_span("task:running", "task")
+    rows2 = tr.get_timeline_data()
+    assert len(rows2) == 2
+

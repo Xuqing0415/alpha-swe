@@ -111,6 +111,32 @@ class Tracer:
         with self._lock:
             return [s.to_dict() for s in self._spans]
 
+    def get_timeline_data(self, limit: int = 200) -> List[Dict[str, Any]]:
+        """时间线数据：最近 limit 条已结束 span 的简化格式。
+
+        返回 [{name, kind, start, duration, status}]，start 为相对
+        这批 span 起点的秒数（供 TUI 火焰图/时间线渲染）。
+        """
+        rows: List[Dict[str, Any]] = []
+        with self._lock:
+            spans = self._spans[-limit:]
+            for s in spans:
+                if s.end_ts is None:
+                    continue
+                rows.append({
+                    "name": s.name,
+                    "kind": s.kind,
+                    "start": s.start_ts,
+                    "duration": s.duration_ms / 1000.0,
+                    "status": s.status,
+                })
+        if not rows:
+            return rows
+        base = min(r["start"] for r in rows)
+        for r in rows:
+            r["start"] = r["start"] - base
+        return rows
+
     def export(self) -> int:
         """写入 trace_dir/trace_<ts>.jsonl；返回导出条数。"""
         if not self.enabled or self.trace_dir is None:

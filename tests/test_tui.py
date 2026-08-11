@@ -21,6 +21,16 @@ class StubPlanner:
         return [Task(id="t0", instruction=prompt)]
 
 
+async def _query_input_with_retry(app, pilot, widget_type):
+    """负载下 #input-bar 查询偶发 NoMatches，带重试提升稳定性。"""
+    for _ in range(30):
+        try:
+            return app.query_one("#input-bar", widget_type)
+        except Exception:
+            await pilot.pause(0.05)
+    return app.query_one("#input-bar", widget_type)
+
+
 class ScriptedLLM(MockLLM):
     def __init__(self, *responses):
         super().__init__()
@@ -218,13 +228,17 @@ async def test_tui_cycle_views_and_render(ws_tmp):
         panel = app.query_one("#task-panel", Static)
         rendered = str(panel.render())
         assert "视图测试" in rendered and "阶段" in rendered
-        # F5 轮换主区视图：日志 -> 文件变更 -> 监控
+        # F5 轮换主区视图：日志 -> 文件变更 -> 监控 -> 时间线 -> 日志
         await pilot.press("f5")
         assert app.query_one("#diff-log").display is True
         await pilot.press("f5")
         assert app.query_one("#metrics-view").display is True
         mon = app.query_one("#metrics-view", Static)
         assert "轮次" in str(mon.render())
+        await pilot.press("f5")
+        assert app.query_one("#timeline-view").display is True
+        app.refresh_views()
+        assert "总耗时" in str(app.query_one("#timeline-view").content)
         await pilot.press("f5")
         assert app.query_one("#main-log").display is True
         # F2 隐藏任务面板
@@ -369,7 +383,7 @@ async def test_tui_input_command_status(ws_tmp):
             await pilot.pause(0.05)
             if app._finished is not None:
                 break
-        box = app.query_one("#input-bar", Input)
+        box = await _query_input_with_retry(app, pilot, Input)
         box.focus()
         box.value = "/status"
         await pilot.pause()
@@ -725,4 +739,63 @@ async def test_tui_file_tree_marks_from_tool_call(ws_tmp):
         rendered = "".join(str(item.children[0].content)
                              for item in tree.children)
         assert "main.py" in rendered
+
+
+# ---- 火焰图/时间线视图 ----
+def test_timeline_render_horizontal_and_waterfall():
+    """render_timeline 输出 # 条、时间轴与汇总；窄屏切瀑布。"""
+    from tui.timeline_view import (render_horizontal, render_timeline,
+                                   render_waterfall, summarize)
+
+    rows = [
+        {"name": "think: 分析", "kind": "llm", "start": 0.0,
+         "duration": 1.2, "status": "ok"},
+        {"name": "tool: terminal: ls", "kind": "tool", "start": 1.2,
+         "duration": 0.3, "status": "ok"},
+        {"name": "task: 修复", "kind": "task", "start": 1.5,
+         "duration": 2.1, "status": "error"},
+    ]
+    lines = render_horizontal(rows, axis_width=40)
+    plain = [line.plain for line in lines]
+    assert "3.6s" in plain[0]  # 时间轴末端刻度
+    assert any("#" in line for line in plain)
+    assert plain[-1].endswith("最慢: task: 修复 (2.1s)")
+    waterfall = render_waterfall(rows, bar_width=30)
+    assert any("[" in line.plain for line in waterfall)
+    assert summarize(rows).startswith("总耗时: 3.6s")
+    narrow = render_timeline(rows, width=80, narrow=True)
+    assert any("[" in line.plain for line in narrow)
+
+
+@pytest.mark.asyncio
+async def test_tui_f5_cycles_to_timeline_view(ws_tmp):
+    """F5 循环到时间线视图并渲染 tracer span。"""
+    from textual.widgets import Static
+
+    from tui.timeline_view import summarize
+
+    cfg = make_config(ws_tmp)
+    llm = ScriptedLLM('{"final_answer": "完成"}')
+    app = AlphaSWEApp("时间线测试", config=cfg, llm=llm,
+                      planner=StubPlanner())
+    async with app.run_test(size=(120, 40)) as pilot:
+        for _ in range(100):
+            await pilot.pause(0.05)
+            if app._finished is not None:
+                break
+        # 注入两条 span 再切视图
+        loop = app.runner.loop
+        s1 = loop.tracer.start_span("task:t0", "task")
+        s1.end("ok")
+        # 循环到 timeline
+        for _ in range(len(__import__("tui.app", fromlist=["_MAIN_VIEWS"])._MAIN_VIEWS)):
+            app.action_cycle_main_view()
+            await pilot.pause()
+            if app._main_view == "timeline":
+                break
+        assert app._main_view == "timeline"
+        app.refresh_views()
+        view = app.query_one("#timeline-view", Static)
+        text = str(view.content)
+        assert "task:t0" in text or "总耗时" in text
 
