@@ -43,6 +43,7 @@ from agent.tools.base import ExecutionContext, ToolResult
 from agent.tools.fileio import FileIOTool
 from agent.tools.manager import ToolManager
 from agent.tools.terminal import TerminalTool
+from agent.tools.test_tool import TestRunnerTool
 
 logger = logging.getLogger("alpha-swe.loop")
 
@@ -234,6 +235,9 @@ class AgentLoop:
         manager.register(FileIOTool(
             audit_store=FileAuditStore(self.config.sandbox.audit_dir),
             docker=docker,
+        ))
+        manager.register(TestRunnerTool(
+            decision_logger=self._decision,
         ))
         raw = self.config.tools.model_dump()
         self._tool_enabled = {name: cfg["enabled"] for name, cfg in raw.items()}
