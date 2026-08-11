@@ -49,9 +49,11 @@ class FileIOTool(Tool):
     parameters = {
         "type": "object",
         "properties": {
-            "action": {"type": "string", "enum": ["read", "write", "append", "search"]},
+            "action": {"type": "string", "enum": ["read", "write", "append", "edit", "search"]},
             "path": {"type": "string", "description": "工作区相对路径或合法绝对路径"},
             "content": {"type": "string", "description": "写入内容（write/append 需要）"},
+            "start_line": {"type": "integer", "description": "起始行号（edit 需要，1 起）"},
+            "end_line": {"type": "integer", "description": "结束行号（edit 需要，含该行）"},
             "pattern": {"type": "string", "description": "正则表达式（search 需要）"},
         },
         "required": ["action", "path"],
@@ -126,6 +128,23 @@ class FileIOTool(Tool):
                                                 "diff_before": before,
                                                 "diff_after": (before or "") + params.get("content", "")},
                                       elapsed_ms=(time.time() - start) * 1000)
+                if action == "edit":
+                    before = await self._docker_before(rel)
+                    try:
+                        content = self._apply_edit(before, params)
+                    except ValueError as e:
+                        return ToolResult(success=False, error=str(e),
+                                          elapsed_ms=(time.time() - start) * 1000,
+                                          error_category=ErrorCategory.PERMANENT)
+                    await self.docker.write_file(rel, content)
+                    self._audit("edit", target, before, content,
+                                task_id=context.task_id or "")
+                    return ToolResult(success=True,
+                                      output=f"编辑成功（容器内）: {target}",
+                                      metadata={"path": str(target), "docker": True,
+                                                "diff_before": before,
+                                                "diff_after": content},
+                                      elapsed_ms=(time.time() - start) * 1000)
                 if action == "search":
                     output = await self.docker.search_file(
                         params.get("pattern", ""), rel)
@@ -149,6 +168,9 @@ class FileIOTool(Tool):
             if action == "append":
                 return await self._append(target, params.get("content", ""), start,
                                           task_id=context.task_id or "")
+            if action == "edit":
+                return await self._edit(target, params, start,
+                                        task_id=context.task_id or "")
             if action == "search":
                 return await self._search(target, params.get("pattern", ""), start)
             return ToolResult(success=False, error=f"未知操作: {action}",
@@ -236,6 +258,63 @@ class FileIOTool(Tool):
                                     "diff_before": before,
                                     "diff_after": after},
                           elapsed_ms=(time.time() - start) * 1000)
+
+    @staticmethod
+    def _apply_edit(before: Optional[str], params: Dict[str, Any]) -> str:
+        """对旧内容执行行区间替换（纯函数，供本地与 docker 路径复用）。"""
+        s_line = int(params.get("start_line", 0) or 0)
+        e_line = int(params.get("end_line", 0) or 0)
+        new_content = str(params.get("content", params.get("new_content", "")))
+        lines = (before or "").splitlines()
+        if s_line < 1 or e_line < s_line or e_line > len(lines):
+            raise ValueError(
+                f"无效行号范围: start_line={s_line}, end_line={e_line}"
+                f"（文件共 {len(lines)} 行）")
+        after_lines = (lines[:s_line - 1] + new_content.splitlines()
+                       + lines[e_line:])
+        after = "\n".join(after_lines)
+        # 原文件以换行结尾时保持尾部换行，避免 diff 噪音
+        if (before or "").endswith("\n") and after_lines:
+            after += "\n"
+        return after
+
+    async def _edit(self, target: Path, params: Dict[str, Any], start: float,
+                    task_id: str = "") -> ToolResult:
+        """精确行编辑：替换第 start_line 到第 end_line 行（1 起，含两端）。"""
+        if not await asyncio.to_thread(target.exists):
+            return ToolResult(success=False, error=f"文件不存在: {target}",
+                              elapsed_ms=(time.time() - start) * 1000,
+                              error_category=ErrorCategory.PERMANENT)
+        s_line = int(params.get("start_line", 0) or 0)
+        e_line = int(params.get("end_line", 0) or 0)
+        if s_line < 1 or e_line < s_line:
+            return ToolResult(
+                success=False,
+                error=f"无效行号范围: start_line={s_line}, end_line={e_line}"
+                      f"（需 1 <= start_line <= end_line）",
+                elapsed_ms=(time.time() - start) * 1000,
+                error_category=ErrorCategory.PERMANENT,
+            )
+        before = await self._read_before(target)
+        try:
+            after = self._apply_edit(before, params)
+        except ValueError as e:
+            return ToolResult(success=False, error=str(e),
+                              elapsed_ms=(time.time() - start) * 1000,
+                              error_category=ErrorCategory.PERMANENT)
+        await asyncio.to_thread(target.write_text, after, encoding="utf-8")
+        self._audit("edit", target, before, after, task_id)
+        removed = e_line - s_line + 1
+        return ToolResult(
+            success=True,
+            output=(f"编辑成功: {target}（替换 {s_line}-{e_line} 行，"
+                    f"共 {removed} 行 -> {len(str(params.get('content', params.get('new_content', ''))).splitlines())} 行）"),
+            metadata={"path": str(target), "size": len(after),
+                      "audited": self.audit_store is not None,
+                      "diff_before": before, "diff_after": after,
+                      "start_line": s_line, "end_line": e_line},
+            elapsed_ms=(time.time() - start) * 1000,
+        )
 
     @staticmethod
     async def _read_before(target: Path) -> Optional[str]:

@@ -87,7 +87,7 @@ class SandboxPolicy:
             return False, str(e)
         # 写操作检查黑名单目录
         action = params.get("action", "")
-        if action in ("write", "append"):
+        if action in ("write", "append", "edit"):
             for blocked in self.blocked_paths:
                 if self._is_under(target, blocked):
                     self._violate(f"写入被禁止目录: {blocked}")

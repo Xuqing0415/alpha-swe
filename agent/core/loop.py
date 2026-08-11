@@ -916,7 +916,8 @@ class AgentLoop:
             return None
         if name == "file_ops":
             action = params.get("action") if isinstance(params, dict) else None
-            return {"read": 5.0, "write": 10.0, "append": 10.0}.get(action, 30.0)
+            return {"read": 5.0, "write": 10.0, "append": 10.0,
+                    "edit": 10.0}.get(action, 30.0)
         if name == "background_task":
             return 10.0  # 管理类动作必须快速返回，不阻塞循环
         return 30.0
@@ -1055,6 +1056,10 @@ class AgentLoop:
             "file_append": "append", "file_search": "search",
         }
         if tool_name == "file_ops" and action_map.get(rule) == params.get("action"):
+            return True
+        # file_write 规则同时覆盖精确行编辑 edit
+        if (tool_name == "file_ops" and rule == "file_write"
+                and params.get("action") in ("write", "edit")):
             return True
         return False
 
