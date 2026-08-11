@@ -25,6 +25,13 @@ PLAN_PROMPT = """你是一个任务规划器。请把下面的用户指令拆解
 
 用户指令: {prompt}
 项目上下文: {context}
+{call_graph_block}
+"""
+
+CALL_GRAPH_HINT = """
+### 影响范围提示（来自项目调用图）
+下列符号被多处调用或依赖其他符号，修改它们时请在子任务拆分中考虑连带影响：
+{call_graph_text}
 """
 
 
@@ -45,8 +52,13 @@ class Planner:
         self.config = config or PlannerConfig()
         self.decision_logger = decision_logger
 
-    async def plan(self, prompt: str, context: str = "") -> List[Task]:
-        """返回规划出的任务列表（由调用方提交给 Scheduler）。"""
+    async def plan(self, prompt: str, context: str = "",
+                   call_graph=None, project_context: str = "") -> List[Task]:
+        """返回规划出的任务列表（由调用方提交给 Scheduler）。
+
+        call_graph: 项目级 CallGraph，命中时把高频符号/影响面注入拆分提示；
+        project_context: 项目约定/技术栈摘要（阶段一 1.3）。
+        """
         complexity = self._estimate_complexity(prompt)
         if complexity < self.config.split_threshold_complexity:
             if self.decision_logger is not None:
@@ -57,9 +69,22 @@ class Planner:
                 )
             return [Task(id="t0", instruction=prompt)]
         try:
+            call_graph_text = ""
+            if call_graph is not None and call_graph.symbol_count():
+                call_graph_text = call_graph.to_text(max_lines=30)
+                if self.decision_logger is not None:
+                    self.decision_logger.record(
+                        "planner.call_graph.injected", "code.call_graph",
+                        call_graph.symbol_count(),
+                        f"拆分提示注入调用图: {call_graph.symbol_count()} 个符号，"
+                        f"{call_graph.edge_count()} 条调用边",
+                    )
             raw = await self.llm.complete([
                 {"role": "system", "content": "你是任务规划器，只输出 JSON。"},
-                {"role": "user", "content": _render_plan_prompt(prompt, context)},
+                {"role": "user",
+                 "content": _render_plan_prompt(prompt, context,
+                                                project_context,
+                                                call_graph_text)},
             ])
             tasks = self._parse_plan(raw, prompt)
             if tasks:
@@ -139,6 +164,17 @@ class Planner:
             ))
         return tasks
 
-def _render_plan_prompt(prompt: str, context: str) -> str:
+def _render_plan_prompt(prompt: str, context: str,
+                          project_context: str = "",
+                          call_graph_text: str = "") -> str:
     """渲染规划提示，避免用户指令中的花括号触发 format() 错误。"""
-    return PLAN_PROMPT.replace("{prompt}", prompt).replace("{context}", context)
+    ctx = context
+    if project_context:
+        ctx = (ctx + "\n" if ctx else "") + project_context
+    block = ""
+    if call_graph_text:
+        block = CALL_GRAPH_HINT.replace("{call_graph_text}", call_graph_text)
+    return (PLAN_PROMPT
+            .replace("{prompt}", prompt)
+            .replace("{context}", ctx)
+            .replace("{call_graph_block}", block))
