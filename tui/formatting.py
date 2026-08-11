@@ -8,6 +8,7 @@ from rich.text import Text
 # 事件 -> 展示标签/颜色
 _EVENT_STYLE: Dict[str, str] = {
     "run_start": "bold white",
+    "skills_activated": "bold magenta",
     "plan_created": "bold blue",
     "task_start": "bold cyan",
     "think": "cyan",
@@ -36,7 +37,17 @@ def _format_body(etype: str, data: Dict[str, Any]) -> str:
         tasks = data.get("tasks", [])
         return f"规划 {data.get('total', len(tasks))} 个子任务: {_join(tasks)}"
     if etype == "task_start":
-        return f"任务 {data.get('task_id', '')}: {data.get('instruction', '')}"
+        base = f"任务 {data.get('task_id', '')}: {data.get('instruction', '')}"
+        step = data.get("skill_step")
+        if step:
+            idx = (data.get("step_index") or 0) + 1
+            total = data.get("step_total") or 0
+            base += f" [技能 {data.get('skill', '')} {idx}/{total}: {step}]"
+        return base
+    if etype == "skills_activated":
+        skills = data.get("skills", [])
+        return (f"技能工作流激活: {_join(skills)}"
+                f"（展开 {data.get('total', 0)} 个子任务）")
     if etype == "think":
         return f"思考: {_truncate(data.get('content', ''), 160)}"
     if etype == "tool_call":

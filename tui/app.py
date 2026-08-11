@@ -387,8 +387,13 @@ class AlphaSWEApp(App[None]):
 
         task = runner.running_task()
         if task is not None:
-            parts.append(Text(f" | 当前任务 {task.id}: {task.instruction[:40]}",
-                              style=""))
+            label = f"{task.id}: {task.instruction[:40]}"
+            meta = task.metadata or {}
+            if meta.get("skill"):
+                idx = (meta.get("step_index") or 0) + 1
+                total = meta.get("step_total") or 0
+                label += f" [技能 {meta.get('skill_step')} {idx}/{total}]"
+            parts.append(Text(f" | 当前任务 {label}", style=""))
         summary = runner.dag_summary()
         if summary:
             bits = " ".join(f"{k}:{v}" for k, v in
@@ -412,9 +417,16 @@ class AlphaSWEApp(App[None]):
         rows = []
         for t in runner.loop.scheduler.dag.all():
             deps = f" <- {','.join(t.dependencies)}" if t.dependencies else ""
+            meta = t.metadata or {}
+            badge = ""
+            if meta.get("skill"):
+                idx = (meta.get("step_index") or 0) + 1
+                total = meta.get("step_total") or 0
+                badge = (f" [技能 {meta.get('skill')}::{meta.get('skill_step')}"
+                         f" {idx}/{total}]")
             rows.append(
                 f"{t.id} [{t.status.value}] "
-                f"{t.instruction[:48]}{deps}"
+                f"{t.instruction[:48]}{badge}{deps}"
             )
         tree.update("\n".join(rows) if rows else "（暂无任务）")
         # 监控视图

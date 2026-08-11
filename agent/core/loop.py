@@ -478,7 +478,15 @@ class AgentLoop:
     async def _execute_task(self, task: Task) -> None:
         """每个任务的内部 ReAct 循环：Think -> Act -> Observe -> Parse。"""
         task.mark(TaskStatus.RUNNING)
-        self._emit("task_start", task_id=task.id, instruction=task.instruction)
+        self._emit(
+            "task_start",
+            task_id=task.id,
+            instruction=task.instruction,
+            skill=task.metadata.get("skill"),
+            skill_step=task.metadata.get("skill_step"),
+            step_index=task.metadata.get("step_index"),
+            step_total=task.metadata.get("step_total"),
+        )
         self.metrics.inc("tasks_started")
         task_span = self.tracer.start_span(
             f"task:{task.id}", "task", instruction=task.instruction,

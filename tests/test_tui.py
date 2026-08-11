@@ -64,6 +64,27 @@ def test_format_event_plan_created():
     assert "规划 2 个子任务" in text.plain
 
 
+def test_format_event_skills_activated():
+    text = format_event({
+        "type": "skills_activated",
+        "data": {"skills": ["add-rest-endpoint"], "total": 5},
+    })
+    assert "技能工作流激活" in text.plain
+    assert "add-rest-endpoint" in text.plain
+    assert "展开 5 个子任务" in text.plain
+
+
+def test_format_event_task_start_skill_progress():
+    text = format_event({
+        "type": "task_start",
+        "data": {"task_id": "add-rest-endpoint::route",
+                 "instruction": "定义 REST 端点路由",
+                 "skill": "add-rest-endpoint",
+                 "skill_step": "route", "step_index": 0, "step_total": 5},
+    })
+    assert "1/5" in text.plain and "route" in text.plain
+
+
 def test_format_event_unknown_type():
     text = format_event({"type": "weird", "data": {"x": 1}})
     assert "weird" in text.plain
