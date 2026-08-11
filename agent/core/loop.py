@@ -400,7 +400,9 @@ class AgentLoop:
         # 规划 -> READY（技能命中时按工作流展开，否则走 LLM 规划器）
         plan = self._expand_skills(prompt)
         if not plan:
-            plan = await self.planner.plan(prompt)
+            # 注入项目调用图与约定摘要到拆分提示（阶段一 1.2/1.3）；
+            # 对不支持新参数的 Planner 实现自动降级
+            plan = await self._plan_with_context(prompt)
         self.scheduler.submit_plan(plan)
         self._emit("plan_created", total=len(plan),
                    tasks=[t.instruction for t in plan])
@@ -881,6 +883,20 @@ class AgentLoop:
         except Exception as e:
             logger.warning("插件激活失败: %s", e)
         return "\n\n".join(x for x in parts if x)
+
+    async def _plan_with_context(self, prompt: str) -> List[Task]:
+        """带项目上下文的规划调用：仅向支持新参数的 Planner 传入注入内容。"""
+        import inspect
+        try:
+            params = set(inspect.signature(self.planner.plan).parameters)
+        except (TypeError, ValueError):
+            params = set()
+        kwargs = {}
+        if "call_graph" in params:
+            kwargs["call_graph"] = self._project_ctx.call_graph
+        if "project_context" in params:
+            kwargs["project_context"] = self._project_ctx.profile_text
+        return await self.planner.plan(prompt, **kwargs)
 
     def _expand_skills(self, prompt: str) -> List[Task]:
         """技能命中时把 YAML 工作流展开为子任务 DAG（设计 10.2 节）。"""
