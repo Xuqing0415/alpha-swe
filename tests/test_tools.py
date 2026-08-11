@@ -72,3 +72,27 @@ def test_terminal_build_argv_forces_utf8_on_windows():
         assert "[Console]::OutputEncoding" in joined
         assert "chcp 65001" in joined
 
+
+@pytest.mark.asyncio
+async def test_fileio_write_metadata_has_diff_snapshot(ws_tmp):
+    """写入/追加返回 diff_before/diff_after 快照，供 TUI 渲染 unified diff。"""
+    ctx = ExecutionContext(workspace=str(ws_tmp))
+    tool = FileIOTool()
+    r = await tool.execute({"action": "write", "path": "src/app.py",
+                            "content": "def main():\n    pass\n"}, ctx)
+    assert r.success
+    assert r.metadata["diff_before"] is None  # 新建文件
+    assert r.metadata["diff_after"] == "def main():\n    pass\n"
+
+    r = await tool.execute({"action": "write", "path": "src/app.py",
+                            "content": "def main():\n    print(1)\n"}, ctx)
+    assert r.success
+    assert r.metadata["diff_before"] == "def main():\n    pass\n"
+    assert "print(1)" in r.metadata["diff_after"]
+
+    r = await tool.execute({"action": "append", "path": "src/app.py",
+                            "content": "# end\n"}, ctx)
+    assert r.success
+    assert "print(1)" in r.metadata["diff_before"]
+    assert "# end" in r.metadata["diff_after"]
+

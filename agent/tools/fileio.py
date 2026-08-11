@@ -98,7 +98,9 @@ class FileIOTool(Tool):
                                 task_id=context.task_id or "")
                     return ToolResult(success=True,
                                       output=f"写入成功（容器内）: {target}",
-                                      metadata={"path": str(target), "docker": True},
+                                      metadata={"path": str(target), "docker": True,
+                                                "diff_before": before,
+                                                "diff_after": params.get("content", "")},
                                       elapsed_ms=(time.time() - start) * 1000)
                 if action == "append":
                     before = await self._docker_before(rel)
@@ -108,7 +110,9 @@ class FileIOTool(Tool):
                                 task_id=context.task_id or "")
                     return ToolResult(success=True,
                                       output=f"追加成功（容器内）: {target}",
-                                      metadata={"path": str(target), "docker": True},
+                                      metadata={"path": str(target), "docker": True,
+                                                "diff_before": before,
+                                                "diff_after": (before or "") + params.get("content", "")},
                                       elapsed_ms=(time.time() - start) * 1000)
                 if action == "search":
                     output = await self.docker.search_file(
@@ -196,7 +200,9 @@ class FileIOTool(Tool):
         self._audit("write", target, before, content, task_id)
         return ToolResult(success=True, output=f"写入成功: {target}",
                           metadata={"path": str(target), "size": len(content),
-                                    "audited": self.audit_store is not None},
+                                    "audited": self.audit_store is not None,
+                                    "diff_before": before,
+                                    "diff_after": content},
                           elapsed_ms=(time.time() - start) * 1000)
 
     async def _append(self, target: Path, content: str, start: float,
@@ -209,7 +215,9 @@ class FileIOTool(Tool):
         self._audit("append", target, before, after, task_id)
         return ToolResult(success=True, output=f"追加成功: {target}",
                           metadata={"path": str(target),
-                                    "audited": self.audit_store is not None},
+                                    "audited": self.audit_store is not None,
+                                    "diff_before": before,
+                                    "diff_after": after},
                           elapsed_ms=(time.time() - start) * 1000)
 
     @staticmethod

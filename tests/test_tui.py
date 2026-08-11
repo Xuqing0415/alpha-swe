@@ -546,3 +546,69 @@ async def test_tui_status_bar_shows_follow_hint(ws_tmp):
         vlog.watch_scroll_y(10, 60)  # 到底 -> 恢复跟随
         app.refresh_status()
         assert "[跟随]" in str(bar.content)
+
+
+# ---- Diff 视图：unified diff 渲染与 D 键切换 ----
+def test_diff_renderer_unified_diff_lines():
+    """render_unified_diff 输出标准 unified diff 并着色分类。"""
+    from tui.diff_renderer import render_unified_diff
+
+    before = "def f():\n    return 1\n"
+    after = "def f():\n    return 2\n"
+    lines = render_unified_diff("src/a.py", before, after)
+    plain = [line.plain for line in lines]
+    assert plain[0].startswith("--- a/src/a.py")
+    assert plain[1].startswith("+++ b/src/a.py")
+    assert any(line.startswith("@@") for line in plain)
+    assert "-    return 1" in plain
+    assert "+    return 2" in plain
+    # 新建文件：全部 + 行
+    new_lines = render_unified_diff("src/new.py", None, "x=1\n")
+    new_plain = [line.plain for line in new_lines]
+    assert new_plain[1].startswith("+++ b/src/new.py")
+    assert any(line.startswith("+x=1") for line in new_plain)
+
+
+@pytest.mark.asyncio
+async def test_tui_diff_event_and_d_toggle(ws_tmp):
+    """tool_call 携带 meta 时渲染 unified diff，D 键在 diff/输出间切换。"""
+    from textual.widgets import RichLog
+
+    cfg = make_config(ws_tmp)
+    app = AlphaSWEApp("diff 测试", config=cfg, llm=MockLLM(),
+                      planner=StubPlanner())
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        record = {
+            "type": "tool_call",
+            "data": {
+                "tool": "file_ops",
+                "params": {"action": "write", "path": "src/app.py"},
+                "success": True,
+                "meta": {"path": "src/app.py", "diff_before": "old",
+                         "diff_after": "new"},
+            },
+        }
+        # 先切到 diff 主视图再触发事件：隐藏的 #diff-log 宽度为 0 不会渲染行
+        app.action_cycle_main_view()  # log -> diff
+        await pilot.pause()
+        app.on_agent_event_message(type("E", (), {"record": record})())
+        await pilot.pause()
+        assert app._diff_path == "src/app.py"
+        assert len(app._diff_lines) >= 3
+        diff_log = app.query_one("#diff-log", RichLog)
+        rendered = "".join(str(line) for line in diff_log.lines)
+        assert "+new" in rendered and "-old" in rendered
+        # D 键：终端区切到 diff
+        assert app._terminal_diff_mode is False
+        app.action_toggle_terminal_diff()
+        await pilot.pause()
+        assert app._terminal_diff_mode is True
+        term_log = app.query_one("#terminal-log", RichLog)
+        term_rendered = "".join(str(line) for line in term_log.lines)
+        assert "+new" in term_rendered
+        # 再按 D 恢复原始输出
+        app.action_toggle_terminal_diff()
+        await pilot.pause()
+        assert app._terminal_diff_mode is False
+

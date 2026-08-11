@@ -38,6 +38,7 @@ from agent.prompt.builder import estimate_tokens
 from tui.bridge import AgentRunner
 from tui.formatting import format_event
 from tui.vlog import VirtualLog
+from tui.diff_renderer import diff_summary, render_unified_diff
 from tui.messages import (AgentEventMessage, AgentFinishedMessage,
                           AgentStartedMessage, ConfirmationRequestMessage,
                           TerminalOutputMessage)
@@ -310,13 +311,14 @@ class TerminalScreen(ModalScreen[None]):
 
     BINDINGS = [Binding("escape", "close_term", "关闭")]
 
-    def __init__(self, lines: List[Text]) -> None:
+    def __init__(self, title: str, lines: List[Text]) -> None:
         super().__init__()
+        self._title = title
         self._lines = lines
 
     def compose(self):
         with Vertical(id="term-box"):
-            yield Label("终端输出（Esc 退出）", classes="pane-title")
+            yield Label(self._title + "（Esc 退出）", classes="pane-title")
             yield RichLog(id="term-full-log", wrap=True, auto_scroll=True)
 
     def on_mount(self) -> None:
@@ -343,6 +345,7 @@ class AlphaSWEApp(App[None]):
         Binding("f3", "show_terminal", "终端全屏"),
         Binding("f4", "toggle_layout", "宽/窄"),
         Binding("f5", "cycle_main_view", "主区视图"),
+        Binding("d", "toggle_terminal_diff", "变更切换"),
         Binding("ctrl+i", "focus_input", "注入指令"),
         Binding("ctrl+p", "toggle_pause", "暂停/继续"),
         Binding("ctrl+r", "retry_step", "重试"),
@@ -382,6 +385,9 @@ class AlphaSWEApp(App[None]):
         self._hist_idx: Optional[int] = None
         self._terminal_lines: List[Text] = []
         self._main_view = "log"
+        self._diff_path = ""  # 最近一次文件变更（D 键切换用）
+        self._diff_lines: List[Text] = []
+        self._terminal_diff_mode = False  # 终端区显示 diff 而非原始输出
         self._layout_override: Optional[str] = None
         self._task_panel_visible = True
         self._session_id = uuid.uuid4().hex[:6]
@@ -514,29 +520,60 @@ class AlphaSWEApp(App[None]):
         self.query_one("#main-log", VirtualLog).write(renderable)
 
     def _append_terminal(self, renderable) -> None:
-        self.query_one("#terminal-log", RichLog).write(renderable)
         self._terminal_lines.append(renderable)
         if len(self._terminal_lines) > 2000:
             self._terminal_lines = self._terminal_lines[-2000:]
+        if not self._terminal_diff_mode:  # diff 模式下终端区只显示变更
+            self.query_one("#terminal-log", RichLog).write(renderable)
 
     def _append_diff_event(self, data: dict) -> None:
-        """把文件写操作渲染成类 diff 行，进入文件变更视图。"""
+        """把文件写操作渲染成 unified diff，进入文件变更视图。"""
         tool = data.get("tool", "")
         params = data.get("params", {}) or {}
         action = params.get("action", "")
-        if tool == "file_ops" and action in ("write", "append"):
-            self._append_diff(Text(
-                f"{params.get('path', '')} ({action})",
-                style="bold yellow"))
-            content = str(params.get("content", ""))
-            for line in content.splitlines()[:60]:
-                self._append_diff(Text(f"  + {line}", style="green"))
+        meta = data.get("meta") or {}
+        if (tool == "file_ops" and action in ("write", "append")
+                and "diff_after" in meta):
+            path = str(meta.get("path") or params.get("path", ""))
+            before = meta.get("diff_before")
+            after = str(meta.get("diff_after", ""))
+            lines = render_unified_diff(path, before, after)
+            self._diff_path = path
+            self._diff_lines = lines
+            self._append_diff(Text(diff_summary(path, before, after),
+                                   style="bold yellow"))
+            for line in lines:
+                self._append_diff(line)
         else:
             self._append_diff(Text(
                 f"{tool} {_short(params, 120)}", style="dim"))
 
     def _append_diff(self, renderable) -> None:
         self.query_one("#diff-log", RichLog).write(renderable)
+
+    def _apply_terminal_view(self) -> None:
+        """按当前模式刷新终端区：文件变更 diff 或原始终端输出。"""
+        log = self.query_one("#terminal-log", RichLog)
+        log.clear()
+        if self._terminal_diff_mode and self._diff_lines:
+            for line in self._diff_lines[:12]:
+                log.write(line)
+            if len(self._diff_lines) > 12:
+                log.write(Text(
+                    f"--- 变更共 {len(self._diff_lines)} 行，按 F3 展开全屏 ---",
+                    style="dim"))
+        else:
+            for line in self._terminal_lines[-200:]:
+                log.write(line)
+
+    def action_toggle_terminal_diff(self) -> None:
+        """D 键：在 diff 与原始终端输出之间切换（无变更时提示）。"""
+        if not self._diff_lines:
+            self._append_thought(Text("暂无文件变更可展示", style="yellow"))
+            return
+        self._terminal_diff_mode = not self._terminal_diff_mode
+        self._apply_terminal_view()
+        self.refresh_status()
 
     # ---- 布局 ----
     def _is_compact(self) -> bool:
@@ -786,7 +823,12 @@ class AlphaSWEApp(App[None]):
         self._apply_layout()
 
     def action_show_terminal(self) -> None:
-        self.push_screen(TerminalScreen(self._terminal_lines))
+        if self._terminal_diff_mode and self._diff_lines:
+            self.push_screen(TerminalScreen(
+                f"文件变更: {self._diff_path}", list(self._diff_lines)))
+        else:
+            self.push_screen(TerminalScreen("终端输出",
+                                            self._terminal_lines))
 
     def action_toggle_layout(self) -> None:
         if self._layout_override is None:
@@ -831,6 +873,9 @@ class AlphaSWEApp(App[None]):
     def action_clear_terminal(self) -> None:
         self.query_one("#terminal-log", RichLog).clear()
         self._terminal_lines = []
+        self._diff_lines = []
+        self._diff_path = ""
+        self._terminal_diff_mode = False
 
 
 # ---- 渲染辅助（纯函数，便于单测） ----

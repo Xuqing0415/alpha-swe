@@ -580,7 +580,7 @@ class AgentLoop:
                         task.history.append({"role": "observation", "content": obs})
                         self._emit("tool_call", task_id=task.id, tool=name,
                                    params=params, success=result.success,
-                                   output=obs[:300])
+                                   output=obs[:300], meta=result.metadata)
                         self._index_code(params, result)
                     if any(r.metadata.get("waiting") for r in results):
                         task.mark(TaskStatus.WAITING)  # 挂起，释放控制权
