@@ -287,10 +287,15 @@ python -X utf8 scripts/analyze_decisions.py
   `python -m tui --replay logs/sessions/session_xxx.json`
 
 ### TUI 多视图与用户干预（`tui/app.py`）
-- `f` 键轮换左栏视图：思维流 / 任务树（状态图标 + 依赖）/ 监控（指标 + 告警）/ 文件变更（写操作渲染类 diff）。
+- 纯终端 UI 设计（无 emoji / 无 256 色）：左栏任务面板（任务名 / 阶段 / 任务树 / 进度条 / 耗时）、
+  主日志区（`[HH:MM:SS] TYPE 内容`，THINK/ACT/OBS/INFO/WARN/ERROR/OK/MEM 八类语义色）、
+  终端输出区（6 行，F3 全屏）、底部状态栏（右对齐：tokens / round / mem / session）与输入栏；
+- `F5` 轮换主区视图：主日志 / 文件变更（写操作渲染类 diff）/ 监控（指标 + 告警）；
+- 窄屏（<100 列）自动降级为单栏（紧凑头 + 主日志），`F4` 手动宽/窄切换，`F2` 隐藏任务面板；
+- 输入栏支持 `/pause` `/resume` `/status` `/retry` `/skip` `/quit` 命令与上下箭头历史；
 - 高风险工具确认弹窗：命中 `agent.require_confirmation` 时弹出，支持
   `y`（批准一次）/ `a`（批准所有同类，写回 `loop._approve_rules`）/ `n`（拒绝）/
-  `m:{"path":"..."}`（修改参数后执行）；确认回调契约见 `tui/bridge.py` 的 `_on_confirmation`。
+  `e:{"path":"..."}`（编辑参数后执行）；确认回调契约见 `tui/bridge.py` 的 `_on_confirmation`。
 
 验证见 `tests/test_observability.py` 与 `tests/test_tui.py`。
 
@@ -312,14 +317,19 @@ python -m tui "分析当前项目结构并给出改进建议"
 python -m tui --config config/agent.yaml "修复失败的测试"
 ```
 
-- **左栏**（`f` 键轮换多视图）：思维流（思考/工具调用/任务事件，颜色区分）、任务树、
-  监控（token/工具/成功率 + 告警）、文件变更（写操作类 diff）；
-- **右栏**：终端原始输出流（`TerminalTool` 逐行实时转发）；
-- **底部状态栏**：当前任务、按状态统计、轮次、token 估算、耗时、运行/暂停；
-- **Ctrl+I** 注入高优先级指令（打断当前循环），**Ctrl+P** 暂停/继续，
-  **Ctrl+L** 清空终端，**Tab** 切换窗格，**q / Ctrl+C** 退出；
+- **左栏任务面板**：任务名 / 阶段（颜色区分）/ 任务树（完成·进行>·等待·失败）/ 进度条 / 耗时；
+- **主日志区**：`[HH:MM:SS] TYPE 内容`（THINK 青 / ACT 亮白 / INFO 暗灰 / WARN 黄 /
+  ERROR 红 / OK 绿），`F5` 轮换主日志 / 文件变更 / 监控视图；
+- **终端输出区**（6 行可滚动）：终端原始输出流（`TerminalTool` 逐行实时转发），`F3` 全屏；
+- **底部状态栏**（右对齐）：`tokens`（80% 变黄 / 95% 变红）、`round`（90% 变黄）、
+  `mem`（记忆库用量 %）、`session`；
+- **输入栏**：直接输入即注入高优先级指令；`/` 开头为命令（`/pause` `/resume` `/status`
+  `/retry` `/skip` `/quit`），上下箭头浏览历史；
+- **快捷键**：`F1` 帮助 / `F2` 任务面板 / `F3` 终端全屏 / `F4` 宽窄切换 / `F5` 主区视图 /
+  `Ctrl+I` 注入 / `Ctrl+P` 暂停 / `Ctrl+R` 重试 / `Ctrl+S` 跳过 / `Ctrl+L` 清空终端 /
+  `Tab` 切换窗格 / `q`、`Ctrl+C` 退出；
 - 高风险操作（命中 `agent.require_confirmation`）弹出确认框：批准一次 / 批准所有同类 /
-  拒绝 / 修改参数后执行；会话结束后可用 `--replay` 按时间线回放档案。
+  拒绝 / 编辑参数后执行；会话结束后可用 `--replay` 按时间线回放档案。
 
 实现要点：`AgentLoop.subscribe()` 实时事件订阅、`ExecutionContext.output_callback`
 把命令输出逐行转发给右栏、Textual worker 在事件循环内跑 Agent 主循环

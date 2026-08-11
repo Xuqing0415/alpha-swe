@@ -12,8 +12,8 @@ from agent.llm import MockLLM
 from agent.tools.base import ExecutionContext
 from agent.tools.terminal import TerminalTool
 from tui.formatting import format_event
-from tui.app import AlphaSWEApp
-from textual.widgets import Static, TabbedContent
+from tui.app import AlphaSWEApp, CommandInput
+from textual.widgets import Input, Static
 
 
 class StubPlanner:
@@ -45,7 +45,9 @@ def make_config(ws_tmp: Path, **kw):
 # ---- 事件格式化（纯函数） ----
 def test_format_event_think():
     text = format_event({"type": "think", "data": {"content": "分析中"}})
-    assert "思考: 分析中" in text.plain
+    # 设计格式：[HH:MM:SS] THINK 内容
+    assert text.plain.startswith("[")
+    assert "THINK" in text.plain and "分析中" in text.plain
 
 
 def test_format_event_tool_call():
@@ -54,6 +56,8 @@ def test_format_event_tool_call():
         "data": {"tool": "terminal_execute", "params": {"command": "ls"},
                  "success": True, "output": "a.txt"},
     })
+    assert text.plain.startswith("[")
+    assert "ACT" in text.plain
     assert "terminal_execute" in text.plain
     assert "成功" in text.plain
 
@@ -62,6 +66,14 @@ def test_format_event_plan_created():
     text = format_event({"type": "plan_created",
                          "data": {"total": 2, "tasks": ["a", "b"]}})
     assert "规划 2 个子任务" in text.plain
+    assert "INFO" in text.plain
+
+
+def test_format_event_error_and_ok_types():
+    err = format_event({"type": "run_error", "data": {"error": "boom"}})
+    assert "ERROR" in err.plain and "boom" in err.plain
+    ok = format_event({"type": "task_done", "data": {"task_id": "t1"}})
+    assert "OK" in ok.plain and "t1" in ok.plain
 
 
 def test_format_event_skills_activated():
@@ -170,8 +182,8 @@ async def test_tui_streams_events_and_finishes(ws_tmp):
                 break
         assert app._finished is not None, "Agent 未在预期时间内完成"
         assert app._finished.ok
-        # 左栏应包含 think 与 run_done 事件渲染
-        log = app.query_one("#thought-log")
+        # 主日志区应包含 think 与 run_done 事件渲染
+        log = app.query_one("#main-log")
         rendered = "".join(str(line) for line in log.lines)
         assert "TUI 完成" in rendered or "任务结束" in rendered
         # Ctrl+P 暂停不应抛错（loop 已结束，为空操作）
@@ -180,7 +192,7 @@ async def test_tui_streams_events_and_finishes(ws_tmp):
 
 
 
-# ---- 阶段八：多视图切换（f 键） ----
+# ---- 多视图与任务面板（F5 主区视图 + F2/F4 布局） ----
 @pytest.mark.asyncio
 async def test_tui_cycle_views_and_render(ws_tmp):
     cfg = make_config(ws_tmp)
@@ -199,25 +211,27 @@ async def test_tui_cycle_views_and_render(ws_tmp):
                 break
         assert app._finished is not None and app._finished.ok
 
-        tabbed = app.query_one(TabbedContent)
-        assert str(tabbed.active) == "tab-thought"
-        # 焦点先移到非输入控件，避免 f 被 Input 吞掉
-        app.set_focus(app.query_one("#thought-log"))
-        await pilot.pause()
-        await pilot.press("f")
-        assert str(tabbed.active) == "tab-tasktree"
-        # 任务树视图应包含任务指令
-        tree = app.query_one("#task-tree-view", Static)
-        assert "视图测试" in str(tree.render())
-        await pilot.press("f")
-        assert str(tabbed.active) == "tab-metrics"
-        # 监控视图应包含派生指标
+        # 主区默认主日志
+        assert app.query_one("#main-log").display is True
+        assert app.query_one("#diff-log").display is False
+        # 任务面板应包含任务指令与阶段
+        panel = app.query_one("#task-panel", Static)
+        rendered = str(panel.render())
+        assert "视图测试" in rendered and "阶段" in rendered
+        # F5 轮换主区视图：日志 -> 文件变更 -> 监控
+        await pilot.press("f5")
+        assert app.query_one("#diff-log").display is True
+        await pilot.press("f5")
+        assert app.query_one("#metrics-view").display is True
         mon = app.query_one("#metrics-view", Static)
         assert "轮次" in str(mon.render())
-        await pilot.press("f")
-        assert str(tabbed.active) == "tab-diff"
-        await pilot.press("f")
-        assert str(tabbed.active) == "tab-thought"
+        await pilot.press("f5")
+        assert app.query_one("#main-log").display is True
+        # F2 隐藏任务面板
+        await pilot.press("f2")
+        assert app.query_one("#task-panel").display is False
+        await pilot.press("f2")
+        assert app.query_one("#task-panel").display is True
 
 
 # ---- 阶段八：确认弹窗 -> 批准所有同类操作 ----
@@ -299,3 +313,105 @@ async def test_loop_confirmation_modified_params(ws_tmp):
     assert result.ok
     assert (ws_tmp / "ws" / "renamed.txt").read_text(encoding="utf-8") == "MODIFIED"
     assert not (ws_tmp / "ws" / "orig.txt").exists()
+
+
+# ---- 纯终端 UI 设计：窄屏布局 / 输入栏 / 历史 / 辅助渲染 ----
+@pytest.mark.asyncio
+async def test_tui_narrow_layout_auto_compact(ws_tmp):
+    cfg = make_config(ws_tmp)
+    llm = ScriptedLLM('{"final_answer": "窄屏完成"}')
+    app = AlphaSWEApp("窄屏测试", config=cfg, llm=llm, planner=StubPlanner())
+    async with app.run_test(size=(80, 40)) as pilot:
+        for _ in range(100):
+            await pilot.pause(0.05)
+            if app._finished is not None:
+                break
+        # <100 列自动降级：任务面板隐藏，紧凑头显示
+        assert app.query_one("#task-panel").display is False
+        assert app.query_one("#compact-header").display is True
+        # F4 切到宽屏
+        await pilot.press("f4")
+        assert app.query_one("#task-panel").display is True
+        # F4 再按恢复自动（80 列仍为窄屏）
+        await pilot.press("f4")
+        assert app.query_one("#task-panel").display is False
+
+
+@pytest.mark.asyncio
+async def test_tui_input_submit_injects_instruction(ws_tmp):
+    cfg = make_config(ws_tmp)
+    llm = ScriptedLLM('{"final_answer": "注入完成"}')
+    app = AlphaSWEApp("注入测试", config=cfg, llm=llm, planner=StubPlanner())
+    async with app.run_test(size=(120, 40)) as pilot:
+        for _ in range(100):
+            await pilot.pause(0.05)
+            if app._finished is not None:
+                break
+        box = app.query_one("#input-bar", Input)
+        box.focus()
+        box.value = "改用 try-catch 方案"
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        log = app.query_one("#main-log")
+        rendered = "".join(str(line) for line in log.lines)
+        assert "注入指令" in rendered
+        assert "改用 try-catch 方案" in rendered
+
+
+@pytest.mark.asyncio
+async def test_tui_input_command_status(ws_tmp):
+    cfg = make_config(ws_tmp)
+    llm = ScriptedLLM('{"final_answer": "命令完成"}')
+    app = AlphaSWEApp("命令测试", config=cfg, llm=llm, planner=StubPlanner())
+    async with app.run_test(size=(120, 40)) as pilot:
+        for _ in range(100):
+            await pilot.pause(0.05)
+            if app._finished is not None:
+                break
+        box = app.query_one("#input-bar", Input)
+        box.focus()
+        box.value = "/status"
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        log = app.query_one("#main-log")
+        rendered = "".join(str(line) for line in log.lines)
+        assert "状态:" in rendered and "阶段=" in rendered
+
+
+@pytest.mark.asyncio
+async def test_tui_input_history_navigation(ws_tmp):
+    cfg = make_config(ws_tmp)
+    app = AlphaSWEApp("历史测试", config=cfg, llm=MockLLM(),
+                      planner=StubPlanner())
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        app._push_history("ls -la")
+        app._push_history("git status")
+        box = app.query_one("#input-bar", CommandInput)
+        # 上箭头回到最后一条
+        app.input_history_prev()
+        assert box.value == "git status"
+        app.input_history_prev()
+        assert box.value == "ls -la"
+        # 下箭头回到空
+        app.input_history_next()
+        assert box.value == "git status"
+        app.input_history_next()
+        assert box.value == ""
+
+
+def test_layout_render_helpers():
+    from agent.core.task import Task, TaskStatus
+    from tui.app import _fmt_elapsed, _progress_bar, _task_row
+
+    assert _progress_bar(50) == "[" + "=" * 10 + ">" + "-" * 9 + "]"
+    assert _progress_bar(100) == "[" + "=" * 20 + "]"
+    assert _fmt_elapsed(207) == "00:03:27"
+    t = Task(id="s::step", instruction="定位空指针",
+             status=TaskStatus.RUNNING,
+             metadata={"skill": "s", "skill_step": "step",
+                       "step_index": 0, "step_total": 3})
+    row = _task_row(t)
+    assert "进行>" in row and "step 1/3" in row
