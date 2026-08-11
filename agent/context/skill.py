@@ -525,11 +525,14 @@ def _build_skill_blocks(skill: Skill, prompt: str,
     total = len(active_steps)
     for idx, step in enumerate(active_steps):
         tid = step.task_id(skill.name)
+        # 技能步骤已有 on_failure（fallback/orchestrate）显式策略，
+        # 关闭任务级自动重试，避免与既有失败处理语义叠加（方案 1.1）
         task = Task(
             id=tid,
             instruction=f"{step.instruction} {prefix}",
             priority=skill.priority,
             parent_id=parent_id,
+            max_retries=0,
             metadata={
                 "skill": skill.name,
                 "skill_version": skill.version,

@@ -287,7 +287,9 @@ async def test_stats_and_stop():
 # ---------------- 主循环端到端 ----------------
 class StubPlanner:
     async def plan(self, prompt, context=""):
-        return [Task(id="t0", instruction=prompt)]
+        # 回滚测试语义：单次失败即回滚，不触发任务级重试
+        return [Task(id="t0", instruction=prompt, max_retries=0,
+                     criticality="critical")]
 
 
 class ScriptedLLM(MockLLM):

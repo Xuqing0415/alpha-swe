@@ -16,7 +16,9 @@ from agent.tools.terminal import TerminalTool
 
 class StubPlanner:
     async def plan(self, prompt, context=""):
-        return [Task(id="t0", instruction=prompt)]
+        # 熔断/超时语义：单次失败即会话失败，不触发任务级重试
+        return [Task(id="t0", instruction=prompt, max_retries=0,
+                     criticality="critical")]
 
 
 class ScriptedLLM(MockLLM):
