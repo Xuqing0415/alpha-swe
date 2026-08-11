@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional
 
 from agent.code.ast_summary import is_code_file, summarize_file
 from agent.sandbox.audit import FileAuditStore
-from agent.tools.base import ExecutionContext, Tool, ToolResult
+from agent.tools.base import ErrorCategory, ExecutionContext, Tool, ToolResult
 
 TRAVERSAL_PATTERN = re.compile(r"(\.\./|\.\.\\)")
 
@@ -65,20 +65,24 @@ class FileIOTool(Tool):
         start = time.time()
 
         if not path:
-            return ToolResult(success=False, error="缺少 path 参数", elapsed_ms=0.0)
+            return ToolResult(success=False, error="缺少 path 参数", elapsed_ms=0.0,
+                              error_category=ErrorCategory.PERMANENT)
         if self.read_only and action in WRITE_ACTIONS:
             return ToolResult(
                 success=False,
                 error=f"只读角色禁止写操作: {action}",
                 elapsed_ms=0.0,
+                error_category=ErrorCategory.PERMISSION,
             )
         if TRAVERSAL_PATTERN.search(path):
-            return ToolResult(success=False, error=f"禁止路径穿越: {path}", elapsed_ms=0.0)
+            return ToolResult(success=False, error=f"禁止路径穿越: {path}", elapsed_ms=0.0,
+                              error_category=ErrorCategory.PERMISSION)
 
         try:
             target = resolve_workspace_path(context.workspace, path)
         except PermissionError as e:
-            return ToolResult(success=False, error=str(e), elapsed_ms=0.0)
+            return ToolResult(success=False, error=str(e), elapsed_ms=0.0,
+                              error_category=ErrorCategory.PERMISSION)
 
         if self.docker is not None and getattr(self.docker, "running", False):
             rel = os.path.relpath(target, os.path.abspath(context.workspace))
@@ -121,10 +125,12 @@ class FileIOTool(Tool):
                                       metadata={"path": str(target), "docker": True},
                                       elapsed_ms=(time.time() - start) * 1000)
                 return ToolResult(success=False, error=f"未知操作: {action}",
-                                  elapsed_ms=(time.time() - start) * 1000)
+                                  elapsed_ms=(time.time() - start) * 1000,
+                                  error_category=ErrorCategory.PERMANENT)
             except Exception as e:
                 return ToolResult(success=False, error=str(e),
-                                  elapsed_ms=(time.time() - start) * 1000)
+                                  elapsed_ms=(time.time() - start) * 1000,
+                                  error_category=ErrorCategory.UNKNOWN)
 
         try:
             if action == "read":
@@ -138,15 +144,18 @@ class FileIOTool(Tool):
             if action == "search":
                 return await self._search(target, params.get("pattern", ""), start)
             return ToolResult(success=False, error=f"未知操作: {action}",
-                              elapsed_ms=(time.time() - start) * 1000)
+                              elapsed_ms=(time.time() - start) * 1000,
+                              error_category=ErrorCategory.PERMANENT)
         except Exception as e:
             return ToolResult(success=False, error=str(e),
-                              elapsed_ms=(time.time() - start) * 1000)
+                              elapsed_ms=(time.time() - start) * 1000,
+                              error_category=ErrorCategory.UNKNOWN)
 
     async def _read(self, target: Path, start: float) -> ToolResult:
         if not await asyncio.to_thread(target.exists):
             return ToolResult(success=False, error=f"文件不存在: {target}",
-                              elapsed_ms=(time.time() - start) * 1000)
+                              elapsed_ms=(time.time() - start) * 1000,
+                              error_category=ErrorCategory.PERMANENT)
         data = await asyncio.to_thread(target.read_text, encoding="utf-8", errors="ignore")
         output, meta = self._augment_read(str(target), data)
         return ToolResult(success=True, output=output,
@@ -249,15 +258,18 @@ class FileIOTool(Tool):
     async def _search(self, target: Path, pattern: str, start: float) -> ToolResult:
         if not pattern:
             return ToolResult(success=False, error="search 需要 pattern 参数",
-                              elapsed_ms=(time.time() - start) * 1000)
+                              elapsed_ms=(time.time() - start) * 1000,
+                              error_category=ErrorCategory.PERMANENT)
         if not await asyncio.to_thread(target.exists):
             return ToolResult(success=False, error=f"路径不存在: {target}",
-                              elapsed_ms=(time.time() - start) * 1000)
+                              elapsed_ms=(time.time() - start) * 1000,
+                              error_category=ErrorCategory.PERMANENT)
         try:
             regex = re.compile(pattern)
         except re.error as e:
             return ToolResult(success=False, error=f"正则无效: {e}",
-                              elapsed_ms=(time.time() - start) * 1000)
+                              elapsed_ms=(time.time() - start) * 1000,
+                              error_category=ErrorCategory.PERMANENT)
 
         def _scan(path: Path) -> List[str]:
             hits: List[str] = []

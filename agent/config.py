@@ -240,6 +240,7 @@ class AgentConfig(BaseModel):
     max_rounds: int = 30
     max_loop_iterations: Optional[int] = None  # 覆盖 max_rounds（用户方案字段）
     max_retries: int = 3
+    max_timeout_strikes: int = 3  # 同一命令/工具连续超时熔断阈值（方案 2.1）
     token_threshold: float = 0.8
     max_token_limit: int = 100_000
     keep_recent_rounds: int = 3

@@ -219,9 +219,13 @@ class AgentLoop:
         os.makedirs(self.config.sandbox.workspace, exist_ok=True)
     # ---- 默认工具集 ----
     def _default_tools(self) -> ToolManager:
-        manager = ToolManager(policy=self.sandbox)
+        manager = ToolManager(
+            policy=self.sandbox,
+            default_timeout=self.config.tools.file_ops.timeout,
+        )
         docker = self.docker if self.config.sandbox.docker_enabled else None
         manager.register(TerminalTool(
+            default_timeout=self.config.tools.terminal_execute.timeout,
             resource_monitor=self.config.sandbox.resource_monitor,
             memory_limit_mb=self.config.sandbox.memory_limit_mb,
             poll_interval=self.config.sandbox.poll_interval,
@@ -585,6 +589,16 @@ class AgentLoop:
                                    params=params, success=result.success,
                                    output=obs[:300], meta=result.metadata)
                         self._index_code(params, result)
+                    if any(r.metadata.get("circuit_broken") for r in results):
+                        task.mark(TaskStatus.FAILED,
+                                  error="工具执行连续超时，触发熔断（见上一步观察）")
+                        self._emit("task_failed", task_id=task.id,
+                                   reason="timeout_circuit_breaker")
+                        self.metrics.inc("tasks_failed")
+                        self.tracer.end_span(task_span, status="error",
+                                             error=task.error)
+                        self._remember_error(task)
+                        return
                     if any(r.metadata.get("waiting") for r in results):
                         task.mark(TaskStatus.WAITING)  # 挂起，释放控制权
                         return
@@ -691,6 +705,49 @@ class AgentLoop:
                     json.dumps(example, ensure_ascii=False))
         return None
 
+    @staticmethod
+    def _timeout_key(name: str, params: Dict[str, Any]) -> str:
+        """熔断粒度键：terminal 按命令、其余工具按 工具名:action。"""
+        if name == "terminal_execute":
+            return "terminal:" + str(params.get("command", ""))[:80]
+        action = params.get("action") if isinstance(params, dict) else None
+        return f"{name}:{action or '?'}"
+
+    @staticmethod
+    def _tool_timeout(name: str, params: Dict[str, Any]) -> Optional[float]:
+        """按工具类型给外层超时（方案 2.1：terminal 60s / file_read 5s / file_write 10s）。
+
+        terminal_execute 自带 terminate->kill 清理，返回 None 由工具层自管；
+        file_ops 按 action 区分读/写/搜索；其余工具统一 30s 兜底。
+        """
+        if name == "terminal_execute":
+            return None
+        if name == "file_ops":
+            action = params.get("action") if isinstance(params, dict) else None
+            return {"read": 5.0, "write": 10.0, "append": 10.0}.get(action, 30.0)
+        return 30.0
+
+    def _track_timeout(self, name: str, params: Dict[str, Any],
+                       task: Task, result: ToolResult) -> None:
+        """同一任务内同命令连续超时达到阈值即熔断（方案 2.1）。
+
+        熔断记录在任务级 metadata（_timeout_strikes），不影响其他任务；
+        达到阈值后把 circuit_broken 标到结果上，由 _execute_task 中止任务。
+        """
+        key = self._timeout_key(name, params)
+        strikes = task.metadata.setdefault("_timeout_strikes", {})
+        n = int(strikes.get(key, 0)) + 1
+        strikes[key] = n
+        threshold = int(getattr(self.config.agent, "max_timeout_strikes", 3))
+        self._decision.record(
+            "timeout.strike", "agent.max_timeout_strikes", threshold,
+            f"{key} 连续超时 {n}/{threshold} 次",
+        )
+        if n >= threshold:
+            result.metadata["circuit_broken"] = True
+            result.error = (result.error or "") + (
+                f"（{key} 连续超时 {n} 次，触发熔断，任务中止）")
+
     async def _run_tool(self, name: str, params: Dict[str, Any],
                         task: Task) -> ToolResult:
         """带确认策略执行单个工具（require_confirmation / auto_approve）。
@@ -732,7 +789,10 @@ class AgentLoop:
                     interrupt_event=self.cancel_event,
                     output_callback=self._output_callback,
                 ),
+                timeout=self._tool_timeout(name, params),
             )
+            if result.metadata.get("timed_out"):
+                self._track_timeout(name, params, task, result)
             self.metrics.record_tool_result(result.success)
             end_attrs = {}
             if result.output:

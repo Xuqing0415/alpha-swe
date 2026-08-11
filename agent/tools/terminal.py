@@ -12,7 +12,7 @@ import os
 import time
 from typing import Any, Dict, List
 
-from agent.tools.base import ExecutionContext, Tool, ToolResult
+from agent.tools.base import ErrorCategory, ExecutionContext, Tool, ToolResult
 
 
 # 只读角色允许的命令白名单（首词匹配，basename）
@@ -105,12 +105,14 @@ class TerminalTool(Tool):
         callback = context.output_callback
 
         if not command:
-            return ToolResult(success=False, error="命令为空", elapsed_ms=0.0)
+            return ToolResult(success=False, error="命令为空", elapsed_ms=0.0,
+                                   error_category=ErrorCategory.PERMANENT)
         if self.read_only and not self._read_only_ok(command):
             return ToolResult(
                 success=False,
                 error=f"只读角色禁止该命令: {command[:80]}",
                 elapsed_ms=0.0,
+                error_category=ErrorCategory.PERMISSION,
             )
 
         # Docker 模式：命令路由进容器执行（沙箱策略在 ToolManager 层已检查）
@@ -150,7 +152,8 @@ class TerminalTool(Tool):
             )
         except Exception as e:  # 进程创建失败
             return ToolResult(success=False, error=f"启动进程失败: {e}",
-                              elapsed_ms=(time.time() - start) * 1000)
+                              elapsed_ms=(time.time() - start) * 1000,
+                              error_category=ErrorCategory.TRANSIENT)
 
         async def _read_stream(stream) -> str:
             # 逐行读取；配置了 output_callback 时实时转发，同时收集完整输出
@@ -223,6 +226,7 @@ class TerminalTool(Tool):
                 error=f"命令超时（{timeout}s）并被终止: {command}",
                 metadata={"timed_out": True},
                 elapsed_ms=(time.time() - start) * 1000,
+                error_category=ErrorCategory.TRANSIENT,
             )
 
         out = (await out_task).strip()
@@ -240,10 +244,12 @@ class TerminalTool(Tool):
                     metadata={"circuit_breaker": True,
                               "rss_mb": round(breach / 1024 / 1024, 1)},
                     elapsed_ms=elapsed,
+                    error_category=ErrorCategory.RESOURCE,
                 )
 
         if proc.returncode == 0:
             return ToolResult(success=True, output=out or "(empty stdout)",
                               elapsed_ms=elapsed)
         return ToolResult(success=False, output=out, error=err or f"退出码 {proc.returncode}",
-                          elapsed_ms=elapsed)
+                          elapsed_ms=elapsed,
+                          error_category=ErrorCategory.PERMANENT)
