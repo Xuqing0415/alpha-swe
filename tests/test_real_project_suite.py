@@ -3,7 +3,7 @@
 用带有真实技术栈气息的迷你项目（Express/Django+SQLAlchemy/pytest/Flask），
 验证技能发现效果：
 - discover() 在陌生项目上按 任务关键词 + 项目依赖/文件类型 命中正确技能；
-- 优先级排序与无关任务零误触发。
+- 端到端 AgentLoop 运行技能工作流，确认 skills_activated 事件与步骤执行顺序。
 
 运行：python -X utf8 -m pytest tests/test_real_project_suite.py -q
 """
@@ -14,8 +14,12 @@ from typing import Dict, List
 
 import pytest
 
+from agent.config import (AgentConfig, AppConfig, MCPOptions, MemoryConfig,
+                          SandboxConfig, SkillConfig, PluginConfig)
 from agent.context.plugin import ProjectContext
 from agent.context.skill import SkillLibrary
+from agent.core.loop import AgentLoop
+from agent.llm import MockLLM
 
 
 @dataclass
@@ -162,3 +166,86 @@ def test_discovery_no_false_positive_on_unrelated_task(ws_tmp):
                        registry_file="", enabled=True)
     # 与任何技能都无关的任务不应误命中
     assert lib.match("把 README 翻译成英文", files=pc.files, deps=pc.deps) == []
+
+# ---- 2) 端到端激活验证：AgentLoop 技能工作流执行 ----
+class ScriptedLLM(MockLLM):
+    def __init__(self, *responses):
+        self._responses = list(responses)
+        self.calls = []
+
+    async def complete(self, messages):
+        self.calls.append(messages)
+        assert self._responses, "LLM 调用次数超出脚本"
+        return self._responses.pop(0)
+
+
+def make_config(ws_tmp: Path, skills_dir: Path, registry: str):
+    return AppConfig(
+        agent=AgentConfig(max_rounds=10, max_retries=2, max_concurrency=1),
+        sandbox=SandboxConfig(workspace=str(ws_tmp / "ws")),
+        memory=MemoryConfig(db_path=str(ws_tmp / "mem.db"),
+                            auto_experience=False),
+        mcp=MCPOptions(enabled=False),
+        skills=SkillConfig(enabled=True, dir=str(skills_dir),
+                           registry_file=registry,
+                           workflow_enabled=True, max_active=3,
+                           allow_fallback=True),
+        plugin=PluginConfig(enabled=False, dir=str(ws_tmp / "plugins")),
+    )
+
+
+@pytest.mark.asyncio
+async def test_end_to_end_skill_activation_and_order(ws_tmp):
+    skills_dir = ws_tmp.parent.parent / "skills" / "workflows"
+    registry = str(ws_tmp.parent.parent / "skills" / "skill_manifest.json")
+    write_project(ws_tmp, dict(CASES[0].files))
+    case = CASES[0]  # express-rest-endpoint
+    lib = SkillLibrary(skills_dir=str(skills_dir), registry_file=registry,
+                       enabled=True)
+    skill = lib.get("add-rest-endpoint")
+    assert skill is not None
+    # 每个步骤一个 final_answer
+    llm = ScriptedLLM(*['{"final_answer": "ok"}'] * len(skill.steps))
+    loop = AgentLoop(config=make_config(ws_tmp, skills_dir, registry), llm=llm)
+    result = await loop.run(case.task)
+    assert result.ok
+    activated = [e for e in loop.events if e["type"] == "skills_activated"]
+    assert activated, "应有 skills_activated 事件"
+    assert "add-rest-endpoint" in activated[0]["data"]["skills"]
+    # 决策日志包含技能激活与展开
+    names = [dp.name for dp in loop._decision.decisions]
+    assert "skill.activate" in names and "skill.expand" in names
+    # 技能步骤按依赖顺序执行
+    step_order = [e["data"]["task_id"] for e in loop.events
+                  if e["type"] == "task_start"]
+    skill_tasks = [t for t in step_order if "add-rest-endpoint" in t]
+    assert skill_tasks == [
+        "add-rest-endpoint::route", "add-rest-endpoint::validation",
+        "add-rest-endpoint::controller", "add-rest-endpoint::tests",
+        "add-rest-endpoint::run-tests",
+    ]
+    # 任务开始事件携带技能进度字段（阶段二 2.4 可视化数据源）
+    skill_starts = [e for e in loop.events if e["type"] == "task_start"
+                    and e["data"].get("skill_step")]
+    assert skill_starts and skill_starts[0]["data"]["skill_step"] == "route"
+    assert skill_starts[0]["data"]["step_index"] == 0
+    assert skill_starts[0]["data"]["step_total"] == 5
+
+
+@pytest.mark.asyncio
+async def test_end_to_end_bugfix_skill_executes(ws_tmp):
+    skills_dir = ws_tmp.parent.parent / "skills" / "workflows"
+    registry = str(ws_tmp.parent.parent / "skills" / "skill_manifest.json")
+    write_project(ws_tmp, dict(CASES[3].files))  # flask-bugfix
+    lib = SkillLibrary(skills_dir=str(skills_dir), registry_file=registry,
+                       enabled=True)
+    skill = lib.get("bug-fix")
+    llm = ScriptedLLM(*['{"final_answer": "已修复"}'] * len(skill.steps))
+    loop = AgentLoop(config=make_config(ws_tmp, skills_dir, registry), llm=llm)
+    result = await loop.run(CASES[3].task)
+    assert result.ok
+    activated = [e for e in loop.events if e["type"] == "skills_activated"]
+    assert activated and "bug-fix" in activated[0]["data"]["skills"]
+    # 使用记录（版本管理）写入
+    summary = loop.skill_library.usage_summary()
+    assert summary.get("bug-fix", {}).get("activated", 0) >= 1

@@ -238,3 +238,143 @@ async def test_planner_no_call_graph_skips_injection():
     assert "planner.call_graph.injected" not in dl.rows
     user_msg = llm.calls[0][-1]["content"]
     assert "影响范围提示" not in user_msg
+
+# ---- 阶段二 2.2：技能管道与条件分支 ----
+
+PIPELINE_A = """name: base-setup
+requires: []
+triggers:
+  keywords: [pipeline]
+steps:
+  - name: init
+    instruction: 初始化基础环境
+    dependencies: []
+"""
+
+PIPELINE_B = """name: full-flow
+requires: [base-setup]
+triggers:
+  keywords: [pipeline]
+steps:
+  - name: build
+    instruction: 构建主流程
+    dependencies: []
+  - name: verify
+    instruction: 验证结果
+    dependencies: [build]
+"""
+
+COND_SKILL = """name: cond-skill
+requires: []
+triggers:
+  keywords: [cond]
+steps:
+  - name: always-step
+    instruction: 恒执行
+  - name: when-file
+    instruction: 有文件才执行
+    when:
+      file_exists: [src/flag.txt]
+  - name: when-keyword
+    instruction: 有关键词才执行
+    when:
+      keyword: [api]
+  - name: when-dep
+    instruction: 有依赖才执行
+    when:
+      project_dep: [sqlalchemy]
+"""
+
+
+def test_expand_with_requires_pipeline(ws_tmp):
+    d = ws_tmp / "skills"
+    write_skill(d, "base-setup", PIPELINE_A)
+    write_skill(d, "full-flow", PIPELINE_B)
+    lib = SkillLibrary(skills_dir=str(d), registry_file="")
+    skill = lib.get("full-flow")
+    tasks = lib.expand(skill, "跑 pipeline 任务", with_requires=True)
+    ids = [t.id for t in tasks]
+    assert ids == ["base-setup::init", "full-flow::build", "full-flow::verify"]
+    # 管道链接：base-setup::init -> full-flow::build -> verify
+    by_id = {t.id: t for t in tasks}
+    assert by_id["full-flow::build"].dependencies == ["base-setup::init"]
+    assert by_id["full-flow::verify"].dependencies == ["full-flow::build"]
+    # 决策日志记录管道串联
+    dl = _DecisionLogger()
+    lib2 = SkillLibrary(skills_dir=str(d), registry_file="",
+                        decision_logger=dl)
+    lib2.expand(lib2.get("full-flow"), "跑 pipeline 任务", with_requires=True)
+    assert "skill.pipeline" in dl.rows
+
+
+def test_expand_pipeline_chains_multiple_skills(ws_tmp):
+    d = ws_tmp / "skills"
+    write_skill(d, "skill-a", """name: skill-a
+requires: []
+triggers:
+  keywords: [a]
+steps:
+  - name: s1
+    instruction: A 第一步
+""")
+    write_skill(d, "skill-b", """name: skill-b
+requires: []
+triggers:
+  keywords: [b]
+steps:
+  - name: s1
+    instruction: B 第一步
+""")
+    lib = SkillLibrary(skills_dir=str(d), registry_file="")
+    a, b = lib.get("skill-a"), lib.get("skill-b")
+    tasks = lib.expand_pipeline([a, b], "a 和 b 任务")
+    ids = [t.id for t in tasks]
+    assert ids == ["skill-a::s1", "skill-b::s1"]
+    by_id = {t.id: t for t in tasks}
+    assert by_id["skill-b::s1"].dependencies == ["skill-a::s1"]
+
+
+def test_step_when_condition_skip(ws_tmp):
+    d = ws_tmp / "skills"
+    write_skill(d, "cond-skill", COND_SKILL)
+    lib = SkillLibrary(skills_dir=str(d), registry_file="")
+    dl = _DecisionLogger()
+    lib2 = SkillLibrary(skills_dir=str(d), registry_file="",
+                        decision_logger=dl)
+    # 无 flag.txt、指令无 api 关键词、无 sqlalchemy 依赖 -> 仅 always-step 执行
+    tasks = lib2.expand(lib2.get("cond-skill"), "普通 cond 任务",
+                        files=["src/main.py"], deps=["fastapi"])
+    assert [t.id for t in tasks] == ["cond-skill::always-step"]
+    assert any("when-file" in r for r in dl.rows) is False
+    assert any(r == "skill.step_skip" for r in dl.rows)
+    # 满足条件时全部执行
+    tasks2 = lib.expand(lib.get("cond-skill"), "写一个 api 接口",
+                        files=["src/flag.txt"], deps=["sqlalchemy"])
+    assert len(tasks2) == 4
+
+
+def test_expand_metadata_includes_step_progress(ws_tmp):
+    d = ws_tmp / "skills"
+    write_skill(d, "cond-skill", COND_SKILL)
+    lib = SkillLibrary(skills_dir=str(d), registry_file="")
+    tasks = lib.expand(lib.get("cond-skill"), "写一个 api 接口",
+                       files=["src/flag.txt"], deps=["sqlalchemy"])
+    meta = {t.metadata["skill_step"]: t.metadata for t in tasks}
+    assert meta["when-keyword"]["step_index"] == 2
+    assert meta["when-keyword"]["step_total"] == 4
+
+
+def test_validate_catches_bad_when_key(ws_tmp):
+    d = ws_tmp / "skills"
+    write_skill(d, "bad-when", """name: bad-when
+triggers:
+  keywords: [bad]
+steps:
+  - name: s1
+    instruction: 一步
+    when:
+      magic_key: [x]
+""")
+    lib = SkillLibrary(skills_dir=str(d), registry_file="")
+    issues = lib.validate()
+    assert "bad-when" in issues and "magic_key" in issues["bad-when"][0]

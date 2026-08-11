@@ -40,6 +40,7 @@ class SkillStep:
     dependencies: List[str] = field(default_factory=list)  # 前驱步骤名
     on_failure: str = "abort"   # abort | fallback | orchestrate
     fallback: str = ""          # on_failure=fallback 时的回退指令
+    when: Dict[str, Any] = field(default_factory=dict)  # 条件分支（阶段二 2.2）
 
     def task_id(self, skill_name: str) -> str:
         return f"{skill_name}::{STEP_ID_SAFE.sub('_', self.name)}"
@@ -179,6 +180,7 @@ class SkillLibrary:
                     dependencies=[str(x) for x in (item.get("dependencies") or [])],
                     on_failure=str(item.get("on_failure", "abort")).strip() or "abort",
                     fallback=str(item.get("fallback", "")).strip(),
+                    when=dict(item.get("when") or {}),
                 ))
             steps = [s for s in steps if s.name and s.instruction]
             meta = self._meta.get(name, {})
@@ -295,6 +297,9 @@ class SkillLibrary:
                 for dep in step.dependencies:
                     if dep not in names:
                         errs.append(f"步骤 {step.name} 依赖不存在的步骤: {dep}")
+                for key in step.when:
+                    if key not in _WHEN_KEYS:
+                        errs.append(f"步骤 {step.name} 的条件键非法: {key}")
             for req in skill.requires:
                 if req not in all_names:
                     errs.append(f"依赖技能不存在: {req}")
@@ -350,38 +355,75 @@ class SkillLibrary:
         return summary
 
     def expand(self, skill: Skill, prompt: str,
-               parent_id: Optional[str] = None) -> List[Task]:
-        """把技能展开为 Task DAG：步骤依赖 -> Task 依赖，决策点写入 metadata。"""
-        tasks: Dict[str, Task] = {}
-        prefix = f"（技能 {skill.name}，原始任务: {str(prompt)[:160]}）"
-        for step in skill.steps:
-            tid = step.task_id(skill.name)
-            tasks[step.name] = Task(
-                id=tid,
-                instruction=f"{step.instruction} {prefix}",
-                priority=skill.priority,
-                parent_id=parent_id,
-                metadata={
-                    "skill": skill.name,
-                    "skill_version": skill.version,
-                    "skill_step": step.name,
-                    "on_failure": step.on_failure,
-                    "fallback": step.fallback,
-                    "requires": list(skill.requires),
-                    "permissions": list(skill.permissions),
-                },
-            )
-        for step in skill.steps:
-            tasks[step.name].dependencies = [
-                tasks[dep].id for dep in step.dependencies if dep in tasks
-            ]
-        if self.decision_logger is not None:
-            self.decision_logger.record(
-                "skill.expand", "skills.workflow_enabled", True,
-                f"技能 {skill.name} v{skill.version} 展开为 {len(tasks)} 个子任务: "
-                f"{[t.id for t in tasks.values()]}",
-            )
-        return list(tasks.values())
+               parent_id: Optional[str] = None,
+               files: Optional[Iterable[str]] = None,
+               deps: Optional[Iterable[str]] = None,
+               with_requires: bool = True) -> List[Task]:
+        """把技能展开为 Task DAG（阶段二 2.2）。
+
+        - when 条件分支：步骤命中条件才进入 DAG，否则跳过并记录 skill.step_skip；
+        - 技能管道：with_requires=True 时先展开 requires 依赖技能（递归），
+          前一个技能的最后一步链接到后一个技能的第一步；
+        - 步骤 metadata 携带 step_index/step_total 供进度可视化。
+        """
+        blocks: List[Tuple[str, List[Task]]] = []
+        seen: set = set()
+
+        def collect(name: str, prio: int) -> None:
+            dep_skill = self._skills.get(name)
+            if dep_skill is None or name in seen:
+                return
+            seen.add(name)
+            for r in dep_skill.requires:
+                collect(r, prio)
+            blocks.append(_build_skill_blocks(dep_skill, prompt, parent_id,
+                                              files, deps, self.decision_logger))
+
+        if with_requires:
+            for req in skill.requires:
+                collect(req, skill.priority)
+        seen.add(skill.name)
+        blocks.append(_build_skill_blocks(skill, prompt, parent_id,
+                                          files, deps, self.decision_logger))
+        return _link_blocks(blocks, self.decision_logger)
+
+    def expand_pipeline(self, skills: List[Skill], prompt: str,
+                        parent_id: Optional[str] = None,
+                        files: Optional[Iterable[str]] = None,
+                        deps: Optional[Iterable[str]] = None) -> List[Task]:
+        """技能管道：按给定顺序串联多个技能（前一个产出 -> 下一个输入）。"""
+        blocks: List[Tuple[str, List[Task]]] = []
+        for skill in skills:
+            if skill.name in {b[0] for b in blocks}:
+                continue
+            blocks.extend(self._pipeline_block(skill, prompt, parent_id,
+                                               files, deps))
+        return _link_blocks(blocks, self.decision_logger)
+
+    def _pipeline_block(self, skill: Skill, prompt: str,
+                        parent_id: Optional[str],
+                        files: Optional[Iterable[str]],
+                        deps: Optional[Iterable[str]]) -> List[Tuple[str, List[Task]]]:
+        """单个技能（含 requires 依赖）展开为一个流水线块列表。"""
+        blocks: List[Tuple[str, List[Task]]] = []
+        seen: set = set()
+
+        def collect(name: str) -> None:
+            dep_skill = self._skills.get(name)
+            if dep_skill is None or name in seen:
+                return
+            seen.add(name)
+            for r in dep_skill.requires:
+                collect(r)
+            blocks.append(_build_skill_blocks(dep_skill, prompt, parent_id,
+                                              files, deps, self.decision_logger))
+
+        for req in skill.requires:
+            collect(req)
+        seen.add(skill.name)
+        blocks.append(_build_skill_blocks(skill, prompt, parent_id,
+                                          files, deps, self.decision_logger))
+        return blocks
 
     @staticmethod
     def to_context(skills: List[Skill]) -> str:
@@ -421,3 +463,116 @@ def _pick(data: Dict[str, Any], meta: Dict[str, Any],
     if key in meta:
         return meta[key]
     return default
+
+_WHEN_KEYS = {"file_exists", "not_file_exists", "keyword", "project_dep", "always"}
+
+
+def _eval_when(when: Dict[str, Any], instruction: str,
+               files: List[str], deps: set) -> bool:
+    """条件求值：全部键同时成立（AND）才为真；空条件恒真。"""
+    if not when:
+        return True
+    text = (instruction or "").lower()
+    if when.get("always") is not None:
+        if not bool(when.get("always")):
+            return False
+    for pat in when.get("file_exists") or []:
+        if not _any_file_match(str(pat), files):
+            return False
+    for pat in when.get("not_file_exists") or []:
+        if _any_file_match(str(pat), files):
+            return False
+    for kw in when.get("keyword") or []:
+        if str(kw).lower() not in text:
+            return False
+    for dep in when.get("project_dep") or []:
+        if str(dep).lower() not in deps:
+            return False
+    return True
+
+
+def _any_file_match(pattern: str, files: List[str]) -> bool:
+    import fnmatch
+    for f in files:
+        if fnmatch.fnmatch(f, pattern) or pattern in f:
+            return True
+    return False
+
+
+def _build_skill_blocks(skill: Skill, prompt: str,
+                        parent_id: Optional[str],
+                        files: Optional[Iterable[str]],
+                        deps: Optional[Iterable[str]],
+                        decision_logger=None) -> Tuple[str, List[Task]]:
+    """把单个技能的步骤构建为 Task 列表（含条件过滤、step_index/step_total）。"""
+    file_list = [str(f) for f in (files or [])]
+    dep_set = {str(d).lower() for d in (deps or [])}
+    active_steps = []
+    for step in skill.steps:
+        if _eval_when(step.when, prompt, file_list, dep_set):
+            active_steps.append(step)
+        elif decision_logger is not None:
+            decision_logger.record(
+                "skill.step_skip", "skills.workflow_enabled", True,
+                f"技能 {skill.name} 步骤 {step.name} 条件不满足，跳过",
+            )
+    tasks: List[Task] = []
+    by_name: Dict[str, Task] = {}
+    prefix = f"（技能 {skill.name}，原始任务: {str(prompt)[:160]}）"
+    total = len(active_steps)
+    for idx, step in enumerate(active_steps):
+        tid = step.task_id(skill.name)
+        task = Task(
+            id=tid,
+            instruction=f"{step.instruction} {prefix}",
+            priority=skill.priority,
+            parent_id=parent_id,
+            metadata={
+                "skill": skill.name,
+                "skill_version": skill.version,
+                "skill_step": step.name,
+                "step_index": idx,
+                "step_total": total,
+                "on_failure": step.on_failure,
+                "fallback": step.fallback,
+                "requires": list(skill.requires),
+                "permissions": list(skill.permissions),
+            },
+        )
+        by_name[step.name] = task
+        tasks.append(task)
+    for step in active_steps:
+        task = by_name[step.name]
+        task.dependencies = [
+            by_name[dep].id for dep in step.dependencies if dep in by_name
+        ]
+    if decision_logger is not None:
+        decision_logger.record(
+            "skill.expand", "skills.workflow_enabled", True,
+            f"技能 {skill.name} v{skill.version} 展开为 {len(tasks)} 个子任务: "
+            f"{[t.id for t in tasks]}",
+        )
+    return skill.name, tasks
+
+
+def _link_blocks(blocks: List[Tuple[str, List[Task]]],
+                 decision_logger=None) -> List[Task]:
+    """串联多个技能块：前一块最后一步 -> 后一块第一步（管道依赖）。"""
+    out: List[Task] = []
+    prev_last: Optional[Task] = None
+    for name, tasks in blocks:
+        if not tasks:
+            continue
+        if prev_last is not None and tasks[0].dependencies:
+            tasks[0].dependencies = [prev_last.id] + tasks[0].dependencies
+        elif prev_last is not None:
+            tasks[0].dependencies = [prev_last.id]
+        prev_last = tasks[-1]
+        out.extend(tasks)
+    if decision_logger is not None and len(blocks) > 1:
+        decision_logger.record(
+            "skill.pipeline", "skills.workflow_enabled", True,
+            "技能管道串联: " + " -> ".join(
+                b[0] for b in blocks if b[1]),
+        )
+    return out

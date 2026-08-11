@@ -921,7 +921,10 @@ class AgentLoop:
                 self.skill_library.record_usage(
                     skill.name, skill.version, "activated",
                     note=str(prompt)[:120])
-                plan.extend(self.skill_library.expand(skill, prompt))
+            # 阶段二 2.2：多技能按管道串联（前一个产出 -> 后一个输入），
+            # 步骤 when 条件按项目上下文求值
+            plan = self.skill_library.expand_pipeline(
+                matched, prompt, files=ctx.files, deps=ctx.deps)
             self._emit("skills_activated",
                        skills=[s.name for s in matched], total=len(plan))
             return plan
