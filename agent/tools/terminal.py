@@ -67,9 +67,35 @@ class TerminalTool(Tool):
                 return False
         return True
 
+    @staticmethod
+    def _decode(data: bytes) -> str:
+        """优先 UTF-8 解码；失败按本机编码、GBK 依次回退，杜绝乱码。"""
+        candidates = ["utf-8"]
+        try:
+            import locale
+            enc = locale.getpreferredencoding(False)
+            if enc and enc.lower() not in ("utf-8", "utf8"):
+                candidates.append(enc)
+        except Exception:
+            pass
+        candidates += ["gbk", "cp936", "big5", "cp1252"]
+        for enc in candidates:
+            try:
+                return data.decode(enc)
+            except (UnicodeDecodeError, LookupError):
+                continue
+        return data.decode("utf-8", errors="replace")
+
     def _build_argv(self, command: str) -> List[str]:
         if os.name == "nt":
-            return ["powershell", "-NoProfile", "-NonInteractive", "-Command", command]
+            # 强制 PowerShell 以 UTF-8 输出：避免中文 Windows 上 GBK/UTF-8 混淆导致乱码
+            prefix = (
+                "$OutputEncoding=[System.Text.Encoding]::UTF8;"
+                "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;"
+                "chcp 65001 | Out-Null; "
+            )
+            return ["powershell", "-NoProfile", "-NonInteractive",
+                    "-Command", prefix + command]
         return ["/bin/sh", "-c", command]
 
     async def execute(self, params: Dict[str, Any], context: ExecutionContext) -> ToolResult:
@@ -116,7 +142,9 @@ class TerminalTool(Tool):
             proc = await asyncio.create_subprocess_exec(
                 *argv,
                 cwd=context.workspace,
-                env={**os.environ, **context.env},
+                env={**os.environ, **context.env,
+                     "PYTHONIOENCODING": "utf-8",
+                     "PYTHONUTF8": "1"},
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -134,7 +162,7 @@ class TerminalTool(Tool):
                     break
                 if not line:
                     break
-                text = line.decode("utf-8", errors="replace")
+                text = self._decode(line)
                 chunks.append(text)
                 if callback is not None:
                     callback(text.rstrip("\n"))
