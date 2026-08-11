@@ -63,8 +63,15 @@ def match_triggers(triggers: Dict[str, List[str]],
     exts = _exts_of(file_list)
     dep_set = {str(d).lower() for d in (deps or [])}
 
+    ext_scope = {str(e).lower().lstrip(".") for e in
+                 (triggers.get("file_ext") or [])}
     for kw in triggers.get("keywords") or []:
         if str(kw).lower() in text:
+            # 技能/插件声明了语言范围（file_ext）时，关键词命中还需项目文件
+            # 类型匹配，避免语言无关关键词（如"重构"）误触发其他技术栈技能；
+            # 无项目文件上下文（files 为空）时不做强限定，避免空上下文漏配
+            if ext_scope and file_list and not (ext_scope & exts):
+                break
             hit_types.append("keywords")
             break
     for ext in triggers.get("file_ext") or []:
@@ -190,8 +197,25 @@ class ProjectContext:
             py = root / "pyproject.toml"
             if py.is_file():
                 text = py.read_text(encoding="utf-8", errors="replace")
-                for m in re.finditer(r"^\s*([A-Za-z0-9_.-]+)\s*[=~>]", text, re.MULTILINE):
-                    deps.add(m.group(1).lower())
+                try:
+                    import tomllib
+                    data = tomllib.loads(text)
+                except Exception:
+                    data = {}
+                if data:
+                    proj = data.get("project") or {}
+                    for d in proj.get("dependencies") or []:
+                        deps.add(re.split(r"[<>=!~\[\]@;]", d)[0].strip().lower())
+                    for group in (proj.get("optional-dependencies") or {}).values():
+                        for d in group or []:
+                            deps.add(re.split(r"[<>=!~\[\]@;]", d)[0].strip().lower())
+                    poetry = (data.get("tool") or {}).get("poetry") or {}
+                    for d in (poetry.get("dependencies") or {}):
+                        deps.add(str(d).lower())
+                else:
+                    # 非 TOML 可解析（极少见）时回退到朴素正则
+                    for m in re.finditer(r"^\s*([A-Za-z0-9_.-]+)\s*[=~>]", text, re.MULTILINE):
+                        deps.add(m.group(1).lower())
         except Exception as e:
             logger.warning("依赖解析失败: %s", e)
         return deps

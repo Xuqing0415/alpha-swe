@@ -149,7 +149,7 @@ class SkillLibrary:
             return
         self._registry_mtime = mtime
         try:
-            data = json.loads(p.read_text(encoding="utf-8", errors="replace"))
+            data = json.loads(p.read_text(encoding="utf-8-sig", errors="replace"))
         except Exception as e:
             logger.warning("技能注册表加载失败 %s: %s", p, e)
             return
@@ -219,9 +219,11 @@ class SkillLibrary:
               deps: Optional[Iterable[str]] = None) -> List[Skill]:
         """按指令 + 项目上下文匹配技能，按优先级降序返回（上限 max_active）。
 
-        require_task_intent=True 时，工作流激活要求命中"任务意图"
-        （keywords 或 file_ext）；project_dep/project_file 单独命中只作为
-        上下文建议（见 discover），避免无关任务误触发工作流展开。
+        require_task_intent=True 时，工作流激活要求命中任务意图 keywords；
+        file_ext 仅作为语言范围过滤（关键词命中时要求项目文件类型匹配），
+        不单独激活工作流——否则语言族（.py/.ts/.js）会把 bug-fix 等通用技能
+        误触发到每个任务上；project_dep/project_file 单独命中只作为上下文
+        建议（见 discover），避免无关任务误触发工作流展开。
         """
         if not self.enabled:
             return []
@@ -229,7 +231,7 @@ class SkillLibrary:
         candidates = list(self._skills.values())
         if self.whitelist:
             candidates = [s for s in candidates if s.name in self.whitelist]
-        intent = {"keywords", "file_ext"}
+        intent = {"keywords"}  # file_ext 仅语言范围，见 match_triggers
         matched = []
         for s in candidates:
             hits = match_triggers(s.triggers, instruction, files or [], deps or [])
@@ -262,6 +264,7 @@ class SkillLibrary:
                     continue
                 hits = match_triggers(s.triggers, instruction, files or [], deps or [])
                 if hits and not (set(hits) & {"keywords", "file_ext"}):
+                    # 纯 file_ext 触发同样不进建议：语言族太宽，需配关键词
                     context_candidates.append(s)
         out: Dict[str, Skill] = {}
         for s in matched + context_candidates:
