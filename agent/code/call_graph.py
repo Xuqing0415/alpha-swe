@@ -2,7 +2,7 @@
 
 项目启动时构建一次：记录函数/类符号的定义位置与"谁调用了谁"。
 当 Agent 要修改某个符号时，通过 callers_of() 找到所有受影响的上游调用方。
-Python 使用标准库 ast 提取真实调用边；JS/TS 用正则做近似分段统计。
+Python 使用标准库 ast 提取真实调用边；JS/TS 优先 tree-sitter 精确提取，否则回退正则近似。
 """
 from __future__ import annotations
 
@@ -153,6 +153,8 @@ def _add_def(cg: CallGraph, rel: str, name: str, lineno: int) -> None:
 
 
 def _index_js(rel: str, text: str, cg: CallGraph) -> None:
+    if _index_js_tree_sitter(rel, text, cg):
+        return
     from agent.code.ast_summary import _JS_ARROW, _JS_CLASS, _JS_FUNC
     raw: List[Tuple[str, int]] = []
     for m in _JS_FUNC.finditer(text):
@@ -176,3 +178,22 @@ def _index_js(rel: str, text: str, cg: CallGraph) -> None:
             callee = m.group(1)
             cg.calls.setdefault(name, set()).add(callee)
             cg.reverse.setdefault(callee, set()).add(name)
+
+
+def _index_js_tree_sitter(rel: str, text: str, cg: CallGraph) -> bool:
+    """tree-sitter 精确索引；成功返回 True，不可用或解析失败返回 False 回退正则。"""
+    try:
+        from agent.code import ts_parser
+        if not ts_parser.available():
+            return False
+        info = ts_parser.parse_js_ts(rel, text)
+        for s in info.symbols:
+            _add_def(cg, rel, s.name, s.line)
+        for owner, callee in info.calls:
+            if not owner or not callee:
+                continue
+            cg.calls.setdefault(owner, set()).add(callee)
+            cg.reverse.setdefault(callee, set()).add(owner)
+        return True
+    except Exception:
+        return False

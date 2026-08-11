@@ -2,7 +2,7 @@
 
 当 Agent 读取代码文件时，除原始文本外还提供结构化摘要：类/函数/方法签名、
 导入依赖、导出符号——让 Agent 在决策时看到"这个文件提供了什么能力"。
-Python 使用标准库 ast 精确解析；JS/TS 使用正则做轻量提取（零外部依赖）。
+Python 使用标准库 ast 精确解析；JS/TS 优先 tree-sitter（已安装时）精确提取，否则回退正则近似（零硬依赖）。
 """
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import ast
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 CODE_EXTS = {".py", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}
 
@@ -144,6 +144,9 @@ def _python_decorators(node) -> List[str]:
 
 
 def _summarize_js_ts(path: str, text: str, lang: str) -> FileAstSummary:
+    ts_summary = _summarize_js_ts_tree_sitter(path, text, lang)
+    if ts_summary is not None:
+        return ts_summary
     imports = [m.group(1) for m in _JS_IMPORT.finditer(text)]
     imports += [m.group(1) for m in _JS_REQUIRE.finditer(text)]
     symbols: List[Symbol] = []
@@ -159,6 +162,24 @@ def _summarize_js_ts(path: str, text: str, lang: str) -> FileAstSummary:
         if m.group(1) not in exports:
             exports.append(m.group(1))
     return FileAstSummary(path, lang, symbols, exports, imports)
+
+
+def _summarize_js_ts_tree_sitter(path: str, text: str,
+                                 lang: str) -> "Optional[FileAstSummary]":
+    """tree-sitter 精确提取；不可用或解析失败返回 None，由调用方回退正则。"""
+    try:
+        from agent.code import ts_parser
+        if not ts_parser.available():
+            return None
+        info = ts_parser.parse_js_ts(path, text)
+        symbols = [
+            Symbol(s.name, s.kind, s.line, s.args, s.decorators)
+            for s in info.symbols
+        ]
+        return FileAstSummary(path, lang, symbols,
+                              list(info.exports), list(info.imports))
+    except Exception:
+        return None
 
 
 def _add_js_symbol(text: str, m: "re.Match", kind: str,

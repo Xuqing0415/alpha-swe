@@ -68,6 +68,64 @@ def test_is_code_file():
     assert not is_code_file("readme.md") and not is_code_file("noext")
 
 
+# ---- 1.1b tree-sitter 精确提取（阶段一增强） ----
+def test_js_ts_tree_sitter_precise_symbols(ws_tmp):
+    from agent.code import ts_parser
+    if not ts_parser.available():
+        pytest.skip("tree-sitter 未安装")
+    ts = ("import { a } from './x';\n"
+          "export const run = (n) => n + 1;\n"
+          "export class App {\n"
+          "  greet() { return run(this.n); }\n"
+          "}\n"
+          "function util() { run(1); }\n"
+          "export interface Config { a: string }\n")
+    s = summarize_file("src/app.ts", ts)
+    kinds = {x.name: x.kind for x in s.symbols}
+    assert kinds.get("run") == "const"
+    assert kinds.get("App") == "class"
+    assert kinds.get("App.greet") == "method"
+    assert kinds.get("Config") == "interface"
+    assert "run" in s.exports and "App" in s.exports
+    args = {x.name: x.args for x in s.symbols}
+    assert args.get("run") == "(n)"
+
+
+def test_js_ts_tree_sitter_call_edges(ws_tmp):
+    from agent.code import ts_parser
+    if not ts_parser.available():
+        pytest.skip("tree-sitter 未安装")
+    (ws_tmp / "app.ts").write_text(
+        "export const run = (n) => n + 1;\n"
+        "export class App {\n"
+        "  greet() { return run(this.n); }\n"
+        "}\n"
+        "function main() { const a = new App(); return a.greet(); }\n",
+        encoding="utf-8")
+    cg = build_call_graph(str(ws_tmp))
+    assert "run" in [c for c in cg.callees_of("App.greet")]
+    assert "greet" in [c for c in cg.callees_of("main")]
+    callers = [c for c, _ in cg.callers_of("run")]
+    assert "App.greet" in callers
+
+
+def test_js_ts_regex_fallback_when_tree_sitter_missing(ws_tmp, monkeypatch):
+    from agent.code import ts_parser
+    monkeypatch.setattr(ts_parser, "available", lambda: False)
+    ts = ("import { a } from './x';\n"
+          "export const run = (n) => n + 1;\n"
+          "export class App {}\n"
+          "function util() {}\n")
+    s = summarize_file("src/app.ts", ts)
+    names = [x.name for x in s.symbols]
+    assert "run" in names and "App" in names and "util" in names
+    assert "run" in s.exports and "App" in s.exports
+    (ws_tmp / "app.js").write_text(
+        "function util() {}\nfunction main() { util(); }\n", encoding="utf-8")
+    cg = build_call_graph(str(ws_tmp))
+    assert "util" in cg.functions and "main" in cg.functions
+
+
 # ---- 1.2 调用图 ----
 def test_call_graph_python_edges(ws_tmp):
     (ws_tmp / "mod_a.py").write_text("def add(a, b): return a + b\n",
@@ -90,7 +148,8 @@ def test_call_graph_js_approx(ws_tmp):
         "function main() { util(); }\n", encoding="utf-8")
     cg = build_call_graph(str(ws_tmp))
     assert "util" in cg.functions and "main" in cg.functions
-    assert any(c == "util" for c, _ in cg.callers_of("util"))
+    # main 调用 util（tree-sitter 精确边；旧正则曾把定义行误算成自调用）
+    assert any(c == "main" for c, _ in cg.callers_of("util"))
 
 
 def test_call_graph_empty_on_missing_root():
