@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import asyncio
 import re
+import shutil
 import sys
 import time
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -125,6 +127,9 @@ async def run_tests(framework: str, target: str, workspace: str,
         return TestResult(success=False, framework=framework,
                           output=f"不支持的测试框架: {framework}",
                           duration_ms=(time.time() - start) * 1000)
+    # 修改-重测循环前清理 pyc，避免同秒同大小重写命中陈旧字节码
+    if framework in ("pytest", "unittest"):
+        _purge_pycache(workspace)
     try:
         proc = await asyncio.create_subprocess_exec(
             *argv,
@@ -181,6 +186,28 @@ def _build_argv(framework: str, target: str,
     if framework == "npm":
         return ["npm", "test"]
     return None
+
+
+def _purge_pycache(workspace: str) -> None:
+    """清空工作区 __pycache__，避免命中陈旧字节码。
+
+    importlib 以「秒级 mtime + 文件大小」校验 .pyc；Agent 修改-重测循环
+    若在 1 秒内重写同长文件，pytest 会加载旧字节码执行旧代码（Windows 常见）。
+    只清理 Python 缓存目录，跳过依赖/虚拟环境等大目录。
+    """
+    try:
+        root = Path(workspace)
+        if not root.is_dir():
+            return
+        skip = {"node_modules", ".git", ".venv", "venv", "site-packages"}
+        for p in root.rglob("__pycache__"):
+            if not p.is_dir():
+                continue
+            if skip.intersection(p.relative_to(root).parts):
+                continue
+            shutil.rmtree(p, ignore_errors=True)
+    except Exception:
+        pass
 
 
 def _extract_coverage(framework: str, output: str) -> Optional[float]:
