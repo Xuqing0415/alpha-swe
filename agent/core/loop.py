@@ -1509,11 +1509,17 @@ class AgentLoop:
             logger.warning("MCP 资源加载失败: %s", e)
 
     async def close(self) -> None:
-        """释放 MCP 连接与 Docker 沙箱等资源。"""
+        """释放 MCP 连接、Docker 沙箱与后台任务等资源。"""
         await self.mcp.disconnect_all()
         self._mcp_connected = False
         if self.docker.running:
             await self.docker.stop()
+        bg = getattr(self, "_background_tasks", None)
+        if bg is not None:
+            try:
+                await bg.manager.shutdown_all(graceful=False)
+            except Exception:
+                logger.exception("后台任务清理失败")
 
     def _collect_final(self, completed: List[Task], failed: List[Task],
                        skipped: Optional[List[Task]] = None,

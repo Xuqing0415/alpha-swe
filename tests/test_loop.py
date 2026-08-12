@@ -216,3 +216,23 @@ async def test_exec_env_injected_on_windows_fallback(ws_tmp):
     assert loop.prompt_builder.exec_env
     assert "PowerShell" in loop.prompt_builder.exec_env
 
+
+@pytest.mark.asyncio
+async def test_loop_close_cleans_background_tasks(ws_tmp):
+    """方案 2.4：会话结束 close() 应清空后台任务管理器，避免进程泄漏。"""
+    cfg = make_config(ws_tmp)
+    llm = ScriptedLLM(
+        '{"tool": "background_task", "params": {"action": "start", '
+        '"command": "python -c \\"import time; time.sleep(30)\\""}}',
+        '{"final_answer": "完成"}',
+    )
+    loop = AgentLoop(config=cfg, llm=llm, planner=StubPlanner())
+    result = await loop.run("后台任务清理测试")
+    assert result.ok
+    # 决策日志记录了 background.start（方案 2.4 决策点）
+    assert loop._decision.find(name="background.start"), \
+        "应记录 background.start 决策"
+    mgr = loop._background_tasks.manager
+    assert len(mgr.list_tasks()) == 1
+    await loop.close()
+    assert mgr.list_tasks() == []
