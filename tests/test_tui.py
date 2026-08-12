@@ -1,5 +1,7 @@
 """TUI 测试：事件格式化、事件订阅、终端实时输出桥接、Textual 无头运行。"""
 import asyncio
+import json
+import re
 from pathlib import Path
 
 import pytest
@@ -40,6 +42,33 @@ class ScriptedLLM(MockLLM):
         self.calls.append(messages)
         assert self._responses, "LLM 调用次数超出脚本"
         return self._responses.pop(0)
+
+
+class BgScriptedLLM(MockLLM):
+    """后台任务联动：首轮启动，次轮解析 task_id 查状态，最后收尾。"""
+
+    def __init__(self, command):
+        super().__init__()
+        self.command = command
+        self.calls = []
+
+    async def complete(self, messages):
+        self.calls.append(messages)
+        n = len(self.calls)
+        if n == 1:
+            return json.dumps({
+                "tool": "background_task",
+                "params": {"action": "start", "command": self.command},
+            }, ensure_ascii=False)
+        if n == 2:
+            blob = "".join(str(m.get("content", "")) for m in messages)
+            match = re.search(r"后台任务已启动: ([0-9a-f]{8})", blob)
+            assert match, f"未在上下文中解析到 task_id: {blob[:400]}"
+            return json.dumps({
+                "tool": "background_task",
+                "params": {"action": "status", "task_id": match.group(1)},
+            }, ensure_ascii=False)
+        return '{"final_answer": "后台任务联动完成"}'
 
 
 def make_config(ws_tmp: Path, **kw):
@@ -239,6 +268,9 @@ async def test_tui_cycle_views_and_render(ws_tmp):
         assert app.query_one("#timeline-view").display is True
         app.refresh_views()
         assert "总耗时" in str(app.query_one("#timeline-view").content)
+        # F5 轮换含后台视图：时间线 -> 后台 -> 日志
+        await pilot.press("f5")
+        assert app.query_one("#bg-view").display is True
         await pilot.press("f5")
         assert app.query_one("#main-log").display is True
         # F2 隐藏任务面板
@@ -993,3 +1025,44 @@ async def test_tui_file_tree_multi_select_actions(ws_tmp):
         joined = "".join(str(t) for t in app._terminal_lines[before:])
         assert "批量打开" in joined
         assert "x = 1" in joined and "y = 2" in joined
+
+
+# ---- 方案 2.4：F5 后台视图与 /bg 命令联动真实后台任务 ----
+@pytest.mark.asyncio
+async def test_tui_bg_view_and_bg_command(ws_tmp):
+    cfg = make_config(ws_tmp)
+    command = (
+        "python -c \"import time; "
+        "print('bg-up', flush=True); time.sleep(30)\""
+    )
+    llm = BgScriptedLLM(command)
+    app = AlphaSWEApp("后台联动测试", config=cfg, llm=llm,
+                      planner=StubPlanner())
+    async with app.run_test(size=(120, 40)) as pilot:
+        for _ in range(200):
+            await pilot.pause(0.05)
+            if app._finished is not None:
+                break
+        assert app._finished is not None and app._finished.ok
+        # 事件缓存应记录后台任务（manager 已被 close 清空，缓存保留快照）
+        assert app._bg_tasks, "后台任务事件缓存不应为空"
+        tid = next(iter(app._bg_tasks))
+        # F5 切到后台视图（日志 -> 变更 -> 监控 -> 时间线 -> 后台）
+        for _ in range(5):
+            await pilot.press("f5")
+            if app.query_one("#bg-view", Static).display:
+                break
+        assert app.query_one("#bg-view", Static).display is True
+        app.refresh_views()  # 与时间线视图一致：切换后主动刷新内容
+        rendered = str(app.query_one("#bg-view", Static).render())
+        assert "后台任务" in rendered and tid in rendered
+        # /bg 命令列出后台任务
+        box = await _query_input_with_retry(app, pilot, Input)
+        box.focus()
+        box.value = "/bg"
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        log = app.query_one("#main-log")
+        joined = "".join(str(line) for line in log.lines)
+        assert "后台" in joined and tid in joined

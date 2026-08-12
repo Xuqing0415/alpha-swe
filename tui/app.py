@@ -15,6 +15,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -51,7 +52,7 @@ from tui.messages import (AgentEventMessage, AgentFinishedMessage,
 logger = logging.getLogger("alpha-swe.tui")
 
 _NARROW_WIDTH = 100
-_MAIN_VIEWS = ["log", "diff", "metrics", "timeline"]
+_MAIN_VIEWS = ["log", "diff", "metrics", "timeline", "bg"]
 _PHASE_COLORS = {
     "idle": "bright_black", "planning": "cyan", "ready": "cyan",
     "running": "yellow", "waiting": "yellow",
@@ -228,7 +229,7 @@ _HELP_TEXT = """[bold]Alpha-SWE 快捷键[/bold]
 
 [green]F1[/green]  帮助      [green]F2[/green]  任务面板显示/隐藏
 [green]F3[/green]  终端全屏  [green]F4[/green]  宽屏/窄屏切换
-[green]F5[/green]  主区视图（日志/变更/监控/时间线）
+[green]F5[/green]  主区视图（日志/变更/监控/时间线/后台）
 [green]F6[/green]  任务面板/文件树切换
 [green]Ctrl+I[/green]  注入指令    [green]Ctrl+P[/green]  暂停/继续
 [green]Ctrl+R[/green]  重试当前步骤 [green]Ctrl+S[/green]  跳过当前步骤
@@ -241,6 +242,7 @@ _HELP_TEXT = """[bold]Alpha-SWE 快捷键[/bold]
 [bold]输入命令（/ 开头）[/bold]
 /pause 暂停   /resume 恢复   /status 详细状态
 /retry 重试   /skip 跳过     /quit 退出
+/bg 后台任务列表  /bg <id> 日志  /bg stop <id> 停止
 
 [bold]日志类型[/bold]
 [cyan]THINK[/cyan] 思考   [white]ACT[/white] 动作   OBS 观察
@@ -435,6 +437,7 @@ class AlphaSWEApp(App[None]):
         self._layout_override: Optional[str] = None
         self._task_panel_visible = True
         self._session_id = uuid.uuid4().hex[:6]
+        self._bg_tasks: Dict[str, Dict[str, Any]] = {}  # 后台任务事件追踪
 
     # ---- 装配 ----
     def _make_runner(self) -> AgentRunner:
@@ -463,6 +466,7 @@ class AlphaSWEApp(App[None]):
                                   wrap=True, auto_scroll=True)
                     yield Static("", id="metrics-view", markup=True)
                     yield TimelineView(id="timeline-view")
+                    yield Static("", id="bg-view", markup=True)
                     with Vertical(id="terminal-box"):
                         yield Label("终端输出", id="terminal-title")
                         yield RichLog(id="terminal-log", highlight=True,
@@ -515,6 +519,8 @@ class AlphaSWEApp(App[None]):
         self._append_thought(format_event(record))
         # 工具调用时在终端区显示分隔与命令摘要，同时进入文件变更视图
         if record.get("type") == "tool_call":
+            if record["data"].get("tool") == "background_task":
+                self._track_bg_event(record["data"])
             self._append_terminal(
                 Text(f"--- {record['data'].get('tool', '')} ---------------",
                      style="dim"))
@@ -683,6 +689,10 @@ class AlphaSWEApp(App[None]):
             lines.append(f"进度: {_progress_bar(pct)} {pct}%")
         else:
             lines.append("  （暂无任务）")
+        bg_running = sum(1 for r in self._bg_rows()
+                         if r.get("status") == "running")
+        if bg_running:
+            lines.append(f"后台任务: {bg_running} 个运行中（F5 后台视图）")
         lines.append(f"耗时: {_fmt_elapsed(time.monotonic() - self._started_at)}")
         panel.update("\n".join(lines))
 
@@ -702,7 +712,8 @@ class AlphaSWEApp(App[None]):
         max_rounds = getattr(loop, "_max_rounds", 0) if loop else 0
         r_style = "yellow" if (max_rounds and rounds / max_rounds >= 0.9) else "white"
         view_names = {"log": "日志", "diff": "变更",
-                      "metrics": "监控", "timeline": "时间线"}
+                      "metrics": "监控", "timeline": "时间线",
+                      "bg": "后台"}
         view_hint = f"[{view_names.get(self._main_view, self._main_view)}]"
         if self._main_view == "log":
             try:
@@ -717,6 +728,7 @@ class AlphaSWEApp(App[None]):
             f"round: [{r_style}]{rounds}/{max_rounds}[/] | "
             f"mem: {self._memory_usage()} | session: {self._session_id}"
             f" | {left_hint} | {view_hint}"
+            + self._bg_status_hint()
         )
 
     def _update_compact_header(self) -> None:
@@ -778,6 +790,8 @@ class AlphaSWEApp(App[None]):
         mon.update("\n".join(lines))
         if self._main_view == "timeline":
             self._update_timeline()
+        if self._main_view == "bg":
+            self._update_bg_view()
 
     def _update_timeline(self) -> None:
         """把 tracer span 渲染为 ASCII 时间线（宽屏横向 / 窄屏瀑布）。"""
@@ -876,12 +890,139 @@ class AlphaSWEApp(App[None]):
             self._inject("重试当前步骤" + (f"：{rest}" if rest else ""))
         elif cmd == "/skip":
             self._inject("跳过当前步骤" + (f"：{rest}" if rest else ""))
+        elif cmd == "/bg":
+            self._append_bg_status(rest)
         elif cmd == "/quit":
             self.exit()
         else:
             self._append_thought(
                 Text(f"未知命令: {cmd}（F1 查看帮助）", style="yellow"))
         self.refresh_status()
+
+    # ---- 后台任务联动（方案 2.4：TUI 实时状态/日志视图） ----
+    def _bg_rows(self) -> List[Dict[str, Any]]:
+        """后台任务实时快照：优先查 manager，事件缓存补全。"""
+        rows: Dict[str, Dict[str, Any]] = {}
+        runner = self.runner
+        loop = runner.loop if runner else None
+        tool = getattr(loop, "_background_tasks", None) if loop else None
+        if tool is not None:
+            mgr = tool.manager
+            for tid in mgr.list_tasks():
+                h = mgr.status(tid)
+                if h is None:
+                    continue
+                rows[tid] = {
+                    "id": tid, "command": h.command[:60],
+                    "status": h.status(),
+                    "uptime": round(h.uptime(), 1),
+                    "exit_code": h.exit_code,
+                }
+        for tid, info in self._bg_tasks.items():
+            rows.setdefault(tid, dict(info))
+        return sorted(rows.values(), key=lambda r: r["id"])
+
+    def _track_bg_event(self, data: dict) -> None:
+        """background_task 工具调用事件 -> 更新 TUI 任务缓存。"""
+        params = data.get("params") or {}
+        meta = data.get("meta") or {}
+        action = params.get("action")
+        tid = meta.get("task_id") or params.get("task_id")
+        if not tid:
+            return
+        info = self._bg_tasks.setdefault(tid, {
+            "id": tid, "command": params.get("command", ""),
+            "status": "unknown", "uptime": 0,
+        })
+        if action == "start":
+            info.update(status="running",
+                        command=params.get("command", ""), uptime=0)
+        elif action == "status":
+            if meta.get("status"):
+                info["status"] = meta["status"]
+            if meta.get("exit_code") is not None:
+                info["exit_code"] = meta["exit_code"]
+            if meta.get("uptime") is not None:
+                info["uptime"] = meta["uptime"]
+        elif action == "stop":
+            info.update(status="stopped", exit_code=0)
+        elif action == "logs" and meta.get("status"):
+            info["status"] = meta["status"]
+
+    def _update_bg_view(self) -> None:
+        """后台任务视图（F5 切到 bg）：状态列表 + 操作提示。"""
+        view = self.query_one("#bg-view", Static)
+        rows = self._bg_rows()
+        if not rows:
+            view.update(
+                "后台任务: （无）\n\n"
+                "Agent 可通过 background_task 工具启动长驻进程"
+                "（如开发服务器），随后用 status/logs/stop 管理。")
+            return
+        lines = [f"后台任务: {len(rows)} 个"]
+        for r in rows:
+            st = r.get("status", "unknown")
+            color = {"running": "yellow", "stopped": "green",
+                     "crashed": "red"}.get(st, "white")
+            line = (f"  [{color}]{st.rjust(8)}[/] {r['id']}  "
+                    f"uptime {r.get('uptime', '-')}s  "
+                    f"{r.get('command', '')}")
+            if r.get("exit_code") is not None:
+                line += f"  exit={r['exit_code']}"
+            lines.append(line)
+        lines.append("")
+        lines.append("命令: /bg 列表  /bg <id> 日志  /bg stop <id> 停止")
+        view.update("\n".join(lines))
+
+    def _bg_status_hint(self) -> str:
+        """状态栏后台运行计数（无任务时为空串）。"""
+        n = sum(1 for r in self._bg_rows()
+                if r.get("status") == "running")
+        return f" | 后台: {n}" if n else ""
+
+    def _append_bg_status(self, rest: str) -> None:
+        """/bg 命令：无参列出任务；/bg <id> 日志；/bg stop <id> 停止。"""
+        runner = self.runner
+        loop = runner.loop if runner else None
+        tool = getattr(loop, "_background_tasks", None) if loop else None
+        if tool is None:
+            self._append_thought(Text("后台任务管理器不可用（Agent 未运行）",
+                                      style="yellow"))
+            return
+        mgr = tool.manager
+        parts = rest.split()
+        if not parts:
+            rows = self._bg_rows()
+            if not rows:
+                self._append_thought(Text("后台任务: （无）",
+                                          style="bright_black"))
+                return
+            for r in rows:
+                self._append_thought(Text(
+                    f"后台 {r['id']} [{r.get('status')}] "
+                    f"uptime={r.get('uptime', '-')}s "
+                    f"{r.get('command', '')}",
+                    style="bright_black"))
+            return
+        if parts[0] == "stop" and len(parts) > 1:
+            tid = parts[1]
+
+            async def _stop_task() -> None:
+                try:
+                    msg = await mgr.stop(tid, graceful=True)
+                    self._append_thought(Text(f"后台停止: {msg}",
+                                              style="green"))
+                except Exception as e:
+                    self._append_thought(Text(f"后台停止失败: {e}",
+                                              style="red"))
+                self.refresh_status()
+
+            asyncio.create_task(_stop_task())
+            return
+        tid = parts[0]
+        body = mgr.tail_logs(tid, lines=30)
+        self._append_thought(Text(f"[后台 {tid} 日志]\n{body}",
+                                  style="bright_black"))
 
     def _append_status_line(self) -> None:
         runner = self.runner
@@ -1053,6 +1194,7 @@ class AlphaSWEApp(App[None]):
             self._main_view == "metrics")
         self.query_one("#timeline-view", TimelineView).display = (
             self._main_view == "timeline")
+        self.query_one("#bg-view", Static).display = self._main_view == "bg"
         if self._main_view == "timeline":
             self.query_one("#timeline-view", TimelineView).focus()
         elif prev == "timeline":
