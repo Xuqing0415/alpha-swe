@@ -262,6 +262,10 @@ class AgentConfig(BaseModel):
     session_archive_dir: str = "./logs/sessions"  # 会话档案目录（事件+span+决策+指标）
     archive_enabled: bool = True            # 会话档案写入开关
     metrics_enabled: bool = True            # 实时指标注册表开关
+    # 第 9 节：Web 观测面板（python -m tui --web，或置 True 自动开启）
+    web_panel_enabled: bool = False
+    web_panel_host: str = "127.0.0.1"
+    web_panel_port: int = 8765
 
 
 class MCPClientConfig(BaseModel):

@@ -25,22 +25,51 @@ def main(argv=None) -> int:
                         help="回放一个会话档案 JSON（阶段七 7.3）")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="输出调试日志")
+    parser.add_argument("--web", action="store_true",
+                        help="启动 Web 观测面板（第 9 节）")
+    parser.add_argument("--web-port", type=int, default=None,
+                        help="Web 面板端口（默认读配置 agent.web_panel_port）")
     args = parser.parse_args(argv)
 
     if args.replay:
         return replay_session(args.replay)
 
-    # logging 重定向到文件并转发 WARNING+ 到 TUI：杜绝向 stdout 打印导致屏幕乱码
-    bridge = install_tui_logging(args.verbose)
-
     prompt = " ".join(args.prompt).strip() or "分析当前项目结构并给出改进建议"
     config = load_config(args.config)
     mcp_manager = MCPManager.from_config(load_mcp_config(), config.mcp)
 
+    # logging 重定向到文件并转发 WARNING+ 到 TUI：杜绝向 stdout 打印导致屏幕乱码
+    bridge = install_tui_logging(
+        args.verbose,
+        json_log_dir=config.agent.structured_log_dir or None)
+
     app = AlphaSWEApp(prompt, config=config, mcp_manager=mcp_manager,
                       log_handler=bridge)
+
+    # 第 9 节：Web 观测面板（--web 或 config.agent.web_panel_enabled）
+    web_server = None
+    if args.web or config.agent.web_panel_enabled:
+        from agent.observability.web import (ObservabilityHub,
+                                              ObservabilityServer)
+        hub = ObservabilityHub(
+            loop_provider=lambda: app.runner.loop if app.runner else None,
+            archive_dir=config.agent.session_archive_dir,
+            prompt=prompt,
+            session_id=app._session_id,
+        )
+        web_server = ObservabilityServer(
+            hub, host=config.agent.web_panel_host,
+            port=args.web_port or config.agent.web_panel_port)
+        web_server.start()
+        print(f"Web 观测面板: {web_server.url}（退出 TUI 后自动关闭）",
+              flush=True)
+
     bridge.set_app(app)
-    app.run()
+    try:
+        app.run()
+    finally:
+        if web_server is not None:
+            web_server.stop()
     return 0
 
 

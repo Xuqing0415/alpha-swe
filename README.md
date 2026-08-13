@@ -286,6 +286,15 @@ python -X utf8 scripts/analyze_decisions.py
 - `SessionReplay` 按时间戳合并排序生成时间线，支持单步回放；CLI 用法：
   `python -m tui --replay logs/sessions/session_xxx.json`
 
+### Web 观测面板（第 9 节，`agent/observability/web.py`）
+- `ObservabilityHub` 把 AgentLoop 运行时状态聚合成只读快照
+  （status / metrics / spans / decisions / events / sessions），线程安全；
+- `ObservabilityServer`（标准库 ThreadingHTTPServer）提供 JSON API、SSE 实时
+  事件流与单文件 HTML 面板（无构建链、无第三方依赖）：概览指标卡片、Span
+  甘特图与树、决策明细、事件流、会话档案浏览；
+- 启动：`python -m tui --web "任务提示词"`（或 `agent.web_panel_enabled: true`），
+  默认 `http://127.0.0.1:8765`（`web_panel_host` / `web_panel_port` 可配）。
+
 ### TUI 多视图与用户干预（`tui/app.py`）
 - 纯终端 UI 设计（无 emoji / 无 256 色）：左栏任务面板（任务名 / 阶段 / 任务树 / 进度条 / 耗时，F6 可切换文件树）、
   主日志区（DataTable 三列虚拟滚动，`[HH:MM:SS] TYPE 内容` 八类语义色）、
@@ -350,5 +359,5 @@ python -m tui --config config/agent.yaml "修复失败的测试"
 6. ~~Textual TUI 三栏布局~~（已完成，见 `tui/` 与第 14 节）+ WebSocket 事件订阅（待接入）；
 7. ~~可观测性：分布式追踪 / 实时指标 / 会话档案与回放~~（已完成，阶段七，见 `agent/observability/`）；
 8. ~~TUI 交互升级：多视图 / 确认弹窗 / 修改参数后执行 / 回放 CLI~~（已完成，阶段八，见 `tui/`）；
-9. Web 观测面板（React + WebSocket 甘特图/火焰图，可选，见设计第 14.4 节）；
+9. ~~Web 观测面板（HTTP API + SSE 实时事件 + 单文件 HTML 面板，`--web` 启动，见 `agent/observability/web.py`）~~（已完成，第 9 节）；
 10. OpenTelemetry 导出到 Jaeger 与结构化 JSON 日志。
