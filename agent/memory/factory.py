@@ -38,11 +38,15 @@ def build_memory(config: Optional[MemoryConfig] = None) -> MemoryStore:
         return NoopMemoryStore()
 
     if backend == "sqlite":
-        return SqliteMemoryStore(db_path=config.db_path,
-                                 max_entities=config.max_entities,
-                                 decay_days=config.decay_days,
-                                 decay_factor=config.decay_factor,
-                                 counter_example_penalty=config.counter_example_penalty)
+        try:
+            return SqliteMemoryStore(db_path=config.db_path,
+                                     max_entities=config.max_entities,
+                                     decay_days=config.decay_days,
+                                     decay_factor=config.decay_factor,
+                                     counter_example_penalty=config.counter_example_penalty)
+        except Exception as e:
+            logger.error("sqlite 后端不可用，降级到无记忆模式: %s", e)
+            return NoopMemoryStore()
 
     if backend == "hybrid":
         return HybridLocalMemoryStore(
@@ -79,22 +83,26 @@ def build_memory(config: Optional[MemoryConfig] = None) -> MemoryStore:
             logger.warning("qdrant 后端不可用，回退 hybrid: %s", e)
 
     # auto / 兜底
-    for ctor, name in ((ChromaMemoryStore, "chroma"), (QdrantMemoryStore, "qdrant")):
-        try:
-            return ctor(db_path=config.db_path, collection=config.collection,
-                        embedder=_embedder(),
-                        decay_days=config.decay_days,
-                        decay_factor=config.decay_factor,
-                        counter_example_penalty=config.counter_example_penalty)
-        except Exception as e:
-            logger.info("%s 后端不可用: %s", name, e)
-    return HybridLocalMemoryStore(
-        db_path=config.db_path,
-        max_entities=config.max_entities,
-        embedder=_embedder(),
-        vector_weight=config.hybrid_weight_vector,
-        max_code_chars=config.max_code_index_chars,
-        decay_days=config.decay_days,
-        decay_factor=config.decay_factor,
-        counter_example_penalty=config.counter_example_penalty,
-    )
+    try:
+        for ctor, name in ((ChromaMemoryStore, "chroma"), (QdrantMemoryStore, "qdrant")):
+            try:
+                return ctor(db_path=config.db_path, collection=config.collection,
+                            embedder=_embedder(),
+                            decay_days=config.decay_days,
+                            decay_factor=config.decay_factor,
+                            counter_example_penalty=config.counter_example_penalty)
+            except Exception as e:
+                logger.info("%s 后端不可用: %s", name, e)
+        return HybridLocalMemoryStore(
+            db_path=config.db_path,
+            max_entities=config.max_entities,
+            embedder=_embedder(),
+            vector_weight=config.hybrid_weight_vector,
+            max_code_chars=config.max_code_index_chars,
+            decay_days=config.decay_days,
+            decay_factor=config.decay_factor,
+            counter_example_penalty=config.counter_example_penalty,
+        )
+    except Exception as e:
+        logger.error("记忆后端全部不可用，降级到无记忆模式: %s", e)
+        return NoopMemoryStore()

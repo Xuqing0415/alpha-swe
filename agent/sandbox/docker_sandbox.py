@@ -138,9 +138,9 @@ class DockerSandbox:
             self._log("docker.disabled", "sandbox.docker_enabled", False,
                       "Docker 沙箱未启用，跳过容器创建")
             return ""
-        client = self._docker()
-        spec = self.build_container_spec(workspace)
         try:
+            client = self._docker()
+            spec = self.build_container_spec(workspace)
             image = await self._ensure_image(client, spec["image"])
             self._image = str(getattr(image, "id", spec["image"]))
             create_kw: Dict[str, Any] = dict(

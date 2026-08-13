@@ -87,16 +87,18 @@ class SandboxPolicy:
         except PermissionError as e:
             self._violate(str(e))
             return False, str(e)
-        # 写操作检查黑名单目录
+        # 写/删操作检查黑名单目录与受保护路径（收敛期 P0：删除同样受保护）
         action = params.get("action", "")
-        if action in ("write", "append", "edit"):
+        if action in ("write", "append", "edit", "delete", "rm"):
+            deleting = action in ("delete", "rm")
+            verb = "删除" if deleting else "写入"
             for blocked in self.blocked_paths:
                 if self._is_under(target, blocked):
-                    self._violate(f"写入被禁止目录: {blocked}")
-                    return False, f"禁止写入系统目录: {blocked}"
+                    self._violate(f"{verb}被禁止目录: {blocked}")
+                    return False, f"禁止{verb}系统目录: {blocked}"
             if self._is_protected(path):
-                self._violate(f"写入受保护路径: {path}")
-                return False, f"禁止修改受保护文件: {path}"
+                self._violate(f"{verb}受保护路径: {path}")
+                return False, f"禁止{verb}受保护文件: {path}"
         return True, ""
 
     # ---- Git ----

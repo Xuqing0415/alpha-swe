@@ -158,6 +158,8 @@ class LLMConfig(BaseModel):
     api_key_env: str = ""
     temperature: float = Field(default=0.2, ge=0, le=2)
     max_tokens: int = 2048
+    timeout: float = 120.0     # 单次 LLM 调用超时秒数（收敛期 P0：超时管控）
+    max_retries: int = 2       # 瞬时失败指数退避重试次数（耗尽抛 LLMServiceError）
 
 
 class WorkerRoleConfig(BaseModel):
