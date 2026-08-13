@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("alpha-swe.obs.trace")
+from agent.observability.otel import OtlpExporter
 
 
 @dataclass
@@ -64,7 +65,11 @@ class Tracer:
     """span 生命周期与导出；enabled=False 时零成本跳过。"""
 
     def __init__(self, trace_dir: Optional[str] = "./logs/traces",
-                 enabled: bool = True, decision_logger=None):
+                 enabled: bool = True, decision_logger=None,
+                 otlp_endpoint: str = "",
+                 otlp_enabled: bool = False,
+                 service_name: str = "alpha-swe",
+                 otlp_exporter=None):
         self.trace_dir = Path(trace_dir) if trace_dir else None
         self.enabled = enabled
         self._decision = decision_logger
@@ -72,6 +77,14 @@ class Tracer:
         self._stack: List[Span] = []
         self._trace_id = uuid.uuid4().hex[:16]
         self._lock = threading.Lock()
+        # 第 10 节：OTLP/HTTP 导出（Jaeger v2 / Collector / Tempo）
+        self._otlp = otlp_exporter
+        if self._otlp is None and (otlp_endpoint or otlp_enabled):
+            self._otlp = OtlpExporter(
+                endpoint=otlp_endpoint, enabled=otlp_enabled,
+                service_name=service_name,
+                decision_logger=self._decision,
+            )
 
     def start_span(self, name: str, kind: str = "task",
                    parent: Optional[Span] = None,
@@ -162,10 +175,17 @@ class Tracer:
                     f"导出 {len(rows)} 个 span 到 {path.name}",
                 )
             logger.info("trace 导出 %d spans -> %s", len(rows), path)
+            self._export_otlp(rows)
             return len(rows)
         except OSError as e:
             logger.warning("trace 导出失败: %s", e)
             return 0
+
+    def _export_otlp(self, rows: List[Dict[str, Any]]) -> None:
+        """把本次快照推送到 OTLP 端点（失败静默，见 OtlpExporter）。"""
+        if self._otlp is None:
+            return
+        self._otlp.export(rows)
 
     def clear(self) -> None:
         with self._lock:

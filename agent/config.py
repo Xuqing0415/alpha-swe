@@ -266,6 +266,11 @@ class AgentConfig(BaseModel):
     web_panel_enabled: bool = False
     web_panel_host: str = "127.0.0.1"
     web_panel_port: int = 8765
+    # 第 10 节：OpenTelemetry/Jaeger 导出与结构化 JSON 日志
+    otel_enabled: bool = False              # 是否启用 OTLP 导出
+    otel_endpoint: str = ""                 # OTLP/HTTP 基址，如 http://127.0.0.1:4318
+    otel_service_name: str = "alpha-swe"
+    structured_log_dir: str = ""            # 空 = 关闭 JSONL 结构化日志
 
 
 class MCPClientConfig(BaseModel):

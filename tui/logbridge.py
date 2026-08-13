@@ -65,11 +65,13 @@ class TuiLogHandler(logging.Handler):
 
 
 def install_tui_logging(verbose: bool = False,
-                        log_file: Optional[str] = None) -> TuiLogHandler:
+                        log_file: Optional[str] = None,
+                        json_log_dir: Optional[str] = None) -> TuiLogHandler:
     """把 logging 重定向到文件，并挂载转发到 TUI 的 handler。
 
     移除既有 stdout/console handler，避免日志与 Textual 屏幕交错产生乱码；
-    文件始终保存全量日志（含 DEBUG），TUI 默认只转发 INFO+（可 Ctrl+L 切换）。
+    文件始终保存全量日志（含 DEBUG），TUI 默认只转发 INFO+（可 Ctrl+L 切换）；
+    json_log_dir 非空时同时挂载结构化 JSONL handler（第 10 节）。
     """
     root = logging.getLogger()
     for handler in list(root.handlers):
@@ -90,6 +92,13 @@ def install_tui_logging(verbose: bool = False,
     root.addHandler(bridge)
     # 根级别恒为 DEBUG：文件 handler 全量落盘，界面过滤交给桥的级别
     root.setLevel(logging.DEBUG)
+    if json_log_dir:
+        try:
+            from agent.observability.otel import JsonLinesLogHandler
+            root.addHandler(JsonLinesLogHandler(
+                json_log_dir, session_id=_SESSION_ID))
+        except Exception:
+            logger.warning("结构化 JSONL 日志初始化失败")
     return bridge
 
 

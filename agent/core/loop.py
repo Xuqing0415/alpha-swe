@@ -111,6 +111,9 @@ class AgentLoop:
             self.config.agent.trace_dir,
             self.config.agent.trace_enabled,
             self._decision,
+            otlp_endpoint=self.config.agent.otel_endpoint,
+            otlp_enabled=self.config.agent.otel_enabled,
+            service_name=self.config.agent.otel_service_name,
         )
         self.metrics = MetricsRegistry(self.config.agent.metrics_enabled)
         self.archive = SessionArchive(

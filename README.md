@@ -49,7 +49,7 @@ loop.py, scheduler.py, ... 旧版七层原型（保留，作为对照参考）
 | 11 上下文压缩 | `agent/context/manager.py` | 已实现分级（light 压工具输出/medium 保留决策点/heavy 递归摘要），长输出关键行提取 + 原始存档引用，压缩决策日志（级别/前后 token/丢弃消息 ID），见 `test_compression_quality.py` |
 | 12 沙箱 | `agent/sandbox/policy.py` + `agent/sandbox/audit.py` + `agent/sandbox/docker_sandbox.py` | 已实现（阶段五）：路径锚定/危险命令拦截；网络细粒度策略 deny\|allowlist\|allow + 假网络 + 请求审计；受保护路径防删/防写；文件操作审计与回滚；资源熔断。容器生命周期（阶段五后）：docker-py 惰性加载、start/exec_run/文件读写/快照 commit/回滚重建/超时 kill/stats，docker_enabled 时工具路由进容器 |
 | 13 MCP | `agent/mcp/`（client/manager/tool）+ `config/mcp.yaml` + `mcp-servers/` | 已实现（阶段六）：stdio/sse/streamable-http 客户端、握手、工具合并、资源注入 Prompt；断连自动重连与降级隐藏（ensure_connected/retry_connect）；资源缓存 TTL；自研 TS 服务器（knowledge-base/issue-tracker） |
-| 14 可观测性 | `tui/`（Textual 三栏）+ `AgentLoop.subscribe()` + 终端实时输出回调 | 已实现（思维流/终端流/状态栏/Ctrl+I 中断/Ctrl+P 暂停）；Web 面板与 OTel 导出待接入 |
+| 14 可观测性 | `tui/`（Textual 三栏）+ `AgentLoop.subscribe()` + 终端实时输出回调 + `agent/observability/web.py` + `agent/observability/otel.py` | 已实现（思维流/终端流/状态栏/Ctrl+I 中断/Ctrl+P 暂停）；Web 观测面板（`--web`）与 OTLP/Jaeger 导出、结构化 JSONL 日志（第 9/10 节） |
 | 配置→运行时数据流 | `agent/config.py` + `agent/core/decision_logger.py` + `agent/sandbox/docker_sandbox.py` + `scripts/analyze_decisions.py` | 已实现：YAML→Pydantic→组件工厂→运行时决策点；JSONL 决策日志；default/aggressive A/B 对比测试 |
 
 ## 长期记忆（第 7 节）
@@ -295,6 +295,13 @@ python -X utf8 scripts/analyze_decisions.py
 - 启动：`python -m tui --web "任务提示词"`（或 `agent.web_panel_enabled: true`），
   默认 `http://127.0.0.1:8765`（`web_panel_host` / `web_panel_port` 可配）。
 
+### OpenTelemetry/Jaeger 导出与结构化日志（第 10 节，`agent/observability/otel.py`）
+- `OtlpExporter` 把 span 映射为 OTLP/HTTP JSON 导出到 Collector / Jaeger v2 /
+  Tempo 的 `/v1/traces`（`agent.otel_endpoint`，如 `http://127.0.0.1:4318`；
+  `otel_enabled` 开关）；失败静默降级并记录 `otel.export` 决策点，本地 JSONL 始终保留；
+- `JsonLinesLogHandler` 把 logging 记录写成结构化 JSONL
+  （`agent.structured_log_dir`），供 Loki/ELK 接入。
+
 ### TUI 多视图与用户干预（`tui/app.py`）
 - 纯终端 UI 设计（无 emoji / 无 256 色）：左栏任务面板（任务名 / 阶段 / 任务树 / 进度条 / 耗时，F6 可切换文件树）、
   主日志区（DataTable 三列虚拟滚动，`[HH:MM:SS] TYPE 内容` 八类语义色）、
@@ -360,4 +367,4 @@ python -m tui --config config/agent.yaml "修复失败的测试"
 7. ~~可观测性：分布式追踪 / 实时指标 / 会话档案与回放~~（已完成，阶段七，见 `agent/observability/`）；
 8. ~~TUI 交互升级：多视图 / 确认弹窗 / 修改参数后执行 / 回放 CLI~~（已完成，阶段八，见 `tui/`）；
 9. ~~Web 观测面板（HTTP API + SSE 实时事件 + 单文件 HTML 面板，`--web` 启动，见 `agent/observability/web.py`）~~（已完成，第 9 节）；
-10. OpenTelemetry 导出到 Jaeger 与结构化 JSON 日志。
+10. ~~OpenTelemetry 导出到 Jaeger（OTLP/HTTP JSON，见 `agent/observability/otel.py`）与结构化 JSONL 日志~~（已完成，第 10 节）。
