@@ -40,6 +40,9 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from agent.config import AppConfig, load_config
 from agent.core.loop import AgentLoop, LoopResult
+from agent.observability.archive import (
+    files_modified_from_events as extract_files_modified,
+)
 
 EXIT_OK = 0
 EXIT_FAILED = 1
@@ -150,29 +153,6 @@ def estimate_cost(counters: Dict[str, Any], rate_per_1k: float) -> float:
     """按 metrics 的 token_usage 计数估算成本（美元）。"""
     tokens = float(counters.get("token_usage", 0.0) or 0.0)
     return round(tokens / 1000.0 * rate_per_1k, 6)
-
-
-def extract_files_modified(events: List[Dict[str, Any]]) -> List[str]:
-    """从事件流提取被写/编辑/追加/删除的文件路径（去重保序）。"""
-    seen: set = set()
-    out: List[str] = []
-    for ev in events:
-        if ev.get("type") != "tool_call":
-            continue
-        data = ev.get("data") or {}
-        if not data.get("success"):
-            continue
-        if data.get("tool") != "file_ops":
-            continue
-        params = data.get("params") or {}
-        action = params.get("action")
-        if action not in ("write", "edit", "append", "delete", "rm"):
-            continue
-        path = params.get("path")
-        if path and path not in seen:
-            seen.add(path)
-            out.append(str(path))
-    return out
 
 
 def make_payload(result: Optional[LoopResult], loop: AgentLoop,

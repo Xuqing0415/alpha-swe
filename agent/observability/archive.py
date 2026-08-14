@@ -123,4 +123,109 @@ class SessionReplay:
         return rows[index]
 
 
-__all__ = ["SessionArchive", "SessionReplay"]
+def files_modified_from_events(events: List[Dict[str, Any]]) -> List[str]:
+    """从事件流提取被写/编辑/追加/删除的文件路径（去重保序）。
+
+    与 CLI 输出的 files_modified 同源，供会话档案分析与复盘使用。
+    """
+    seen: set = set()
+    out: List[str] = []
+    for ev in events:
+        if ev.get("type") != "tool_call":
+            continue
+        data = ev.get("data") or {}
+        if not data.get("success"):
+            continue
+        if data.get("tool") != "file_ops":
+            continue
+        params = data.get("params") or {}
+        action = params.get("action")
+        if action not in ("write", "edit", "append", "delete", "rm"):
+            continue
+        path = params.get("path")
+        if path and path not in seen:
+            seen.add(path)
+            out.append(str(path))
+    return out
+
+
+def summarize_session(doc: Dict[str, Any]) -> Dict[str, Any]:
+    """生成长任务会话复盘摘要（阶段二 2.3 事后分析）。
+
+    输入为 SessionArchive 写入的会话档案（schema: alpha-swe-session-v1），
+    输出覆盖：完成状态、轮次/token、工具调用成功率、重试、压缩触发时机
+    （是否过早）、任务进度、修改文件与错误清单。
+    """
+    result = doc.get("result") or {}
+    metrics = doc.get("metrics") or {}
+    counters = metrics.get("counters", {}) or {}
+    gauges = metrics.get("gauges", {}) or {}
+    events = doc.get("events", []) or []
+    decisions = doc.get("decisions", []) or []
+
+    tool_events = [e for e in events
+                   if e.get("type") == "tool_call" and e.get("data")]
+    tool_ok = [e for e in tool_events if e["data"].get("success")]
+    tool_fail = [e for e in tool_events if not e["data"].get("success")]
+
+    # 首次实际压缩发生的时机：按时间戳找第一条 compression_level 决策，
+    # 统计其之前已发生的 think/tool_call 决策点数量（>0 说明不是开局即压）。
+    compression_decisions = [
+        d for d in decisions if d.get("name") == "compression_level"
+    ]
+    compression_total = int(counters.get("compressions", 0) or 0)
+    compression_first_after_events = 0
+    if compression_decisions:
+        first_ts = min(
+            float(d.get("timestamp", 0.0)) for d in compression_decisions)
+        decision_points = [
+            e for e in events
+            if e.get("type") in ("think", "tool_call", "task_start")
+        ]
+        compression_first_after_events = sum(
+            1 for e in decision_points if float(e.get("ts", 0.0)) < first_ts)
+
+    tool_calls = int(counters.get("tool_calls", 0) or 0)
+    failures = int(counters.get("tool_failures", 0) or 0)
+    errors = [
+        str(e["data"].get("output", ""))[:200]
+        for e in tool_fail if e["data"].get("output")
+    ]
+    if not errors and not result.get("ok"):
+        errors = [str(result.get("final_answer", "") or "")[:200]]
+
+    return {
+        "session_id": doc.get("session_id", ""),
+        "ok": bool(result.get("ok", False)),
+        "phase": str(result.get("phase", "")),
+        "final_answer": str(result.get("final_answer", "")),
+        "rounds": int(gauges.get("rounds", 0)
+                      or result.get("total_rounds", 0) or 0),
+        "llm_calls": int(counters.get("llm_calls", 0) or 0),
+        "tokens": int(counters.get("token_usage", 0) or 0),
+        "tool_calls": tool_calls,
+        "tool_failures": failures,
+        "tool_success_rate": round(
+            (tool_calls - failures) / tool_calls, 3) if tool_calls else None,
+        "retries": int(counters.get("retries", 0) or 0),
+        "compressions": compression_total,
+        "compression_first_after_events": compression_first_after_events,
+        "tasks": {
+            "total": int(gauges.get("tasks_total", 0) or 0),
+            "completed": int(gauges.get("tasks_completed", 0) or 0),
+            "failed": int(gauges.get("tasks_failed", 0) or 0),
+            "skipped": int(gauges.get("tasks_skipped", 0) or 0),
+        },
+        "files_modified": files_modified_from_events(events),
+        "decisions": len(decisions),
+        "events": len(events),
+        "spans": len(doc.get("spans", []) or []),
+        "errors": errors,
+    }
+
+
+__all__ = [
+    "SessionArchive", "SessionReplay",
+    "files_modified_from_events", "summarize_session",
+]
+
