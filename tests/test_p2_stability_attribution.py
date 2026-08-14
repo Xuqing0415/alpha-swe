@@ -410,6 +410,107 @@ def test_cli_timeout_payload_attribution_unknown(ws_tmp, capsys):
 
 # ---- 会话复盘脚本输出归因 ----
 
+# ---- 归因规则修复回归：事件级失败信号 / 优先级 / 中断 ----
+
+def _load_latest_archive(ws_tmp) -> dict:
+    from agent.observability.archive import SessionArchive
+    sessions = sorted((ws_tmp / "logs" / "sessions").glob("session_*.json"))
+    assert sessions, "应生成会话档案"
+    return SessionArchive.load(str(sessions[-1]))
+
+
+def test_classify_degenerate_abort_via_events():
+    """空参数保护只发 tool_call 失败事件、不计 metrics 时也应归工具失败。"""
+    events = [
+        {"type": "tool_call", "data": {
+            "tool": "file_ops", "success": False,
+            "params": {"action": "read"},
+            "output": "[file_ops] 参数错误: 缺少必需参数 ['path']"}},
+        {"type": "tool_call", "data": {
+            "tool": "file_ops", "success": False,
+            "params": {"action": "read"},
+            "output": "[file_ops] 参数错误: 缺少必需参数 ['path']"}},
+    ]
+    attr = classify_failure(events=events, metrics={"counters": {}})
+    assert attr["category"] == "tool", "事件级工具失败应归 tool 而非 unknown"
+
+
+def test_classify_testing_beats_general_tool_counter():
+    """测试失败信号优先于泛化 tool_failures 计数（避免 testing 分支不可达）。"""
+    events = [{"type": "tool_call", "data": {
+        "tool": "run_tests", "success": False, "output": "2 failed"}}]
+    attr = classify_failure(
+        events=events, metrics={"counters": {"tool_failures": 1}})
+    assert attr["category"] == "testing"
+
+
+def test_classify_retrieval_beats_tool_counter():
+    """检索失败信号优先于泛化 tool_failures 计数。"""
+    events = [{"type": "tool_call", "data": {
+        "tool": "file_search", "success": False, "output": "搜索执行失败"}}]
+    attr = classify_failure(
+        events=events, metrics={"counters": {"tool_failures": 1}})
+    assert attr["category"] == "retrieval"
+
+
+def test_classify_interrupt():
+    attr = classify_failure(metrics={"counters": {"interrupts": 2}})
+    assert attr["category"] == "interrupt"
+    assert attr["label"] == "用户中断"
+
+
+def test_agentloop_degenerate_abort_counts_metrics(ws_tmp):
+    """空参数连续 3 次触发保护性中止：metrics 计数、决策点与归因一致。"""
+    ws = ws_tmp / "ws"
+    ws.mkdir(parents=True, exist_ok=True)
+    cfg_path = ws_tmp / "agent.yaml"
+    cfg_path.write_text("\n".join([
+        "agent:",
+        "  max_rounds: 10",
+        "  max_retries: 2",
+        "  max_concurrency: 1",
+        "  keep_recent_rounds: 3",
+        "  snapshot_enabled: false",
+        "  trace_dir: %s" % _ws_path(ws_tmp / "logs" / "traces"),
+        "  session_archive_dir: %s" % _ws_path(ws_tmp / "logs" / "sessions"),
+        "sandbox:",
+        "  workspace: %s" % _ws_path(ws),
+        "  docker_enabled: false",
+        "memory:",
+        "  backend: none",
+        "llm:",
+        "  provider: mock",
+        "mcp:",
+        "  enabled: false",
+        "context:",
+        "  max_tokens: 400",
+        "  compression_threshold: 0.5",
+        "  archive_dir: %s" % _ws_path(ws_tmp / "logs" / "archives"),
+        "  output_truncate: 2000",
+        ""]), encoding="utf-8")
+
+    llm = ScriptedLLM(
+        _think("尝试读取文件"),
+        _tool(action="read"),   # 缺 path -> 空参数
+        _tool(action="read"),
+        _tool(action="read"),   # 第 3 次触发中止
+    )
+    loop = AgentLoop(config=load_config(str(cfg_path)), llm=llm,
+                     planner=StubPlanner())
+    result = asyncio.run(_run_and_close(loop, "读取文件"))
+    assert result.ok is False
+
+    snap = loop.metrics.snapshot()
+    assert snap["counters"].get("tool_failures", 0) == 3, (
+        "空参数保护应计入工具失败指标")
+    assert any(d["name"] == "degenerate_abort"
+               for d in loop._decision.records()), "应记录 degenerate_abort 决策点"
+
+    doc = _load_latest_archive(ws_tmp)
+    attr = classify_session_failure(doc)
+    assert attr["category"] == "tool", "空参数中止档案应归因工具失败"
+
+
 def test_analyze_session_script_attribution(ws_tmp, capsys, monkeypatch):
     from agent.observability.archive import SessionArchive
 
