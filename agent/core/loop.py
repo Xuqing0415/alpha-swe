@@ -725,6 +725,7 @@ class AgentLoop:
 
                 llm_span = self.tracer.start_span("llm", "llm", task_id=task.id)
                 self.metrics.inc("llm_calls")
+                self.metrics.record_token_usage(estimate_tokens(messages))
                 resp = await self.llm.complete(messages)
                 self.metrics.record_token_usage(estimate_tokens(resp))
                 self.tracer.end_span(llm_span, status="ok", chars=len(resp))
@@ -1211,7 +1212,9 @@ class AgentLoop:
                 f"必须保留所有错误、警告、文件路径与行号。\n\n"
                 f"{raw[:30000]}"
             )
+            self.metrics.record_token_usage(estimate_tokens(prompt))
             resp = await self.llm.complete([{"role": "user", "content": prompt}])
+            self.metrics.record_token_usage(estimate_tokens(resp))
             return (resp or "").strip()[:800]
         except Exception as e:
             logger.warning("输出摘要生成失败: %s", e)

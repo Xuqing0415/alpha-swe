@@ -15,8 +15,18 @@ from agent.core.task import Task
 from agent.prompt import templates
 
 
-def estimate_tokens(text: str) -> int:
-    """粗略估算 token 数（中文约 1 字/token，英文约 1.3 词/token）。"""
+def estimate_tokens(text) -> int:
+    """粗略估算 token 数（中文约 1 字/token，英文约 1.3 词/token）。
+
+    支持 str 或消息列表 [{"role": ..., "content": ...}]：列表自动拼接 content。
+    """
+    if not isinstance(text, str):
+        parts = []
+        for msg in text or []:
+            content = msg.get("content") if isinstance(msg, dict) else msg
+            if content:
+                parts.append(str(content))
+        text = "".join(parts)
     return max(len(text.split()), len(text) // 2)
 
 
