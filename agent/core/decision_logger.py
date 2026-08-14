@@ -46,7 +46,8 @@ class DecisionLogger:
     enabled=False 时仅计数丢弃，方便测试关闭日志。
     """
 
-    def __init__(self, log_path: Optional[str] = None, enabled: bool = True):
+    def __init__(self, log_path: Optional[str] = None, enabled: bool = True,
+                 max_memory_records: Optional[int] = 1000):
         # 环境变量用于 A/B 对比时覆盖日志路径，优先级最高
         env_path = os.environ.get(ENV_LOG_PATH)
         if env_path:
@@ -54,6 +55,7 @@ class DecisionLogger:
         self.log_path: Optional[Path] = Path(log_path) if log_path else None
         self.enabled = enabled
         self.decisions: List[DecisionPoint] = []
+        self.max_memory_records = max_memory_records
         self._lock = threading.Lock()
 
     def record(self, name: str, config_key: str, config_value: Any,
@@ -66,6 +68,12 @@ class DecisionLogger:
             self.decisions.append(dp)
             if self.log_path is not None:
                 self._append(dp)
+                # 收敛期 P2：内存只保留最近 N 条（更早的已落盘 JSONL），
+                # 避免超长会话下决策日志无限累积；未配置落盘时不做裁剪。
+                if self.max_memory_records is not None:
+                    overflow = len(self.decisions) - self.max_memory_records
+                    if overflow > 0:
+                        del self.decisions[:overflow]
 
     def _append(self, dp: DecisionPoint) -> None:
         try:

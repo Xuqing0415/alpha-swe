@@ -79,12 +79,14 @@ def install_tui_logging(verbose: bool = False,
             root.removeHandler(handler)
 
     path = Path(log_file or "logs/tui.log")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    file_handler = logging.FileHandler(path, encoding="utf-8")
-    file_handler.setLevel(logging.DEBUG)  # 全量落盘，不随界面过滤
-    file_handler.setFormatter(StdLogFormatter(
-        "%(asctime)s [%(levelname)s] [%(name)s] [%(session)s] %(message)s"
-    ))
+    # 收敛期 P2：文件按大小轮转（10MB），保留最近 7 份，防止无限增长
+    from agent.observability.logging_setup import make_rotating_file_handler
+    file_handler = make_rotating_file_handler(
+        str(path),
+        formatter=StdLogFormatter(
+            "%(asctime)s [%(levelname)s] [%(name)s] [%(session)s] %(message)s"
+        ),
+    )
     root.addHandler(file_handler)
 
     bridge_level = logging.DEBUG if verbose else logging.INFO

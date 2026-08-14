@@ -32,11 +32,16 @@ def setup_logging(log_dir: str = "./logs"):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_file = os.path.join(log_dir, f"alpha_swe_{timestamp}.log")
 
+    from agent.observability.logging_setup import make_rotating_file_handler
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         handlers=[
-            logging.FileHandler(log_file, encoding="utf-8"),
+            make_rotating_file_handler(
+                log_file,
+                formatter=logging.Formatter(
+                    "%(asctime)s [%(levelname)s] %(name)s: %(message)s"),
+            ),
             logging.StreamHandler(sys.stdout)
         ]
     )

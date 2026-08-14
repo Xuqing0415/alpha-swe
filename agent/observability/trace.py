@@ -69,12 +69,15 @@ class Tracer:
                  otlp_endpoint: str = "",
                  otlp_enabled: bool = False,
                  service_name: str = "alpha-swe",
-                 otlp_exporter=None):
+                 otlp_exporter=None,
+                 max_memory_spans: Optional[int] = 2000):
         self.trace_dir = Path(trace_dir) if trace_dir else None
         self.enabled = enabled
         self._decision = decision_logger
         self._spans: List[Span] = []
         self._stack: List[Span] = []
+        # 收敛期 P2：内存只保留最近 N 条 span，更早的自动落盘 trace JSONL
+        self.max_memory_spans = max_memory_spans
         self._trace_id = uuid.uuid4().hex[:16]
         self._lock = threading.Lock()
         # 第 10 节：OTLP/HTTP 导出（Jaeger v2 / Collector / Tempo）
@@ -101,6 +104,7 @@ class Tracer:
         with self._lock:
             self._spans.append(span)
             self._stack.append(span)
+        self._maybe_trim()
         return span
 
     def end_span(self, span: Span, status: str = "ok",
@@ -164,22 +168,58 @@ class Tracer:
         if not rows:
             return 0
         try:
-            self.trace_dir.mkdir(parents=True, exist_ok=True)
-            path = self.trace_dir / f"trace_{int(time.time())}.jsonl"
-            with open(path, "a", encoding="utf-8") as f:
-                for row in rows:
-                    f.write(json.dumps(row, ensure_ascii=False) + "\n")
-            if self._decision is not None:
-                self._decision.record(
-                    "trace.export", "agent.trace_dir", str(path),
-                    f"导出 {len(rows)} 个 span 到 {path.name}",
-                )
-            logger.info("trace 导出 %d spans -> %s", len(rows), path)
+            self._append_rows(rows)
             self._export_otlp(rows)
             return len(rows)
         except OSError as e:
             logger.warning("trace 导出失败: %s", e)
             return 0
+
+    def _append_rows(self, rows: List[Dict[str, Any]]) -> None:
+        """把 span dict 追加写入 trace JSONL（供 export / 内存裁剪共用）。"""
+        if self.trace_dir is None:
+            return
+        self.trace_dir.mkdir(parents=True, exist_ok=True)
+        path = self.trace_dir / f"trace_{int(time.time())}.jsonl"
+        with open(path, "a", encoding="utf-8") as f:
+            for row in rows:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        if self._decision is not None:
+            self._decision.record(
+                "trace.export", "agent.trace_dir", str(path),
+                f"导出 {len(rows)} 个 span 到 {path.name}",
+            )
+        logger.info("trace 导出 %d spans -> %s", len(rows), path)
+
+    def _trim(self, keep: int) -> List[Dict[str, Any]]:
+        """内存 span 超过上限时，淘汰最旧的已结束 span，返回其 dict 列表。
+
+        活跃 span（仍在栈中）保留在内存；被淘汰的已结束 span 由调用方落盘。
+        """
+        with self._lock:
+            overflow = len(self._spans) - keep
+            if overflow <= 0:
+                return []
+            flushed: List[Span] = []
+            kept: List[Span] = []
+            for s in self._spans:
+                if s.end_ts is None or len(flushed) >= overflow:
+                    kept.append(s)
+                else:
+                    flushed.append(s)
+            self._spans = kept
+            return [s.to_dict() for s in flushed]
+
+    def _maybe_trim(self) -> None:
+        """start_span 后触发：仅在有落盘目录时按上限裁剪内存 span。"""
+        if self.max_memory_spans is None or self.trace_dir is None:
+            return
+        rows = self._trim(self.max_memory_spans)
+        if rows:
+            try:
+                self._append_rows(rows)
+            except OSError as e:
+                logger.warning("span 落盘失败: %s", e)
 
     def _export_otlp(self, rows: List[Dict[str, Any]]) -> None:
         """把本次快照推送到 OTLP 端点（失败静默，见 OtlpExporter）。"""
