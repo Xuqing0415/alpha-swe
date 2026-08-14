@@ -116,6 +116,13 @@ class Planner:
                 return tasks
         except Exception as e:
             logger.warning("LLM 规划失败，回退单任务: %s", e)
+            # 收敛期 P2：记录规划失败决策点，供失败归因分析识别"规划失败"
+            if self.decision_logger is not None:
+                self.decision_logger.record(
+                    "planner_fallback", "planner.provider",
+                    getattr(self.config, "provider", ""),
+                    f"LLM 规划失败回退单任务: {str(e)[:120]}",
+                )
         return [Task(id="t0", instruction=prompt)]
 
     @staticmethod

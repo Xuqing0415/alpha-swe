@@ -20,12 +20,13 @@ from typing import List, Optional
 # 允许从任意 cwd 直接运行：python scripts/analyze_session.py <session.json>
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from agent.attribution import classify_session_failure  # noqa: E402
 from agent.observability.archive import (  # noqa: E402
     SessionArchive, summarize_session,
 )
 
 
-def _human_summary(summary: dict) -> str:
+def _human_summary(summary: dict, attribution=None) -> str:
     """把复盘摘要渲染为人类可读文本。"""
     lines = [
         f"会话: {summary['session_id']}",
@@ -52,6 +53,10 @@ def _human_summary(summary: dict) -> str:
         lines.extend(f"  - {e}" for e in summary["errors"][:10])
     if summary["final_answer"]:
         lines.append(f"最终答复: {summary['final_answer']}")
+    if not summary["ok"] and attribution:
+        # 收敛期 P2：失败会话附归因类别与改进建议
+        lines.append(f"归因: {attribution['label']}（{attribution['reason']}）")
+        lines.append(f"建议: {'；'.join(attribution['suggestions'])}")
     return "\n".join(lines)
 
 
@@ -73,9 +78,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 1
     doc = SessionArchive.load(str(p))
     summary = summarize_session(doc)
+    attribution = None
+    if not summary["ok"]:
+        # 收敛期 P2：失败会话附归因类别与改进建议
+        attribution = classify_session_failure(doc)
     if args.text or (not args.json and sys.stdout.isatty()):
-        print(_human_summary(summary))
+        print(_human_summary(summary, attribution))
     else:
+        if attribution is not None:
+            summary["attribution"] = attribution
         print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0
 

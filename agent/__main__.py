@@ -38,6 +38,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from agent.attribution import classify_failure
 from agent.config import AppConfig, load_config
 from agent.core.loop import AgentLoop, LoopResult
 from agent.observability.archive import (
@@ -186,6 +187,22 @@ def make_payload(result: Optional[LoopResult], loop: AgentLoop,
     }
     if error:
         payload["error"] = error
+    if exit_code != EXIT_OK:
+        # 收敛期 P2：失败任务附带归因类别与改进建议（供复盘 / CI 分析）
+        try:
+            payload["attribution"] = classify_failure(
+                events=loop.events,
+                decisions=loop._decision.records(),
+                metrics=snap,
+                final_answer=payload["final_answer"],
+            )
+        except Exception as e:  # 归因计算失败不破坏正常输出
+            payload["attribution"] = {
+                "category": "unknown",
+                "label": "未知",
+                "reason": "归因计算失败: %s" % e,
+                "suggestions": [],
+            }
     return payload
 
 
