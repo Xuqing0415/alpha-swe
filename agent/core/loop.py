@@ -757,7 +757,15 @@ class AgentLoop:
                                               "content": obs})
                         self._emit("tool_call", task_id=task.id, tool=name,
                                    params=params, success=False, output=obs[:300])
+                        # 与 tool_call 失败事件保持一致：空参数保护也计入
+                        # 工具失败指标（此前只发事件不计 metrics，导致归因盲区）
+                        self.metrics.record_tool_result(False)
                         if degenerate_streak >= 3:
+                            self._decision.record(
+                                "degenerate_abort", "agent.max_retries",
+                                degenerate_streak,
+                                f"连续空参数 {degenerate_streak} 次，中止任务避免无效循环",
+                            )
                             task.mark(TaskStatus.FAILED,
                                       error=f"工具调用参数持续为空（{degenerate_streak} 次），已中止以避免无效循环")
                             self.tracer.end_span(task_span, status="error",
