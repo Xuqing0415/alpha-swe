@@ -24,6 +24,7 @@ ATTRIBUTION_CATEGORIES: Dict[str, str] = {
     "context": "上下文失败",
     "memory": "记忆失败",
     "testing": "测试失败",
+    "interrupt": "用户中断",
     "unknown": "未知",
 }
 
@@ -36,11 +37,31 @@ IMPROVEMENT_ACTIONS: Dict[str, str] = {
     "context": "优化压缩策略：提高触发阈值、保留决策点、压缩后校验关键信息",
     "memory": "增强记忆检索：任务类型过滤、可信度衰减、检索失败降级可见",
     "testing": "增强测试闭环：失败用例结构化提取并回填 Prompt，改完必测",
+    "interrupt": "在中断点保存快照，恢复后从断点继续；区分用户取消与 Agent 失败",
     "unknown": "人工分析失败案例，补充归因规则",
 }
 
 _SEARCH_TOOLS = ("file_search", "file_search_tool", "search")
 _TEST_TOOLS = ("run_tests", "test_runner", "test")
+
+
+def _is_retrieval_event(data: Dict[str, Any]) -> bool:
+    """是否为代码搜索类工具事件（归因时优先判检索失败）。"""
+    tool = str(data.get("tool", ""))
+    params = data.get("params") or {}
+    action = str(params.get("action", ""))
+    return tool in _SEARCH_TOOLS or (tool == "file_ops" and action == "search")
+
+
+def _is_test_event(data: Dict[str, Any]) -> bool:
+    """是否为测试运行类工具事件（归因时优先判测试失败）。"""
+    tool = str(data.get("tool", ""))
+    if tool in _TEST_TOOLS:
+        return True
+    if tool == "terminal_execute" and not data.get("success"):
+        out = str(data.get("output", "")).lower()
+        return any(k in out for k in ("pytest", "failed", "tests failed"))
+    return False
 
 
 def _mk(category: str, reason: str) -> Dict[str, Any]:
@@ -129,7 +150,9 @@ def classify_failure(events: Optional[List[Dict[str, Any]]] = None,
                      prompt: str = "") -> Dict[str, Any]:
     """规则式失败归因：返回 {category, label, reason, suggestions}。
 
-    优先级：记忆 > 上下文（过早压缩）> 工具 > 规划 > 检索 > 测试 > 理解 > 未知。
+    优先级：记忆 > 上下文（过早压缩）> 检索 > 测试 > 工具 > 规划 > 中断 > 理解 > 未知。
+    工具失败信号同时来自 counters.tool_failures 与 events 中的
+    tool_call success=False（空参数保护等路径只发事件、不计 metrics）。
     """
     events = events or []
     decisions = decisions or []
@@ -155,33 +178,45 @@ def classify_failure(events: Optional[List[Dict[str, Any]]] = None,
             "context",
             f"上下文在任务早期被压缩（共 {compressions} 次），关键约束可能丢失")
 
-    # 3) 工具失败：工具调用失败 / 超时 / 熔断
-    if tool_failures > 0 or "timeout.strike" in names:
-        detail = _tool_failure_detail(tool_fails)
-        strikes = names.count("timeout.strike")
-        suffix = f"；{strikes} 次超时熔断" if strikes else ""
-        return _mk("tool", f"工具失败 {tool_failures} 次：{detail}{suffix}")
-
-    # 4) 规划失败：LLM 规划回退单任务
-    if "planner_fallback" in names:
-        return _mk("planning", "LLM 规划失败回退单任务（planner_fallback 决策点）")
-
-    # 5) 检索失败：代码搜索无结果/搜索工具失败
+    # 3) 检索失败：代码搜索无结果 / 搜索工具失败（工具层定位失败）
     evidence = _retrieval_evidence(tool_events)
     if evidence:
         return _mk("retrieval", evidence)
 
-    # 6) 测试失败：测试运行工具失败
+    # 4) 测试失败：测试运行工具失败（明确信号优先于泛化工具失败）
     if _test_failure(tool_events):
         return _mk("testing", "测试运行工具执行失败（run_tests 或测试命令）")
 
-    # 7) 理解失败：输出解析重试/解析失败
+    # 5) 工具失败：非检索/测试的工具调用失败、超时、熔断
+    general_fails = [
+        e for e in tool_fails
+        if not _is_retrieval_event(e["data"]) and not _is_test_event(e["data"])
+    ]
+    if general_fails or tool_failures > 0 or "timeout.strike" in names:
+        detail = _tool_failure_detail(general_fails or tool_fails)
+        strikes = names.count("timeout.strike")
+        suffix = f"；{strikes} 次超时熔断" if strikes else ""
+        count = len(general_fails) if general_fails else tool_failures
+        return _mk("tool", f"工具失败 {count} 次：{detail}{suffix}")
+
+    # 6) 规划失败：LLM 规划回退单任务
+    if "planner_fallback" in names:
+        return _mk("planning", "LLM 规划失败回退单任务（planner_fallback 决策点）")
+
+    # 7) 中断：用户中断/取消导致的任务失败（非 Agent 能力问题）
+    interrupts = int(counters.get("interrupts", 0) or 0)
+    if interrupts > 0:
+        return _mk(
+            "interrupt",
+            f"任务被中断 {interrupts} 次（用户中断/取消），非 Agent 能力问题")
+
+    # 8) 理解失败：输出解析重试 / 解析失败
     if retries > 0 or "解析失败" in (final_answer or ""):
         return _mk(
             "understanding",
             f"模型输出解析重试 {retries} 次后失败（生成内容无法被解析）")
 
-    # 8) 未知
+    # 9) 未知
     return _mk("unknown", "未识别到明确失败信号，需人工分析会话档案")
 
 
