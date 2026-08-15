@@ -276,6 +276,10 @@ class AgentConfig(BaseModel):
     # 进阶 3.3：回归检测——代码写入后自动运行受影响测试，测不过就停
     regression_check_enabled: bool = True
     regression_timeout: float = 60.0
+    # 进阶 3.2：变异测试——验证自动生成的测试确实能捕获变异
+    mutation_check_enabled: bool = True
+    mutation_max_ops: int = 8
+    mutation_target_rate: float = 0.8
     # 第 9 节：Web 观测面板（python -m tui --web，或置 True 自动开启）
     web_panel_enabled: bool = False
     web_panel_host: str = "127.0.0.1"

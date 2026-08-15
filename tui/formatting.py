@@ -31,6 +31,7 @@ _LOG_TYPES: Dict[str, Tuple[str, str]] = {
     "testgen_generated": ("OK", "green"),
     "regression_clean": ("OK", "green"),
     "regression_detected": ("REG", "red"),
+    "mutation_analyzed": ("MUT", "yellow"),
     "counterfactual_stored": ("MEM", "bright_black"),
     # 预留：记忆操作 / 观察结果
     "memory": ("MEM", "bright_black"),
@@ -134,6 +135,12 @@ def _format_body(etype: str, data: Dict[str, Any]) -> str:
         return (f"回归检测失败: {data.get('module', '')} -> "
                 f"{data.get('test_file', '')} | "
                 f"{_truncate(str(data.get('summary', '')), 160)}")
+    if etype == "mutation_analyzed":
+        score = float(data.get("score", 0) or 0)
+        survivors = _join(data.get("survivors", []))
+        return (f"变异检测率 {score:.0%}（{data.get('killed', 0)}/"
+                f"{data.get('total', 0)}）"
+                f"存活变异: {survivors if survivors else '无'}")
     if etype == "counterfactual_stored":
         return (f"反事实教训{'写入' if data.get('stored') else '去重跳过'}: "
                 f"归因={data.get('category', '')}，"

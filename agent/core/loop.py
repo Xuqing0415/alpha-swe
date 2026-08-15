@@ -1693,6 +1693,9 @@ class AgentLoop:
             )
             self._emit("testgen_generated", module=path,
                        test_file=test_path, targets=targets)
+            if self.config.agent.mutation_check_enabled:
+                await self._maybe_mutation_analysis(
+                    path, test_path, content, task)
             if self.config.agent.auto_testgen_verify:
                 asyncio.create_task(self._verify_testgen(path, test_path))
         except Exception as e:
@@ -1796,3 +1799,42 @@ class AgentLoop:
                 pass
             return result
 
+    async def _maybe_mutation_analysis(self, module_path: str,
+                                       test_path: str, content: str,
+                                       task: Task) -> None:
+        """阶段三 3.2：对刚生成的测试做变异检测，验证测试有效性。
+
+        只对自动生成的测试运行（成本可控）；基线无法运行或无变异点时
+        记录 mutation.skip，不阻断任务。
+        """
+        try:
+            from agent.mutation import run_mutation_analysis
+            workspace = self.config.sandbox.workspace
+            analysis = await run_mutation_analysis(
+                workspace, module_path, content, test_path,
+                timeout=self.config.agent.regression_timeout,
+                max_mutations=self.config.agent.mutation_max_ops,
+            )
+            if analysis.get("skipped"):
+                self._decision.record(
+                    "mutation.skip", "agent.mutation_check_enabled", True,
+                    f"变异检测跳过: {str(analysis.get('reason', ''))[:100]}",
+                )
+                return
+            score = float(analysis.get("score", 0.0))
+            target = self.config.agent.mutation_target_rate
+            survivors = analysis.get("survivors", []) or []
+            passed = score >= target
+            self._decision.record(
+                "mutation.analyzed", "agent.mutation_check_enabled", True,
+                f"变异检测率 {score:.0%}（{analysis.get('killed', 0)}/"
+                f"{analysis.get('total', 0)}）"
+                f"{'达标' if passed else '未达标，需补强测试'}："
+                f"存活变异: {', '.join(survivors) if survivors else '无'}",
+            )
+            self._emit("mutation_analyzed", module=module_path,
+                       total=analysis.get("total", 0),
+                       killed=analysis.get("killed", 0),
+                       score=score, survivors=survivors)
+        except Exception as e:
+            logger.warning("变异检测失败（不阻断任务）: %s", e)
