@@ -18,6 +18,7 @@ class TaskStatus(str, Enum):
     READY = "ready"
     RUNNING = "running"
     WAITING = "waiting"
+    PAUSED = "paused"      # 被更高优先级任务抢占，挂起等待恢复（进阶 2.1）
     RETRYING = "retrying"  # 失败后等待重试（方案 1.1）
     SKIPPED = "skipped"    # 非关键步骤失败后跳过（方案 1.2）
     COMPLETED = "completed"

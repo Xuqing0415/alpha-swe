@@ -71,6 +71,45 @@ class Scheduler:
     def ready(self) -> List[Task]:
         return self.dag.ready_tasks()
 
+    # ---- 进阶 2.1：优先级抢占 ----
+    def pending_higher(self, task: Task) -> bool:
+        """是否存在可立即调度且优先级更高的 READY 任务（抢占判定）。"""
+        return any(t.priority > task.priority for t in self.dag.ready_tasks())
+
+    def promote_paused(self) -> List[Task]:
+        """把无更高优先级任务抢占的 PAUSED 任务提升回 READY（抢占后恢复）。
+
+        仍有更高优先级就绪任务时保持挂起；恢复时打 _resumed 标记
+        供 AgentLoop 发 task_resumed 事件（进阶 2.1）。
+        """
+        ready = self.dag.ready_tasks()
+        top = max((t.priority for t in ready), default=None)
+        promoted: List[Task] = []
+        for t in sorted(
+            (t for t in self.dag.all() if t.status == TaskStatus.PAUSED),
+            key=lambda x: (-x.priority, x.created_at),
+        ):
+            if top is not None and t.priority < top:
+                break  # 仍有更高优先级的就绪任务，继续挂起
+            t.mark(TaskStatus.READY)
+            t.metadata["_resumed"] = True
+            promoted.append(t)
+        return promoted
+
+    def set_priority(self, task_id: str, priority: int) -> Optional[Task]:
+        """调整任务优先级；就绪/暂停任务立即按新优先级重新参与调度。"""
+        task = self.dag.get(task_id)
+        if task is None:
+            return None
+        task.priority = int(priority)
+        task.touch()
+        logger.info("set_priority task=%s priority=%s", task_id, priority)
+        try:
+            self.wake()  # 唤醒调度循环重新评估（WAITING 分支）
+        except NotImplementedError:
+            pass
+        return task
+
     def on_task_done(self, task: Task) -> None:
         """任务终结后提升依赖者；失败时触发失败回调（技能步骤决策点）。
 
@@ -104,6 +143,8 @@ class Scheduler:
         self.wake = _wake  # 供外部（后台任务/用户输入）唤醒
 
         while self.dag.pending():
+            # 进阶 2.1：高优先级任务完成后恢复被抢占的任务
+            self.promote_paused()
             ready = self.ready()
             if ready:
                 batch = ready[: self.max_concurrency]

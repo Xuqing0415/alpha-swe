@@ -54,6 +54,9 @@ logger = logging.getLogger("alpha-swe.loop")
 class TaskInterrupted(Exception):
     """任务被用户中断（yield 控制点抛出）。"""
 
+class TaskPreempted(Exception):
+    """任务被更高优先级任务抢占（进阶 2.1：安全点暂停，等待恢复）。"""
+
 
 @dataclass
 class LoopResult:
@@ -299,6 +302,18 @@ class AgentLoop:
         except NotImplementedError:  # 调度循环尚未启动
             pass
         self._emit("interrupt", prompt=prompt, task_id=task.id)
+        return task
+
+    def set_task_priority(self, task_id: str, priority: int) -> Optional[Task]:
+        """调整任务优先级（TUI /priority 命令），并唤醒调度循环重新评估。"""
+        task = self.scheduler.set_priority(task_id, priority)
+        if task is not None:
+            self._decision.record(
+                "task.priority", "agent.preemption_enabled", priority,
+                f"任务 {task_id} 优先级调整为 {priority}",
+            )
+            self._emit("priority_changed", task_id=task_id,
+                       priority=priority)
         return task
 
     async def wake(self) -> None:
@@ -699,7 +714,11 @@ class AgentLoop:
     # ---- 单任务 ReAct ----
     async def _execute_task(self, task: Task) -> None:
         """每个任务的内部 ReAct 循环：Think -> Act -> Observe -> Parse。"""
+        resumed = bool(task.metadata.pop("_resumed", False))
         task.mark(TaskStatus.RUNNING)
+        if resumed:  # 进阶 2.1：抢占后恢复执行
+            self._emit("task_resumed", task_id=task.id,
+                       priority=task.priority)
         self._inject_exec_env()
         self._emit(
             "task_start",
@@ -833,6 +852,8 @@ class AgentLoop:
                     if any(r.metadata.get("waiting") for r in results):
                         task.mark(TaskStatus.WAITING)  # 挂起，释放控制权
                         return
+                    # 进阶 2.1：工具调用返回也是安全点，可被更高优先级任务抢占
+                    await self._maybe_preempt(task)
                     continue
 
                 if parsed.action_type == "final_answer":
@@ -870,6 +891,15 @@ class AgentLoop:
             task.mark(TaskStatus.FAILED, error=f"超过最大轮数 {self._max_rounds}")
             self.tracer.end_span(task_span, status="error", error=task.error)
             self._on_task_failure(task)
+        except TaskPreempted:
+            # 进阶 2.1：被更高优先级任务抢占——挂起并落盘快照，等待恢复
+            task.mark(TaskStatus.PAUSED)
+            self._emit("task_preempted", task_id=task.id,
+                       priority=task.priority)
+            self.tracer.end_span(task_span, status="paused",
+                                 error="preempted")
+            if self.config.agent.snapshot_enabled:
+                self._save_snapshot()  # 抢占点快照，支持断点续跑
         except TaskInterrupted:
             task.mark(TaskStatus.READY)  # 中断后回到就绪，等待重新调度
             self._emit("task_interrupted", task_id=task.id)
@@ -1149,7 +1179,7 @@ class AgentLoop:
         return decision
 
     async def _checkpoint(self, task: Task) -> None:
-        """yield 控制点：每次 Observe 后检查中断信号。"""
+        """yield 控制点：每次 Observe 后检查中断信号与抢占请求。"""
         if self.cancel_event.is_set():
             self.cancel_event.clear()
             prompt = self.state.consume_interrupt()
@@ -1158,7 +1188,24 @@ class AgentLoop:
             raise TaskInterrupted()
         if not self._pause_event.is_set():
             await self._pause_event.wait()  # 暂停挂起，直到 resume()
+        await self._maybe_preempt(task)  # 高优先级任务抢占（进阶 2.1）
         await asyncio.sleep(0)  # 让出事件循环
+
+    async def _maybe_preempt(self, task: Task) -> None:
+        """安全点抢占检查：存在更高优先级的就绪任务时暂停当前任务。
+
+        暂停任务进入 PAUSED，由调度器在高优先级任务完成后恢复（进阶 2.1）。
+        """
+        if not self.config.agent.preemption_enabled:
+            return
+        if self.scheduler.pending_higher(task):
+            self.metrics.inc("preemptions")
+            self._decision.record(
+                "task.preempted", "agent.preemption_enabled", True,
+                f"任务 {task.id}（priority={task.priority}）被更高优先级任务抢占"
+                f"，暂停等待恢复",
+            )
+            raise TaskPreempted()
 
     def _upstream_tasks(self, task: Task) -> List[Task]:
         return [

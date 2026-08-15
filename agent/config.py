@@ -250,6 +250,9 @@ class AgentConfig(BaseModel):
     max_token_limit: int = 100_000
     keep_recent_rounds: int = 3
     max_concurrency: int = 1
+    # 进阶 2.1：任务队列与动态抢占——高优先级任务就绪时在安全点
+    # 暂停低优先级任务（PAUSED），高优先级完成后自动恢复
+    preemption_enabled: bool = True
     parallel_tool_calls: bool = True  # 单次响应多工具是否并行执行
     require_confirmation: List[str] = Field(default_factory=lambda: [
         "file_write", "terminal:rm", "terminal:git push",

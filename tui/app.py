@@ -62,6 +62,7 @@ _TASK_MARKS = {
     "completed": ("完成 ", "green"),
     "running": ("进行>", "yellow"),
     "waiting": ("等待 ", "bright_black"),
+    "paused": ("暂停 ", "yellow"),
     "retrying": ("重试 ", "yellow"),
     "skipped": ("跳过 ", "bright_black"),
     "ready": ("就绪 ", "bright_black"),
@@ -242,6 +243,7 @@ _HELP_TEXT = """[bold]Alpha-SWE 快捷键[/bold]
 [bold]输入命令（/ 开头）[/bold]
 /pause 暂停   /resume 恢复   /status 详细状态
 /retry 重试   /skip 跳过     /quit 退出
+/queue 任务队列（优先级/状态）  /priority <id> <n> 调整优先级
 /bg 后台任务列表  /bg <id> 日志  /bg stop <id> 停止
 
 [bold]日志类型[/bold]
@@ -675,6 +677,17 @@ class AlphaSWEApp(App[None]):
         lines.append("任务树:")
         tasks = list(loop.scheduler.dag.all()) if loop else []
         if tasks:
+            # 进阶 2.1：队列概览（运行/就绪/暂停/等待）
+            st = {}
+            for t in tasks:
+                st[t.status.value] = st.get(t.status.value, 0) + 1
+            queue_bits = [f"运行 {st.get('running', 0)}",
+                          f"就绪 {st.get('ready', 0)}"]
+            if st.get("paused"):
+                queue_bits.append(f"暂停 {st.get('paused')}")
+            if st.get("waiting"):
+                queue_bits.append(f"等待 {st.get('waiting')}")
+            lines.append("队列: " + "  ".join(queue_bits))
             # 方案 2.3：进度按「已完成 + 已跳过」占总数计算，跳过不拖慢进度
             done = sum(
                 1 for t in tasks
@@ -721,13 +734,19 @@ class AlphaSWEApp(App[None]):
                 view_hint += "[跟随]" if vlog.follow else "[浏览中]"
             except Exception:
                 pass  # 挂载早期查询失败则省略提示
+        active = 0
+        if loop is not None:
+            active = sum(
+                1 for t in loop.scheduler.dag.all()
+                if t.status.value in ("running", "ready", "paused", "waiting")
+            )
         left_names = {"tasks": "任务", "tree": "文件树"}
         left_hint = f"[{left_names.get(self._left_view, '任务')}]"
         bar.update(
             f"tokens: [{t_style}]{tokens:,}[/] | "
             f"round: [{r_style}]{rounds}/{max_rounds}[/] | "
             f"mem: {self._memory_usage()} | session: {self._session_id}"
-            f" | {left_hint} | {view_hint}"
+            f" | 活跃: {active} | {left_hint} | {view_hint}"
             + self._bg_status_hint()
         )
 
@@ -890,6 +909,10 @@ class AlphaSWEApp(App[None]):
             self._inject("重试当前步骤" + (f"：{rest}" if rest else ""))
         elif cmd == "/skip":
             self._inject("跳过当前步骤" + (f"：{rest}" if rest else ""))
+        elif cmd == "/queue":
+            self._append_queue_status()
+        elif cmd == "/priority":
+            self._handle_priority(rest)
         elif cmd == "/bg":
             self._append_bg_status(rest)
         elif cmd == "/quit":
@@ -1036,6 +1059,53 @@ class AlphaSWEApp(App[None]):
             f"状态: 阶段={phase} 轮次={rounds} tokens={tokens} "
             f"任务[{bits}] 会话={self._session_id}",
             style="bright_black"))
+
+    def _append_queue_status(self) -> None:
+        """/queue：按优先级列出任务队列（状态/指令摘要）。"""
+        runner = self.runner
+        loop = runner.loop if runner else None
+        if loop is None:
+            self._append_thought(Text("任务队列不可用（Agent 未运行）",
+                                      style="yellow"))
+            return
+        tasks = list(loop.scheduler.dag.all())
+        if not tasks:
+            self._append_thought(Text("任务队列: （空）",
+                                      style="bright_black"))
+            return
+        lines = [f"任务队列: {len(tasks)} 项（高优先级先执行）"]
+        for t in sorted(tasks, key=lambda x: (-x.priority, x.created_at)):
+            lines.append(
+                f"  [{t.priority:>2}] {t.status.value:<9} {t.id}  "
+                f"{t.instruction[:40]}")
+        self._append_thought(Text("\n".join(lines), style="bright_black"))
+
+    def _handle_priority(self, rest: str) -> None:
+        """/priority <task_id> <n>：调整任务优先级（抢占判定立即生效）。"""
+        parts = rest.split()
+        if len(parts) != 2:
+            self._append_thought(
+                Text("用法: /priority <任务ID> <优先级数值>", style="yellow"))
+            return
+        tid, prio_s = parts[0], parts[1]
+        try:
+            prio = int(prio_s)
+        except ValueError:
+            self._append_thought(Text("优先级必须是整数", style="yellow"))
+            return
+        runner = self.runner
+        loop = runner.loop if runner else None
+        if loop is None:
+            self._append_thought(Text("Agent 尚未就绪", style="yellow"))
+            return
+        task = loop.set_task_priority(tid, prio)
+        if task is None:
+            self._append_thought(Text(f"任务不存在: {tid}", style="yellow"))
+            return
+        self._append_thought(Text(
+            f"任务 {tid} 优先级调整为 {prio}（队列已重新评估）",
+            style="green"))
+        self.refresh_status()
 
     def show_tree_file(self, path: str) -> None:
         """文件树 Enter：在终端区展示文件内容（等同 cat）。"""
