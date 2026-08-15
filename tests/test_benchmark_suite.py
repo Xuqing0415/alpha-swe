@@ -623,6 +623,248 @@ CASES: list[BenchmarkCase] = [
         verify=lambda ws: run_pytest(ws, "tests/test_validator.py"),
     ),
 
+
+    # ================= L1 扩展：改一行 =================
+    BenchmarkCase(
+        name="py-safe-divide",
+        files={"math_utils.py": "def divide(a, b):\n"
+                                "    return a / b\n"},
+        task="divide 在除数为 0 或参数为空时崩溃，改为返回 0",
+        difficulty=1, tech="python",
+        golden={"math_utils.py": "def divide(a, b):\n"
+                                  "    if not b:\n"
+                                  "        return 0\n"
+                                  "    return a / b\n"},
+        verify=lambda ws: run_py(
+            ws, "from math_utils import divide; "
+                "assert divide(10, 0) == 0; "
+                "assert divide(10, None) == 0; "
+                "assert divide(10, 2) == 5.0"),
+    ),
+    BenchmarkCase(
+        name="js-array-first",
+        files={"utils.js": "function first(arr) {\n"
+                           "  return arr[0];\n"
+                           "}\n"
+                           "module.exports = { first };\n"},
+        task="first 在数组为空或传入 null 时崩溃，改为返回 null",
+        difficulty=1, tech="javascript",
+        golden={"utils.js": "function first(arr) {\n"
+                            "  return arr && arr.length ? arr[0] : null;\n"
+                            "}\n"
+                            "module.exports = { first };\n"},
+        verify=lambda ws: (node_check(ws, "utils.js")
+                           and grep(ws, r"arr\s*&&", "utils.js")),
+    ),
+    # ================= L2 扩展：改一个函数 =================
+    BenchmarkCase(
+        name="py-rename-symbol",
+        files={"data_service.py": "def fetch_data(source):\n"
+                                  "    return {\"source\": source, \"rows\": []}\n",
+               "main.py": "from data_service import fetch_data\n"
+                          "\n"
+                          "\n"
+                          "def run():\n"
+                          "    return fetch_data(\"db\")\n"},
+        task="把 fetch_data 重命名为 load_data，并同步更新所有调用方",
+        difficulty=2, tech="python",
+        golden={"data_service.py": "def load_data(source):\n"
+                                   "    return {\"source\": source, \"rows\": []}\n",
+                "main.py": "from data_service import load_data\n"
+                           "\n"
+                           "\n"
+                           "def run():\n"
+                           "    return load_data(\"db\")\n"},
+        verify=lambda ws: run_py(
+            ws, "from main import run; "
+                "assert run() == {'source': 'db', 'rows': []}; "
+                "import data_service; "
+                "assert not hasattr(data_service, 'fetch_data')"),
+    ),
+    BenchmarkCase(
+        name="py-thread-safe-counter",
+        files={"counter.py": "import threading\n"
+                             "\n"
+                             "\n"
+                             "class Counter:\n"
+                             "    def __init__(self):\n"
+                             "        self.value = 0\n"
+                             "\n"
+                             "    def increment(self):\n"
+                             "        self.value += 1\n"},
+        task="Counter.increment 在多线程下会丢失更新，加锁保证线程安全",
+        difficulty=2, tech="python/threading",
+        golden={"counter.py": "import threading\n"
+                              "\n"
+                              "\n"
+                              "class Counter:\n"
+                              "    def __init__(self):\n"
+                              "        self.value = 0\n"
+                              "        self._lock = threading.Lock()\n"
+                              "\n"
+                              "    def increment(self):\n"
+                              "        with self._lock:\n"
+                              "            self.value += 1\n"},
+        verify=lambda ws: (grep(ws, r"threading\.Lock", "counter.py")
+                           and grep(ws, r"with\s+self\._lock",
+                                    "counter.py")
+                           and run_py(
+                               ws, "from counter import Counter\n"
+                                   "import threading\n"
+                                   "c = Counter()\n"
+                                   "def work():\n"
+                                   "    for _ in range(200):\n"
+                                   "        c.increment()\n"
+                                   "ts = [threading.Thread(target=work) "
+                                   "for _ in range(8)]\n"
+                                   "for t in ts: t.start()\n"
+                                   "for t in ts: t.join()\n"
+                                   "assert c.value == 1600\n")),
+    ),
+
+    # ================= L3 扩展：跨文件修改 =================
+    BenchmarkCase(
+        name="sql-injection-safe",
+        files={"db.py": "import sqlite3\n"
+                        "\n"
+                        "\n"
+                        "def find_user(conn, username):\n"
+                        "    cur = conn.execute(\n"
+                        "        f\"SELECT * FROM users WHERE username = '{username}'\")\n"
+                        "    return cur.fetchone()\n"},
+        task="find_user 用字符串拼接 SQL，存在注入风险，改为参数化查询",
+        difficulty=3, tech="python/sqlite",
+        golden={"db.py": "import sqlite3\n"
+                         "\n"
+                         "\n"
+                         "def find_user(conn, username):\n"
+                         "    cur = conn.execute(\n"
+                         "        \"SELECT * FROM users WHERE username = ?\", "
+                         "(username,))\n"
+                         "    return cur.fetchone()\n"},
+        verify=lambda ws: run_py(
+            ws, "from db import find_user; "
+                "import sqlite3; "
+                "conn = sqlite3.connect(':memory:'); "
+                "conn.execute('CREATE TABLE users (username TEXT)'); "
+                "conn.execute(\"INSERT INTO users VALUES ('admin')\"); "
+                "assert find_user(conn, 'admin') is not None; "
+                "assert find_user(conn, \"' OR 1=1 --\") is None"),
+    ),
+    BenchmarkCase(
+        name="py-retry-decorator",
+        files={"retry.py": "def retry(max_attempts):\n"
+                           "    def deco(fn):\n"
+                           "        return fn\n"
+                           "    return deco\n"},
+        task="实现 retry 装饰器：函数抛异常时重试，最多 max_attempts 次",
+        difficulty=3, tech="python",
+        golden={"retry.py": "import time\n"
+                            "\n"
+                            "\n"
+                            "def retry(max_attempts):\n"
+                            "    def deco(fn):\n"
+                            "        def wrapper(*args, **kwargs):\n"
+                            "            last = None\n"
+                            "            for _ in range(max_attempts):\n"
+                            "                try:\n"
+                            "                    return fn(*args, **kwargs)\n"
+                            "                except Exception as e:\n"
+                            "                    last = e\n"
+                            "                    time.sleep(0)\n"
+                            "            raise last\n"
+                            "        return wrapper\n"
+                            "    return deco\n"},
+        verify=lambda ws: run_py(
+            ws, "from retry import retry\n"
+                "calls = {'n': 0}\n"
+                "@retry(max_attempts=3)\n"
+                "def flaky():\n"
+                "    calls['n'] += 1\n"
+                "    if calls['n'] < 3:\n"
+                "        raise ValueError('boom')\n"
+                "    return 'ok'\n"
+                "assert flaky() == 'ok' and calls['n'] == 3\n"
+                "@retry(max_attempts=2)\n"
+                "def always_fail():\n"
+                "    raise RuntimeError('x')\n"
+                "try:\n"
+                "    always_fail()\n"
+                "    raise SystemExit('should have raised')\n"
+                "except RuntimeError:\n"
+                "    pass\n"),
+    ),
+    # ================= L4 扩展：新增模块 =================
+    BenchmarkCase(
+        name="py-ttl-cache",
+        files={"cache.py": "class TTLCache:\n"
+                           "    def __init__(self, ttl_seconds):\n"
+                           "        self.ttl = ttl_seconds\n"
+                           "        self._data = {}\n"
+                           "\n"
+                           "    def get(self, key):\n"
+                           "        return self._data.get(key)\n"
+                           "\n"
+                           "    def set(self, key, value):\n"
+                           "        self._data[key] = value\n",
+               "tests/test_cache.py": "import time\n"
+                                      "from cache import TTLCache\n"
+                                      "\n"
+                                      "\n"
+                                      "def test_cache_get_set():\n"
+                                      "    c = TTLCache(ttl_seconds=1)\n"
+                                      "    c.set(\"a\", 1)\n"
+                                      "    assert c.get(\"a\") == 1\n"
+                                      "\n"
+                                      "\n"
+                                      "def test_cache_expires():\n"
+                                      "    c = TTLCache(ttl_seconds=0.05)\n"
+                                      "    c.set(\"a\", 1)\n"
+                                      "    time.sleep(0.1)\n"
+                                      "    assert c.get(\"a\") is None\n"},
+        task="实现 TTLCache：get/set 带过期时间，过期后 get 返回 None，并通过已有测试",
+        difficulty=4, tech="python",
+        golden={"cache.py": "import time\n"
+                            "\n"
+                            "\n"
+                            "class TTLCache:\n"
+                            "    def __init__(self, ttl_seconds):\n"
+                            "        self.ttl = ttl_seconds\n"
+                            "        self._data = {}\n"
+                            "        self._expires = {}\n"
+                            "\n"
+                            "    def get(self, key):\n"
+                            "        exp = self._expires.get(key)\n"
+                            "        if exp is None:\n"
+                            "            return None\n"
+                            "        if time.monotonic() > exp:\n"
+                            "            self._data.pop(key, None)\n"
+                            "            self._expires.pop(key, None)\n"
+                            "            return None\n"
+                            "        return self._data[key]\n"
+                            "\n"
+                            "    def set(self, key, value):\n"
+                            "        self._data[key] = value\n"
+                            "        self._expires[key] = time.monotonic() + self.ttl\n"},
+        verify=lambda ws: run_pytest(ws, "tests/test_cache.py"),
+    ),
+    BenchmarkCase(
+        name="ts-api-pagination",
+        files={"src/orders.ts": "export interface Order { id: number; }\n"
+                                "export function listOrders(orders: Order[]): Order[] {\n"
+                                "  return orders;\n"
+                                "}\n"},
+        task="为 listOrders 增加分页参数 page 与 pageSize，返回对应切片",
+        difficulty=4, tech="typescript",
+        golden={"src/orders.ts": "export interface Order { id: number; }\n"
+                                 "export function listOrders(orders: Order[], "
+                                 "page = 1, pageSize = 10): Order[] {\n"
+                                 "  const start = (page - 1) * pageSize;\n"
+                                 "  return orders.slice(start, start + pageSize);\n"
+                                 "}\n"},
+        verify=lambda ws: (grep(ws, r"\.slice\(", "src/orders.ts")
+                           and grep(ws, r"pageSize", "src/orders.ts")),
+    ),
 ]
 
 # ---- 断言 1/2：区分度（反例不通过 + 正例通过） ----
@@ -643,12 +885,12 @@ def test_golden_passes(ws_tmp, case):
 
 # ---- 断言 3：分级统计 ----
 def test_difficulty_distribution():
-    """分级统计：首批 20 个场景，L1-L4 各 5 个，覆盖 4 类技术栈。"""
+    """分级统计：收敛期扩展至 28 个场景，L1-L4 各 7 个，覆盖 4 类技术栈。"""
     from collections import Counter
     counts = Counter(c.difficulty for c in CASES)
-    assert len(CASES) == 20
-    assert counts[1] == 5 and counts[2] == 5
-    assert counts[3] == 5 and counts[4] == 5
+    assert len(CASES) == 28
+    assert counts[1] == 7 and counts[2] == 7
+    assert counts[3] == 7 and counts[4] == 7
     assert len({c.tech for c in CASES}) >= 3  # 至少 3 种技术栈标签
 
 
