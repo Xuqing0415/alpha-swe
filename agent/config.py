@@ -270,6 +270,9 @@ class AgentConfig(BaseModel):
     # 进阶 1.2：反事实分析——任务失败后归因并写入长期记忆，相似任务
     # 检索命中时以 [反事实警告] 注入 Prompt
     counterfactual_enabled: bool = True
+    # 进阶 3.1：自动测试生成——代码写入且无测试覆盖时生成 test_*.py
+    auto_testgen: bool = True
+    auto_testgen_verify: bool = False  # 生成后立即运行 pytest 验证（子进程，默认关）
     # 第 9 节：Web 观测面板（python -m tui --web，或置 True 自动开启）
     web_panel_enabled: bool = False
     web_panel_host: str = "127.0.0.1"

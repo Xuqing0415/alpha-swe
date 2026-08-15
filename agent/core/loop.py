@@ -1035,6 +1035,9 @@ class AgentLoop:
             if result.metadata.get("timed_out"):
                 self._track_timeout(name, params, task, result)
             self.metrics.record_tool_result(result.success)
+            # 进阶 3.1：代码写入后自动补齐测试（无测试覆盖时生成 test_*.py）
+            if result.success and self.config.agent.auto_testgen:
+                self._maybe_auto_testgen(name, params, task)
             # 方案 2.3：进度回写事件（TUI 任务面板/状态栏实时刷新）
             self._emit(
                 "execution_completed",
@@ -1646,3 +1649,69 @@ class AgentLoop:
         except Exception as e:
             logger.warning("反事实分析/存储失败（不影响任务）: %s", e)
 
+    # ---- 进阶 3.1：自动测试生成（改动无测试覆盖时补齐 test_*.py） ----
+    def _maybe_auto_testgen(self, name: str, params: Dict[str, Any],
+                            task: Task) -> None:
+        """file_ops 写入 .py 且无测试覆盖时自动生成测试（非阻塞）。"""
+        if name != "file_ops":
+            return
+        action = str(params.get("action", ""))
+        if action not in ("write", "edit", "append"):
+            return
+        path = str(params.get("path", "")).strip()
+        if not path.endswith(".py"):
+            return
+        try:
+            from agent.testgen import generate_and_write, needs_tests
+            workspace = self.config.sandbox.workspace
+            if not needs_tests(workspace, path):
+                self._decision.record(
+                    "testgen.skip", "agent.auto_testgen", True,
+                    f"已有测试覆盖或非源码文件: {path}",
+                )
+                return
+            content = str(params.get("content", ""))
+            if not content.strip() and action in ("edit", "append"):
+                target = Path(workspace) / path
+                if target.exists():
+                    content = target.read_text(encoding="utf-8")
+            written = generate_and_write(workspace, path, content)
+            if written is None:
+                self._decision.record(
+                    "testgen.skip", "agent.auto_testgen", True,
+                    f"未生成测试（无公开符号）: {path}",
+                )
+                return
+            test_path, targets = written
+            self._decision.record(
+                "testgen.generated", "agent.auto_testgen", True,
+                f"为 {path} 生成 {targets} 个测试目标: {test_path}",
+            )
+            self._emit("testgen_generated", module=path,
+                       test_file=test_path, targets=targets)
+            if self.config.agent.auto_testgen_verify:
+                asyncio.create_task(self._verify_testgen(path, test_path))
+        except Exception as e:
+            logger.warning("自动测试生成失败（不影响任务）: %s", e)
+            try:
+                self._decision.record(
+                    "testgen.fallback", "agent.auto_testgen", True,
+                    f"自动测试生成降级: {str(e)[:100]}",
+                )
+            except Exception:
+                pass
+
+    async def _verify_testgen(self, module_path: str,
+                              test_path: str) -> None:
+        """生成后立即运行 pytest 验证（可选开关，失败只记录决策点）。"""
+        try:
+            from agent.testgen import verify_generated
+            result = await verify_generated(
+                self.config.sandbox.workspace, test_path)
+            self._decision.record(
+                "testgen.verify", "agent.auto_testgen_verify", True,
+                f"生成的测试{'通过' if result and result.success else '失败'}: "
+                f"{module_path} -> {test_path}",
+            )
+        except Exception as e:
+            logger.warning("测试生成验证失败: %s", e)
