@@ -28,6 +28,8 @@ class ParsedAction:
     content: str = ""
     raw: str = ""
     error: Optional[str] = None
+    # 决策理由显式化（进阶 1.1）：Agent 解释为什么选择这个动作/方案
+    reasoning: str = ""
     # 单次响应多工具调用（design 6 节）：tool_calls 列表中除第一个外的其余项
     extra_tool_calls: List[Dict[str, Any]] = field(default_factory=list)
 
@@ -39,10 +41,13 @@ class Parser:
     """
 
     def __init__(self, max_retries: int = 3, mode: str = "loose",
-                 decision_logger=None):
+                 decision_logger=None, require_reasoning: bool = False):
         self.max_retries = max_retries
         self.mode = mode
         self.decision_logger = decision_logger
+        # 进阶 1.1：开启后强制 tool_call / final_answer 携带 reasoning
+        # （为什么这样做，至少 10 个字符），缺失则拒绝并要求重试
+        self.require_reasoning = require_reasoning
         self.failures: List[Dict[str, Any]] = []
 
     def parse(self, llm_output: str) -> ParsedAction:
@@ -53,17 +58,18 @@ class Parser:
         # 文本格式 "Tool: x\nInput: ..." 优先（Input 可能是 JSON 对象）
         m = TOOL_TEXT.search(raw)
         if m:
-            return ParsedAction(
+            action = ParsedAction(
                 action_type="tool_call",
                 tool_name=m.group(1).strip(),
                 params=self._guess_params(m.group(2).strip()),
                 raw=raw,
             )
+            return self._check_reasoning(action, raw)
 
         # JSON 代码块 / 独立 JSON 对象
         data = self._extract_json_object(raw)
         if data is not None:
-            return self._from_object(data, raw)
+            return self._check_reasoning(self._from_object(data, raw), raw)
 
         # 兜底：正则抓 tool 名
         m = re.search(r'"tool"\s*:\s*"(\w+)"', raw)
@@ -84,11 +90,30 @@ class Parser:
         logger.warning("解析失败第 %d 次: %s", attempt, action.error)
         return (
             f"你的上一条输出无法解析（错误: {action.error}）。"
-            f"请只输出 JSON 代码块，例如: ```json {{\"tool\": \"terminal_execute\", "
-            f"\"params\": {{\"command\": \"dir\"}}}}``` 或 {{\"final_answer\": \"...\"}}。"
+            f"请只输出 JSON 代码块，并携带 reasoning 字段解释为什么这样做，"
+            f"例如: ```json {{\"tool\": \"terminal_execute\", "
+            f"\"params\": {{\"command\": \"dir\"}}, "
+            f"\"reasoning\": \"先查看目录结构以定位问题\"}}``` "
+            f"或 {{\"final_answer\": \"...\", \"reasoning\": \"...\"}}。"
         )
 
     # ---- 内部 ----
+    @staticmethod
+    def _reasoning_of(data: Dict[str, Any]) -> str:
+        """从动作 JSON 中提取 reasoning（缺省为空串）。"""
+        return str(data.get("reasoning", "")).strip()
+
+    def _check_reasoning(self, action: ParsedAction, raw: str) -> ParsedAction:
+        """require_reasoning 开启时，关键动作必须携带可解释的决策理由。"""
+        if (self.require_reasoning
+                and action.action_type in ("tool_call", "final_answer")
+                and len(action.reasoning) < 10):
+            return ParsedAction(
+                action_type="error", raw=raw,
+                error="缺少 reasoning 字段：每个动作需解释为什么这么做（至少 10 个字符）",
+            )
+        return action
+
     def _extract_json_object(self, text: str) -> Optional[Dict[str, Any]]:
         m = FENCE_JSON.search(text)
         if m:
@@ -122,6 +147,7 @@ class Parser:
                         tool_name=str(first["tool"]),
                         params=params,
                         extra_tool_calls=rest,
+                        reasoning=self._reasoning_of(first),
                         raw=raw,
                     )
             return ParsedAction(
@@ -136,6 +162,7 @@ class Parser:
                 action_type="tool_call",
                 tool_name=str(data["tool"]),
                 params=params,
+                reasoning=self._reasoning_of(data),
                 raw=raw,
             )
             if "think" in data:
@@ -144,9 +171,13 @@ class Parser:
                 action.content = str(data["think"])
             return action
         if "think" in data:
-            return ParsedAction(action_type="think", content=str(data["think"]), raw=raw)
+            return ParsedAction(
+                action_type="think", content=str(data["think"]),
+                reasoning=self._reasoning_of(data), raw=raw)
         if "final_answer" in data:
-            return ParsedAction(action_type="final_answer", content=str(data["final_answer"]), raw=raw)
+            return ParsedAction(
+                action_type="final_answer", content=str(data["final_answer"]),
+                reasoning=self._reasoning_of(data), raw=raw)
         return ParsedAction(
             action_type="error",
             raw=raw,

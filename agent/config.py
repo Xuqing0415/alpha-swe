@@ -264,6 +264,9 @@ class AgentConfig(BaseModel):
     session_archive_dir: str = "./logs/sessions"  # 会话档案目录（事件+span+决策+指标）
     archive_enabled: bool = True            # 会话档案写入开关
     metrics_enabled: bool = True            # 实时指标注册表开关
+    # 进阶 1.1：决策理由显式化——开启后强制 tool_call/final_answer 携带
+    # reasoning 字段（为什么这么做），缺失则由 Parser 拒绝并要求重试
+    require_reasoning: bool = False
     # 第 9 节：Web 观测面板（python -m tui --web，或置 True 自动开启）
     web_panel_enabled: bool = False
     web_panel_host: str = "127.0.0.1"

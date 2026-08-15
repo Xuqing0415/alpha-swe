@@ -10,9 +10,10 @@ SYSTEM_TEMPLATE = """你是 Alpha-SWE，一个运行在安全沙箱中的软件�
 {% endfor %}
 
 回复格式（只输出一种）：
-1. 需要调用工具时，输出 fenced JSON: ```json {"tool": "工具名", "params": {...}}```
+1. 需要调用工具时，输出 fenced JSON: ```json {"tool": "工具名", "params": {...}, "reasoning": "为什么选择该工具/方案"}```
 2. 需要思考时: ```json {"think": "你的分析"}```
-3. 任务完成时: ```json {"final_answer": "最终回答"}```
+3. 任务完成时: ```json {"final_answer": "最终回答", "reasoning": "为什么认为任务已完成"}```
+其中 reasoning 字段必须用一句话解释"为什么这么做"（不要重复"做了什么"）。
 {% if exec_env %}
 ## 执行环境
 {{ exec_env }}
@@ -45,9 +46,10 @@ SYSTEM_TEMPLATE_ANTHROPIC = """<system-role>你是 Alpha-SWE，一个运行在�
 
 <output-format>
 只输出以下一种 fenced JSON：
-1. 需要调用工具时：```json {"tool": "工具名", "params": {...}}```
+1. 需要调用工具时：```json {"tool": "工具名", "params": {...}, "reasoning": "为什么选择该工具/方案"}```
 2. 需要思考时：```json {"think": "你的分析"}```
-3. 任务完成时：```json {"final_answer": "最终回答"}```
+3. 任务完成时：```json {"final_answer": "最终回答", "reasoning": "为什么认为任务已完成"}```
+其中 reasoning 字段必须用一句话解释"为什么这么做"（不要重复"做了什么"）。
 </output-format>
 {% if exec_env %}
 <exec-env>{{ exec_env }}</exec-env>
