@@ -15,6 +15,7 @@ from agent.tools.base import ExecutionContext
 from agent.tools.terminal import TerminalTool
 from tui.formatting import format_event
 from tui.app import AlphaSWEApp, CommandInput
+from tui.messages import AgentEventMessage
 from textual.widgets import Input, Static
 
 
@@ -1066,3 +1067,61 @@ async def test_tui_bg_view_and_bg_command(ws_tmp):
         log = app.query_one("#main-log")
         joined = "".join(str(line) for line in log.lines)
         assert "后台" in joined and tid in joined
+
+# ---- 进阶 3.3：回归检测 TUI 联动（格式渲染 + 统计 + 终端区高亮） ----
+def test_format_event_regression_events():
+    clean = format_event({"type": "regression_clean",
+                          "data": {"module": "app.py",
+                                   "test_file": "test_app.py"}})
+    assert "OK" in clean.plain and "回归检测通过" in clean.plain
+    assert "app.py" in clean.plain and "test_app.py" in clean.plain
+    det = format_event({"type": "regression_detected",
+                        "data": {"module": "app.py",
+                                 "test_file": "test_app.py",
+                                 "summary": "assert 1 == 2 failed"}})
+    assert "REG" in det.plain and "回归检测失败" in det.plain
+    assert "assert 1 == 2 failed" in det.plain
+    skip = format_event({"type": "regression_skip",
+                         "data": {"module": "app.py",
+                                  "test_file": "test_app.py"}})
+    assert "回归检测跳过" in skip.plain and "app.py" in skip.plain
+
+
+@pytest.mark.asyncio
+async def test_tui_regression_event_linkage(ws_tmp):
+    """回归事件驱动 TUI：统计累加、失败摘要进终端区、/status 汇总。"""
+    cfg = make_config(ws_tmp)
+    app = AlphaSWEApp("回归联动测试", config=cfg, planner=StubPlanner())
+    async with app.run_test(size=(120, 40)) as pilot:
+        app.post_message(AgentEventMessage({
+            "type": "regression_clean",
+            "data": {"module": "app.py", "test_file": "test_app.py"},
+        }))
+        app.post_message(AgentEventMessage({
+            "type": "regression_detected",
+            "data": {"module": "app.py", "test_file": "test_app.py",
+                     "summary": "assert 1 == 2 failed"},
+        }))
+        app.post_message(AgentEventMessage({
+            "type": "regression_skip",
+            "data": {"module": "app.py", "test_file": "test_app.py"},
+        }))
+        await pilot.pause()
+        await pilot.pause()
+        assert app._regression_stats == {"clean": 1, "detected": 1, "skip": 1}
+        # 检测失败时失败摘要高亮写入终端输出区
+        joined = "".join(str(t) for t in app._terminal_lines)
+        assert "回归检测失败" in joined
+        assert "assert 1 == 2 failed" in joined
+        # /status 输出回归汇总
+        box = await _query_input_with_retry(app, pilot, Input)
+        box.focus()
+        box.value = "/status"
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        log = app.query_one("#main-log")
+        rendered = "".join(str(line) for line in log.lines)
+        assert "回归" in rendered
+        assert "通过1" in rendered and "失败1" in rendered and "跳过1" in rendered
+

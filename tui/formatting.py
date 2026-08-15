@@ -36,6 +36,7 @@ _LOG_TYPES: Dict[str, Tuple[str, str]] = {
     "testgen_generated": ("OK", "green"),
     "regression_clean": ("OK", "green"),
     "regression_detected": ("REG", "red"),
+    "regression_skip": ("INFO", "bright_black"),
     "mutation_analyzed": ("MUT", "yellow"),
     "counterfactual_stored": ("MEM", "bright_black"),
     # 预留：记忆操作 / 观察结果
@@ -158,6 +159,9 @@ def _format_body(etype: str, data: Dict[str, Any]) -> str:
         return (f"回归检测失败: {data.get('module', '')} -> "
                 f"{data.get('test_file', '')} | "
                 f"{_truncate(str(data.get('summary', '')), 160)}")
+    if etype == "regression_skip":
+        return (f"回归检测跳过: {data.get('module', '')} -> "
+                f"{data.get('test_file', '')}")
     if etype == "mutation_analyzed":
         score = float(data.get("score", 0) or 0)
         survivors = _join(data.get("survivors", []))

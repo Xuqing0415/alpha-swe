@@ -442,6 +442,7 @@ class AlphaSWEApp(App[None]):
         self._task_panel_visible = True
         self._session_id = uuid.uuid4().hex[:6]
         self._bg_tasks: Dict[str, Dict[str, Any]] = {}  # 后台任务事件追踪
+        self._regression_stats = {"clean": 0, "detected": 0, "skip": 0}  # 回归检测统计（进阶 3.3）
 
     # ---- 装配 ----
     def _make_runner(self) -> AgentRunner:
@@ -530,10 +531,32 @@ class AlphaSWEApp(App[None]):
                      style="dim"))
             self._append_diff_event(record["data"])
             self._mark_tree_from_data(record["data"])
+        if record.get("type") in ("regression_clean", "regression_detected",
+                                  "regression_skip"):
+            self._track_regression(record)
         self.refresh_status()
 
     def on_terminal_output_message(self, msg: TerminalOutputMessage) -> None:
         self._append_terminal(Text(msg.text, style=""))
+
+    def _track_regression(self, record: Dict[str, Any]) -> None:
+        """统计回归检测结果；检测失败时在终端区高亮失败摘要（进阶 3.3）。"""
+        etype = record.get("type")
+        data = record.get("data", {}) or {}
+        if etype == "regression_clean":
+            self._regression_stats["clean"] += 1
+        elif etype == "regression_detected":
+            self._regression_stats["detected"] += 1
+            line = Text()
+            line.append("回归检测失败: ", style="bold red")
+            line.append(f"{data.get('module', '')} -> "
+                        f"{data.get('test_file', '')}", style="white")
+            summary = str(data.get("summary", ""))[:400]
+            if summary:
+                line.append("\n" + summary, style="red")
+            self._append_terminal(line)
+        else:
+            self._regression_stats["skip"] += 1
 
     def on_agent_finished_message(self, msg: AgentFinishedMessage) -> None:
         self._finished = msg.result
@@ -708,6 +731,9 @@ class AlphaSWEApp(App[None]):
                          if r.get("status") == "running")
         if bg_running:
             lines.append(f"后台任务: {bg_running} 个运行中（F5 后台视图）")
+        reg = self._regression_stats
+        if any(reg.values()):
+            lines.append(f"回归: 通过 {reg['clean']} / 失败 {reg['detected']} / 跳过 {reg['skip']}")
         lines.append(f"耗时: {_fmt_elapsed(time.monotonic() - self._started_at)}")
         panel.update("\n".join(lines))
 
@@ -1075,9 +1101,14 @@ class AlphaSWEApp(App[None]):
         tokens = self._estimate_tokens()
         tasks = runner.dag_summary().get("by_status", {}) if runner else {}
         bits = " ".join(f"{k}:{v}" for k, v in sorted(tasks.items()))
+        reg = self._regression_stats
+        reg_bits = ""
+        if any(reg.values()):
+            reg_bits = (f" 回归[通过{reg['clean']}/失败{reg['detected']}"
+                        f"/跳过{reg['skip']}]")
         self._append_thought(Text(
             f"状态: 阶段={phase} 轮次={rounds} tokens={tokens} "
-            f"任务[{bits}] 会话={self._session_id}",
+            f"任务[{bits}]{reg_bits} 会话={self._session_id}",
             style="bright_black"))
 
     def _append_queue_status(self) -> None:

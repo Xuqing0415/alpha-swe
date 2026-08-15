@@ -1993,6 +1993,8 @@ class AgentLoop:
                     f"测试无法运行，跳过回归检测: "
                     f"{str(test_result.output or '')[:100]}",
                 )
+                self._emit("regression_skip", task_id=task.id,
+                           module=path, test_file=test_path)
                 return result
             summary = test_result.summary
             self._decision.record(
