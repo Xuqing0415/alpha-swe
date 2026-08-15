@@ -256,6 +256,10 @@ class BackgroundTaskTool(Tool):
             try:
                 handle = await self.manager.start(command, context.workspace)
             except Exception as e:
+                # 方案 2.4：启动失败也写入决策日志，保证可观测性
+                self._log("background.start_failed", "tools.background_task",
+                  command,
+                          f"后台任务启动失败: {e}")
                 return ToolResult(
                     success=False, error=f"后台任务启动失败: {e}",
                     elapsed_ms=(time.time() - start) * 1000,

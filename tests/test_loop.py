@@ -6,9 +6,12 @@ import pytest
 
 from agent.config import (MCPOptions, AgentConfig, AppConfig,
                           MemoryConfig, SandboxConfig)
+from agent.core.decision_logger import DecisionLogger
 from agent.core.loop import AgentLoop
 from agent.core.task import Task
 from agent.llm import MockLLM
+from agent.tools.background import BackgroundHandle, BackgroundTaskTool
+from agent.tools.manager import ToolManager
 
 
 class StubPlanner:
@@ -58,6 +61,24 @@ def make_config(ws_tmp: Path):
         memory=MemoryConfig(db_path=str(ws_tmp / "mem.db")),
         mcp=MCPOptions(enabled=False),  # 基础循环测试不连接 MCP 服务器
     )
+
+
+class FakeBackgroundManager:
+    """不真实拉起子进程的后台任务管理器（沙箱无法 spawn 进程）。"""
+
+    def __init__(self):
+        self._tasks = {}
+
+    async def start(self, command: str, workspace: str):
+        handle = BackgroundHandle(task_id="bgtest01", command=command)
+        self._tasks[handle.task_id] = handle
+        return handle
+
+    def list_tasks(self):
+        return list(self._tasks.keys())
+
+    async def shutdown_all(self, graceful: bool = False):
+        self._tasks.clear()
 
 
 @pytest.mark.asyncio
@@ -226,7 +247,13 @@ async def test_loop_close_cleans_background_tasks(ws_tmp):
         '"command": "python -c \\"import time; time.sleep(30)\\""}}',
         '{"final_answer": "完成"}',
     )
-    loop = AgentLoop(config=cfg, llm=llm, planner=StubPlanner())
+    dl = DecisionLogger()
+    mgr = FakeBackgroundManager()
+    bg_tool = BackgroundTaskTool(manager=mgr, decision_logger=dl)
+    tools = ToolManager()
+    tools.register(bg_tool)
+    loop = AgentLoop(config=cfg, llm=llm, planner=StubPlanner(),
+                     tools=tools, decision_logger=dl)
     result = await loop.run("后台任务清理测试")
     assert result.ok
     # 决策日志记录了 background.start（方案 2.4 决策点）
@@ -236,3 +263,31 @@ async def test_loop_close_cleans_background_tasks(ws_tmp):
     assert len(mgr.list_tasks()) == 1
     await loop.close()
     assert mgr.list_tasks() == []
+
+
+@pytest.mark.asyncio
+async def test_background_start_failure_records_decision(ws_tmp):
+    """方案 2.4：后台任务启动失败也应写入决策日志（可观测性）。"""
+    cfg = make_config(ws_tmp)
+
+    class BoomManager(FakeBackgroundManager):
+        async def start(self, command, workspace):
+            raise PermissionError("sandbox 拒绝启动子进程")
+
+    llm = ScriptedLLM(
+        '{"tool": "background_task", "params": {"action": "start", '
+        '"command": "python -c \\"import time; time.sleep(30)\\""}}',
+        '{"final_answer": "完成"}',
+    )
+    dl = DecisionLogger()
+    bg_tool = BackgroundTaskTool(manager=BoomManager(), decision_logger=dl)
+    tools = ToolManager()
+    tools.register(bg_tool)
+    loop = AgentLoop(config=cfg, llm=llm, planner=StubPlanner(),
+                     tools=tools, decision_logger=dl)
+    result = await loop.run("后台启动失败测试")
+    assert result.ok
+    # 启动失败也应留下可观测决策点，而非静默丢失
+    assert loop._decision.find(name="background.start_failed"), \
+        "应记录 background.start_failed 决策"
+    await loop.close()

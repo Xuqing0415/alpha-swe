@@ -171,6 +171,12 @@ class AgentLoop:
             self.config.sandbox, self._decision,
         )
         self.tools = tools or self._default_tools()
+        # 方案 2.4：注入自定义工具集时，从管理器找回后台任务工具，
+        # 确保 close() 仍能清理由外部注册的 background_task 实例
+        if getattr(self, "_background_tasks", None) is None:
+            _bg = self.tools.get("background_task")
+            if isinstance(_bg, BackgroundTaskTool):
+                self._background_tasks = _bg
         self._tool_enabled = getattr(self, "_tool_enabled", None)
         self.planner = planner or Planner(
             llm=self.llm, config=self.config.planner,
