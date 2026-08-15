@@ -89,8 +89,13 @@ def _format_body(etype: str, data: Dict[str, Any]) -> str:
         params = _compact_params(data.get("params"))
         status = "成功" if data.get("success") else "失败"
         output = _truncate(str(data.get("output", "")), 100)
-        return (f"{data.get('tool', '')} {params} -> {status}"
+        line = (f"{data.get('tool', '')} {params} -> {status}"
                 + (f" | {output}" if output else ""))
+        # 决策理由显式化（进阶 1.1）：与动作并列展示"为什么"
+        reasoning = str(data.get("reasoning", "")).strip()
+        if reasoning:
+            line += f" | 理由: {_truncate(reasoning, 120)}"
+        return line
     if etype == "task_done":
         return f"任务完成: {data.get('task_id', '')}"
     if etype == "task_interrupted":

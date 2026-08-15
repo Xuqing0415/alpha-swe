@@ -161,6 +161,7 @@ class AgentLoop:
             max_retries=self.config.agent.max_retries,
             mode="strict" if self.config.llm.temperature < 0.3 else "loose",
             decision_logger=self._decision,
+            require_reasoning=self.config.agent.require_reasoning,
         )
         self.context = context_manager or ContextManager(
             keep_recent_rounds=self.config.agent.keep_recent_rounds,
@@ -743,6 +744,13 @@ class AgentLoop:
                          c.get("params") if isinstance(c.get("params"), dict) else {})
                         for c in parsed.extra_tool_calls
                     )
+                    # 决策理由显式化（进阶 1.1）：记录 Agent 为什么选择该工具
+                    if parsed.reasoning:
+                        self._decision.record(
+                            "tool.reasoning", "agent.require_reasoning",
+                            self.config.agent.require_reasoning,
+                            f"{parsed.tool_name}: {parsed.reasoning[:200]}",
+                        )
                     # 空参数保护：连续空/缺参调用给出明确纠正，达阈值即中止
                     if parsed.content:
                         self._emit("think", task_id=task.id,
@@ -798,7 +806,10 @@ class AgentLoop:
                         task.history.append({"role": "observation", "content": obs})
                         self._emit("tool_call", task_id=task.id, tool=name,
                                    params=params, success=result.success,
-                                   output=obs[:300], meta=result.metadata)
+                                   output=obs[:300], meta=result.metadata,
+                                   reasoning=(
+                                       parsed.reasoning
+                                       if name == parsed.tool_name else ""))
                         self._index_code(params, result)
                     if any(r.metadata.get("circuit_broken") for r in results):
                         task.mark(TaskStatus.FAILED,
@@ -815,8 +826,16 @@ class AgentLoop:
                     continue
 
                 if parsed.action_type == "final_answer":
+                    # 决策理由显式化：记录任务完成的"为什么"
+                    if parsed.reasoning:
+                        self._decision.record(
+                            "final.reasoning", "agent.require_reasoning",
+                            self.config.agent.require_reasoning,
+                            parsed.reasoning[:200],
+                        )
                     task.mark(TaskStatus.COMPLETED, result=parsed.content)
-                    self._emit("task_done", task_id=task.id, ok=True)
+                    self._emit("task_done", task_id=task.id, ok=True,
+                               reasoning=parsed.reasoning)
                     self.metrics.inc("tasks_completed")
                     self.tracer.end_span(task_span, status="ok",
                                          rounds=task.round_count)
