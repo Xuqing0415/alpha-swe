@@ -34,6 +34,7 @@ from agent.memory.store import (MemoryStore, NoopMemoryStore,
                                  classify_task_type, format_experience_text)
 from agent.memory.summarizer import ExperienceSummarizer
 from agent.parser.parser import Parser
+from agent.counterfactual import prepend_warnings
 from agent.planner.planner import Planner
 from agent.prompt.builder import PromptBuilder, estimate_tokens
 from agent.sandbox.audit import FileAuditStore
@@ -426,6 +427,13 @@ class AgentLoop:
                 f"检索到 {before} 项，相似度过滤后保留 {len(memory_hits)} 项",
             )
         memory_text = self.memory.format_context(memory_hits)
+        memory_text, cf_count = prepend_warnings(memory_hits, memory_text)
+        if cf_count:
+            self._decision.record(
+                "counterfactual.injected", "agent.counterfactual_enabled",
+                self.config.agent.counterfactual_enabled,
+                f"注入 {cf_count} 条反事实警告（相似失败教训）",
+            )
         if memory_text:
             self.prompt_builder.set_memory(memory_text)
 
@@ -464,6 +472,7 @@ class AgentLoop:
                 prompt, self.events, self.tracer.snapshot(),
                 self._decision.records(), self.metrics.snapshot(), result,
             )
+            self._maybe_counterfactual(prompt, result)
             return result
 
         all_tasks = self.scheduler.dag.all()
@@ -499,6 +508,7 @@ class AgentLoop:
             prompt, self.events, self.tracer.snapshot(),
             self._decision.records(), self.metrics.snapshot(), result,
         )
+        self._maybe_counterfactual(prompt, result)
         return result
 
     # ---- 断点续跑（方案 1.3）：任务快照落盘 / 读取 / 恢复 ----
@@ -1356,7 +1366,15 @@ class AgentLoop:
                 hits = self.memory.search(
                     task.instruction, top_k=self.config.memory.top_k)
             if hits:
-                self.prompt_builder.set_memory(self.memory.format_context(hits))
+                memory_text, cf_count = prepend_warnings(
+                    hits, self.memory.format_context(hits))
+                if cf_count:
+                    self._decision.record(
+                        "counterfactual.injected", "agent.counterfactual_enabled",
+                        self.config.agent.counterfactual_enabled,
+                        f"任务级注入 {cf_count} 条反事实警告",
+                    )
+                self.prompt_builder.set_memory(memory_text)
             self._decision.record(
                 "memory.retrieve", "memory.task_type_filter", task_type,
                 f"检索到 {len(hits)} 条记忆（task_type={task_type}"
@@ -1594,3 +1612,37 @@ class AgentLoop:
                 f"配置降级为默认值: {note.get('reason', '')}",
             )
         self._config_fallbacks_recorded = seen
+
+    # ---- 进阶 1.2：反事实分析（失败后归因 + 写长期记忆） ----
+    def _maybe_counterfactual(self, prompt: str, result: LoopResult) -> None:
+        """任务失败后做反事实分析并写入长期记忆（非阻塞）。
+
+        分析结果供后续相似任务检索时以 [反事实警告] 注入 Prompt。
+        """
+        if not self.config.agent.counterfactual_enabled:
+            return
+        if result.phase != AgentPhase.FAILED:
+            return
+        try:
+            from agent.counterfactual import analyze_failure, store_lesson
+            doc = self.archive.build(
+                prompt, self.events, self.tracer.snapshot(),
+                self._decision.records(), self.metrics.snapshot(), result,
+            )
+            analysis = analyze_failure(doc)
+            stored = store_lesson(self.memory, analysis, prompt=prompt)
+            self._decision.record(
+                "counterfactual.stored", "agent.counterfactual_enabled",
+                self.config.agent.counterfactual_enabled,
+                f"反事实分析: 归因={analysis['category']}，"
+                f"转折点={str(analysis.get('turning_point', ''))[:80]}，"
+                f"{'写入长期记忆' if stored else '已存在（去重跳过）'}"
+                f"（{len(analysis.get('alternatives', []))} 个备选方案）",
+            )
+            self._emit("counterfactual_stored",
+                       category=analysis.get("category"),
+                       stored=stored,
+                       turning_point=analysis.get("turning_point", ""))
+        except Exception as e:
+            logger.warning("反事实分析/存储失败（不影响任务）: %s", e)
+

@@ -267,6 +267,9 @@ class AgentConfig(BaseModel):
     # 进阶 1.1：决策理由显式化——开启后强制 tool_call/final_answer 携带
     # reasoning 字段（为什么这么做），缺失则由 Parser 拒绝并要求重试
     require_reasoning: bool = False
+    # 进阶 1.2：反事实分析——任务失败后归因并写入长期记忆，相似任务
+    # 检索命中时以 [反事实警告] 注入 Prompt
+    counterfactual_enabled: bool = True
     # 第 9 节：Web 观测面板（python -m tui --web，或置 True 自动开启）
     web_panel_enabled: bool = False
     web_panel_host: str = "127.0.0.1"
