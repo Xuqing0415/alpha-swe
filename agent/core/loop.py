@@ -1034,10 +1034,14 @@ class AgentLoop:
             )
             if result.metadata.get("timed_out"):
                 self._track_timeout(name, params, task, result)
-            self.metrics.record_tool_result(result.success)
             # 进阶 3.1：代码写入后自动补齐测试（无测试覆盖时生成 test_*.py）
             if result.success and self.config.agent.auto_testgen:
-                self._maybe_auto_testgen(name, params, task)
+                await self._maybe_auto_testgen(name, params, task)
+            # 进阶 3.3：回归检测——改完就测，测不过把失败回写该步骤
+            if result.success and self.config.agent.regression_check_enabled:
+                result = await self._maybe_regression_check(
+                    name, params, task, result)
+            self.metrics.record_tool_result(result.success)
             # 方案 2.3：进度回写事件（TUI 任务面板/状态栏实时刷新）
             self._emit(
                 "execution_completed",
@@ -1650,8 +1654,8 @@ class AgentLoop:
             logger.warning("反事实分析/存储失败（不影响任务）: %s", e)
 
     # ---- 进阶 3.1：自动测试生成（改动无测试覆盖时补齐 test_*.py） ----
-    def _maybe_auto_testgen(self, name: str, params: Dict[str, Any],
-                            task: Task) -> None:
+    async def _maybe_auto_testgen(self, name: str, params: Dict[str, Any],
+                                  task: Task) -> None:
         """file_ops 写入 .py 且无测试覆盖时自动生成测试（非阻塞）。"""
         if name != "file_ops":
             return
@@ -1715,3 +1719,80 @@ class AgentLoop:
             )
         except Exception as e:
             logger.warning("测试生成验证失败: %s", e)
+
+    async def _maybe_regression_check(self, name: str,
+                                      params: Dict[str, Any],
+                                      task: Task,
+                                      result: ToolResult) -> ToolResult:
+        """阶段三 3.3：运行受影响测试，回归失败时把失败回写为该步骤结果。
+
+        返回替换后的 ToolResult；无对应测试或测试无法运行（skip）时保持
+        原结果，只记录回归决策点。回归失败通过结果回写触发"修复-重测"，
+        重试耗尽后由 criticality 决定失败/跳过，依赖步骤自动停止。
+        """
+        if name != "file_ops":
+            return result
+        action = str(params.get("action", ""))
+        if action not in ("write", "edit", "append"):
+            return result
+        path = str(params.get("path", "")).strip()
+        if not path.endswith(".py"):
+            return result
+        try:
+            from agent.regression import (affected_test_path,
+                                          classify_test_result)
+            from agent.code.test_runner import run_tests
+            workspace = self.config.sandbox.workspace
+            test_path = affected_test_path(workspace, path)
+            if not test_path:
+                self._decision.record(
+                    "regression.skip", "agent.regression_check_enabled", True,
+                    f"无对应测试文件，跳过回归检测: {path}",
+                )
+                return result
+            test_result = await run_tests(
+                "pytest", test_path, workspace,
+                timeout=self.config.agent.regression_timeout)
+            signal = classify_test_result(test_result)
+            if signal == "clean":
+                self._decision.record(
+                    "regression.clean", "agent.regression_check_enabled", True,
+                    f"改动 {path} 后受影响测试通过: {test_path}",
+                )
+                self._emit("regression_clean", task_id=task.id,
+                           module=path, test_file=test_path)
+                return result
+            if signal == "skip":
+                self._decision.record(
+                    "regression.skip", "agent.regression_check_enabled", True,
+                    f"测试无法运行，跳过回归检测: "
+                    f"{str(test_result.output or '')[:100]}",
+                )
+                return result
+            summary = test_result.summary
+            self._decision.record(
+                "regression.detected", "agent.regression_check_enabled", True,
+                f"回归检测失败: {path} -> {test_path}（{summary[:160]}）",
+            )
+            self._emit("regression_detected", task_id=task.id,
+                       module=path, test_file=test_path,
+                       summary=summary[:400])
+            return ToolResult(
+                success=False,
+                output=f"[回归检测] 改动 {path} 后受影响测试失败：\n{summary}",
+                error=f"[回归检测] 改动 {path} 后受影响测试失败：{summary[:200]}",
+                elapsed_ms=test_result.duration_ms,
+                metadata={"regression": True, "module": path,
+                          "test_file": test_path},
+            )
+        except Exception as e:
+            logger.warning("回归检测失败（不阻断任务）: %s", e)
+            try:
+                self._decision.record(
+                    "regression.skip", "agent.regression_check_enabled", True,
+                    f"回归检测降级跳过: {str(e)[:100]}",
+                )
+            except Exception:
+                pass
+            return result
+

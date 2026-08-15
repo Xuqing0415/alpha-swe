@@ -273,6 +273,9 @@ class AgentConfig(BaseModel):
     # 进阶 3.1：自动测试生成——代码写入且无测试覆盖时生成 test_*.py
     auto_testgen: bool = True
     auto_testgen_verify: bool = False  # 生成后立即运行 pytest 验证（子进程，默认关）
+    # 进阶 3.3：回归检测——代码写入后自动运行受影响测试，测不过就停
+    regression_check_enabled: bool = True
+    regression_timeout: float = 60.0
     # 第 9 节：Web 观测面板（python -m tui --web，或置 True 自动开启）
     web_panel_enabled: bool = False
     web_panel_host: str = "127.0.0.1"
