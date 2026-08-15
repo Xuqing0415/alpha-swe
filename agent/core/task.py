@@ -42,6 +42,9 @@ class Task:
     # 步骤级降级（方案 1.2）：critical 失败上抛 / normal 标记 SKIPPED / optional 静默跳过。
     # 默认 critical：未显式声明的任务失败即会话失败（跳过必须由规划器显式授权）。
     criticality: str = "critical"
+    # 进阶 2.3：资源预算——None = 使用全局默认（token 预算 / 时间预算秒）
+    token_budget: Optional[int] = None
+    time_budget: Optional[float] = None
     result: Any = None
     error: Optional[str] = None
     history: List[Dict[str, Any]] = field(default_factory=list)
@@ -74,6 +77,8 @@ class Task:
             "retry_count": self.retry_count,
             "retry_strategy": self.retry_strategy,
             "criticality": self.criticality,
+            "token_budget": self.token_budget,
+            "time_budget": self.time_budget,
             "result": self.result,
             "error": self.error,
             "metadata": dict(self.metadata),
@@ -163,14 +168,22 @@ class TaskDAG:
         return task
 
     def promote_dependents(self, task_id: str) -> List[Task]:
-        """任务完成后，把依赖它的任务提升为 READY。"""
+        """任务完成后，把依赖它的任务提升为 READY（含跨任务依赖等待）。
+
+        进阶 2.2：依赖未满足时保持 WAITING（_waiting_reason=dependency），
+        依赖完成后在此提升；外部等待（后台任务/用户输入）不在此处理。
+        """
         promoted: List[Task] = []
         for task in self._tasks.values():
             if (
                 task_id in task.dependencies
-                and task.status == TaskStatus.IDLE
+                and task.status in (TaskStatus.IDLE, TaskStatus.WAITING)
                 and self.dependencies_satisfied(task)
             ):
+                if (task.status == TaskStatus.WAITING
+                        and task.metadata.get("_waiting_reason") != "dependency"):
+                    continue  # 外部等待交给 run_to_completion 的 wake 分支
+                task.metadata.pop("_waiting_reason", None)
                 task.mark(TaskStatus.READY)
                 promoted.append(task)
         return promoted
@@ -207,6 +220,8 @@ class TaskDAG:
                 retry_count=item.get("retry_count", 0),
                 retry_strategy=item.get("retry_strategy", "backoff"),
                 criticality=item.get("criticality", "critical"),
+                token_budget=item.get("token_budget"),
+                time_budget=item.get("time_budget"),
                 result=item.get("result"),
                 error=item.get("error"),
                 metadata=dict(item.get("metadata", {})),

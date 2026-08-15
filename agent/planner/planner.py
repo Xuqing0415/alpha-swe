@@ -67,7 +67,10 @@ class Planner:
                     self.config.split_threshold_complexity,
                     f"复杂度 {complexity:.2f} < {self.config.split_threshold_complexity}，不拆分",
                 )
-            return [Task(id="t0", instruction=prompt)]
+            tokens, seconds = Planner._estimate_budget(
+                prompt, self.config)
+            return [Task(id="t0", instruction=prompt,
+                         token_budget=tokens, time_budget=seconds)]
         try:
             call_graph_text = ""
             if call_graph is not None and call_graph.symbol_count():
@@ -123,7 +126,27 @@ class Planner:
                     getattr(self.config, "provider", ""),
                     f"LLM 规划失败回退单任务: {str(e)[:120]}",
                 )
-        return [Task(id="t0", instruction=prompt)]
+        tokens, seconds = Planner._estimate_budget(
+            prompt, self.config)
+        return [Task(id="t0", instruction=prompt,
+                     token_budget=tokens, time_budget=seconds)]
+
+    @staticmethod
+    def _estimate_budget(instruction: str,
+                         config: Optional[PlannerConfig] = None):
+        """按任务复杂度估算资源预算（进阶 2.3）。
+
+        低复杂度任务分配更小预算，避免预算被简单任务浪费；
+        LLM 可在规划 JSON 中显式覆盖 token_budget / time_budget。
+        """
+        cfg = config or PlannerConfig()
+        complexity = Planner._estimate_complexity(instruction)
+        base_token = int(getattr(cfg, "budget_token_base", 10000))
+        base_time = float(getattr(cfg, "budget_time_base", 300.0))
+        factor = 0.5 + complexity
+        tokens = max(2000, int(base_token * factor))
+        seconds = max(60.0, base_time * factor)
+        return tokens, seconds
 
     @staticmethod
     def _estimate_complexity(instruction: str) -> float:
@@ -163,11 +186,23 @@ class Planner:
                         deps.append(f"t{idx}")
                 except (TypeError, ValueError):
                     pass
+            tokens, seconds = Planner._estimate_budget(
+                instruction, self.config)
+            try:
+                token_budget = int(item.get("token_budget") or tokens)
+            except (TypeError, ValueError):
+                token_budget = tokens
+            try:
+                time_budget = float(item.get("time_budget") or seconds)
+            except (TypeError, ValueError):
+                time_budget = seconds
             tasks.append(Task(
                 id=f"t{i}",
                 instruction=instruction,
                 dependencies=list(dict.fromkeys(deps)),
                 priority=int(item.get("priority", 0)),
+                token_budget=token_budget,
+                time_budget=time_budget,
             ))
         return tasks
 

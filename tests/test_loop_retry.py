@@ -36,7 +36,8 @@ class ScriptedLLM(MockLLM):
 
 def make_config(ws_tmp: Path):
     return AppConfig(
-        agent=AgentConfig(max_rounds=10, max_retries=2, max_concurrency=1),
+        agent=AgentConfig(max_rounds=10, max_retries=2, max_concurrency=1,
+                         budget_enabled=False),
         sandbox=SandboxConfig(workspace=str(ws_tmp / "ws")),
         memory=MemoryConfig(db_path=str(ws_tmp / "mem.db")),
         mcp=MCPOptions(enabled=False),

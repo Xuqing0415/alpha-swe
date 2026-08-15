@@ -25,6 +25,8 @@ _LOG_TYPES: Dict[str, Tuple[str, str]] = {
     "task_preempted": ("PRQ", "yellow"),
     "task_resumed": ("INFO", "bright_black"),
     "priority_changed": ("INFO", "bright_black"),
+    "budget_warning": ("WARN", "yellow"),
+    "budget_exhausted": ("ERROR", "red"),
     "interrupt": ("WARN", "yellow"),
     "skill_fallback": ("WARN", "yellow"),
     "skill_intervention": ("WARN", "yellow"),
@@ -117,6 +119,15 @@ def _format_body(etype: str, data: Dict[str, Any]) -> str:
     if etype == "priority_changed":
         return (f"优先级调整: 任务 {data.get('task_id', '')} -> "
                 f"{data.get('priority', '')}")
+    if etype == "budget_warning":
+        return (f"预算告警: 任务 {data.get('task_id', '')} "
+                f"{data.get('kind', '')} 已用 "
+                f"{data.get('used', 0)}/{data.get('budget', 0)}"
+                f"（{data.get('pct', 0)}%）")
+    if etype == "budget_exhausted":
+        return (f"预算耗尽: 任务 {data.get('task_id', '')} "
+                f"{data.get('kind', '')} 已用 "
+                f"{data.get('used', 0)}/{data.get('budget', 0)}"                f"，任务终止")
     if etype == "interrupt":
         return f"注入指令: {data.get('prompt', '')}"
     if etype == "skill_fallback":

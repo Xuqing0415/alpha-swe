@@ -185,6 +185,9 @@ class PlannerConfig(BaseModel):
     max_subtasks: int = 5
     allow_parallel: bool = True
     split_threshold_complexity: float = 0.0  # 0 = 总是拆分（保持旧行为）
+    # 进阶 2.3：预算估算基准（按任务复杂度线性缩放）
+    budget_token_base: int = 10000
+    budget_time_base: float = 300.0
 
 
 
@@ -253,6 +256,12 @@ class AgentConfig(BaseModel):
     # 进阶 2.1：任务队列与动态抢占——高优先级任务就绪时在安全点
     # 暂停低优先级任务（PAUSED），高优先级完成后自动恢复
     preemption_enabled: bool = True
+    # 进阶 2.3：资源预算管理——每任务 token/时间预算（秒）
+    budget_enabled: bool = True
+    default_token_budget: int = 10000
+    default_time_budget: float = 300.0
+    budget_warn_ratio: float = 0.8       # 达到该比例发出告警
+    budget_borrow_enabled: bool = True   # 高优先级可借用低优先级未用预算
     parallel_tool_calls: bool = True  # 单次响应多工具是否并行执行
     require_confirmation: List[str] = Field(default_factory=lambda: [
         "file_write", "terminal:rm", "terminal:git push",

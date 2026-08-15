@@ -41,21 +41,34 @@ class Scheduler:
 
     # ---- 任务提交 ----
     def submit(self, task: Task) -> Task:
-        """提交新任务（外部可直接用 Task）。"""
+        """提交新任务（外部可直接用 Task）。
+
+        进阶 2.2：依赖未满足的任务进入 WAITING（_waiting_reason=
+        dependency），依赖完成后由 promote_dependents 提升为 READY。
+        """
+        self.dag.add(task)
         if task.status == TaskStatus.IDLE:
-            task.mark(TaskStatus.READY)
-        return self.dag.add(task)
+            if task.dependencies and not self.dag.dependencies_satisfied(task):
+                task.mark(TaskStatus.WAITING)
+                task.metadata["_waiting_reason"] = "dependency"
+            else:
+                task.mark(TaskStatus.READY)
+        return task
 
     def spawn(self, instruction: str, parent_id: Optional[str] = None,
               dependencies: Optional[List[str]] = None, priority: int = 0) -> Task:
-        """Agent 在执行过程中动态拆分出子任务。"""
+        """Agent 在执行过程中动态拆分出子任务；依赖未满足时进入 WAITING。"""
         task = self.dag.create_task(
             instruction=instruction,
             dependencies=dependencies,
             priority=priority,
             parent_id=parent_id,
         )
-        task.mark(TaskStatus.READY)
+        if dependencies and not self.dag.dependencies_satisfied(task):
+            task.mark(TaskStatus.WAITING)
+            task.metadata["_waiting_reason"] = "dependency"
+        else:
+            task.mark(TaskStatus.READY)
         logger.info("spawn task=%s parent=%s deps=%s", task.id, parent_id, dependencies)
         return task
 
@@ -66,6 +79,9 @@ class Scheduler:
         for t in tasks:
             if self.dag.dependencies_satisfied(t):
                 t.mark(TaskStatus.READY)
+            elif t.dependencies:
+                t.mark(TaskStatus.WAITING)
+                t.metadata["_waiting_reason"] = "dependency"
 
     # ---- 调度 ----
     def ready(self) -> List[Task]:
@@ -164,7 +180,8 @@ class Scheduler:
                 except asyncio.TimeoutError:
                     logger.warning("等待唤醒超时，重新检查就绪任务")
                 for t in self.dag.all():
-                    if t.status == TaskStatus.WAITING:
+                    if (t.status == TaskStatus.WAITING
+                            and t.metadata.get("_waiting_reason") != "dependency"):
                         t.mark(TaskStatus.READY)
                 wake_event.clear()
                 continue

@@ -57,6 +57,21 @@ class TaskInterrupted(Exception):
 class TaskPreempted(Exception):
     """任务被更高优先级任务抢占（进阶 2.1：安全点暂停，等待恢复）。"""
 
+class TaskBudgetExceeded(Exception):
+    """任务资源预算耗尽（进阶 2.3）：token 或时间预算用尽，任务终止。"""
+
+    def __init__(self, kind: str, used: float, budget: float,
+                 report: Optional[Dict[str, Any]] = None,
+                 borrowed: float = 0.0):
+        super().__init__(
+            f"任务预算耗尽（{kind}）: 已用 {used:.0f} / 预算 {budget:.0f}"
+            + (f"，借用 {borrowed:.0f}" if borrowed else ""))
+        self.kind = kind
+        self.used = used
+        self.budget = budget
+        self.report = report or {}
+        self.borrowed = borrowed
+
 
 @dataclass
 class LoopResult:
@@ -593,6 +608,11 @@ class AgentLoop:
             for t in dag.all():
                 if t.status not in terminal:
                     t.status = TaskStatus.READY
+                    # 进阶 2.3：清空运行期预算状态，避免跨进程时间戳误判
+                    t.metadata.pop("_started_at", None)
+                    t.metadata.pop("_tokens_used", None)
+                    t.metadata.pop("_budget_warned", None)
+                    t.metadata.pop("_budget_borrowed", None)
             self.scheduler.dag = dag
             plan = dag.all()
             done = sum(1 for t in plan if t.status in terminal)
@@ -650,7 +670,9 @@ class AgentLoop:
 
     @staticmethod
     def _retry_available(task: Task) -> bool:
-        """是否还有重试预算。"""
+        """是否还有重试预算；预算耗尽视为永久失败，不重试。"""
+        if task.metadata.get("_budget_exhausted"):
+            return False
         return task.retry_count < task.max_retries
 
     @staticmethod
@@ -715,6 +737,7 @@ class AgentLoop:
     async def _execute_task(self, task: Task) -> None:
         """每个任务的内部 ReAct 循环：Think -> Act -> Observe -> Parse。"""
         resumed = bool(task.metadata.pop("_resumed", False))
+        task.metadata.setdefault("_started_at", time.monotonic())
         task.mark(TaskStatus.RUNNING)
         if resumed:  # 进阶 2.1：抢占后恢复执行
             self._emit("task_resumed", task_id=task.id,
@@ -755,9 +778,13 @@ class AgentLoop:
 
                 llm_span = self.tracer.start_span("llm", "llm", task_id=task.id)
                 self.metrics.inc("llm_calls")
-                self.metrics.record_token_usage(estimate_tokens(messages))
+                msg_tokens = estimate_tokens(messages)
+                self.metrics.record_token_usage(msg_tokens)
+                self._add_task_tokens(task, msg_tokens)
                 resp = await self.llm.complete(messages)
-                self.metrics.record_token_usage(estimate_tokens(resp))
+                resp_tokens = estimate_tokens(resp)
+                self.metrics.record_token_usage(resp_tokens)
+                self._add_task_tokens(task, resp_tokens)
                 self.tracer.end_span(llm_span, status="ok", chars=len(resp))
                 parsed = self.parser.parse(resp)
                 task.history.append({"role": "assistant", "content": resp})
@@ -831,7 +858,8 @@ class AgentLoop:
                         for name, params in calls:
                             results.append(await self._run_tool(name, params, task))
                     for (name, params), result in zip(calls, results):
-                        obs = await self._summarize_observation(name, result)
+                        obs = await self._summarize_observation(
+                            name, result, task)
                         task.history.append({"role": "observation", "content": obs})
                         self._emit("tool_call", task_id=task.id, tool=name,
                                    params=params, success=result.success,
@@ -852,7 +880,8 @@ class AgentLoop:
                     if any(r.metadata.get("waiting") for r in results):
                         task.mark(TaskStatus.WAITING)  # 挂起，释放控制权
                         return
-                    # 进阶 2.1：工具调用返回也是安全点，可被更高优先级任务抢占
+                    # 进阶 2.1/2.3：工具调用返回也是安全点，先查预算再查抢占
+                    self._maybe_enforce_budget(task)
                     await self._maybe_preempt(task)
                     continue
 
@@ -890,6 +919,17 @@ class AgentLoop:
 
             task.mark(TaskStatus.FAILED, error=f"超过最大轮数 {self._max_rounds}")
             self.tracer.end_span(task_span, status="error", error=task.error)
+            self._on_task_failure(task)
+        except TaskBudgetExceeded as e:
+            # 进阶 2.3：预算耗尽——生成预算报告并终止任务（不重试）
+            task.metadata["_budget_exhausted"] = True
+            task.metadata["budget_report"] = e.report
+            self.metrics.inc("budget_exhausted")
+            task.mark(TaskStatus.FAILED, error=str(e))
+            self._emit("budget_exhausted", task_id=task.id,
+                       kind=e.kind, used=e.used, budget=e.budget,
+                       report=e.report)
+            self.tracer.end_span(task_span, status="error", error=str(e))
             self._on_task_failure(task)
         except TaskPreempted:
             # 进阶 2.1：被更高优先级任务抢占——挂起并落盘快照，等待恢复
@@ -1188,8 +1228,130 @@ class AgentLoop:
             raise TaskInterrupted()
         if not self._pause_event.is_set():
             await self._pause_event.wait()  # 暂停挂起，直到 resume()
+        self._maybe_enforce_budget(task)  # 资源预算检查（进阶 2.3）
         await self._maybe_preempt(task)  # 高优先级任务抢占（进阶 2.1）
         await asyncio.sleep(0)  # 让出事件循环
+
+    def _add_task_tokens(self, task: Optional[Task], delta: float) -> None:
+        """累计任务级 token 消耗（进阶 2.3）。"""
+        if task is None:
+            return
+        task.metadata["_tokens_used"] = (
+            task.metadata.get("_tokens_used", 0) + max(0, int(delta)))
+
+    def _budget_report(self, task: Task, used: int, token_budget: int,
+                       elapsed: float, time_budget: float,
+                       borrowed: int) -> Dict[str, Any]:
+        """生成预算消耗报告（进阶 2.3）。"""
+        return {
+            "task_id": task.id,
+            "instruction": task.instruction[:100],
+            "tokens_used": used,
+            "token_budget": token_budget,
+            "borrowed": borrowed,
+            "elapsed_s": round(elapsed, 1),
+            "time_budget": time_budget,
+            "rounds": task.round_count,
+            "status": task.status.value,
+        }
+
+    def _borrow_budget(self, task: Task, deficit: int) -> int:
+        """高优先级任务借用低优先级任务的未用 token 预算（进阶 2.3）。
+
+        只从优先级更低的任务借用；借用额记录到双方 metadata 供审计。
+        """
+        if not self.config.agent.budget_borrow_enabled:
+            return 0
+        borrowed = 0
+        candidates = [
+            t for t in self.scheduler.dag.all()
+            if t.id != task.id and t.priority < task.priority
+        ]
+        for t in sorted(candidates,
+                        key=lambda x: (-x.priority, x.created_at)):
+            tb = t.token_budget or self.config.agent.default_token_budget
+            used = t.metadata.get("_tokens_used", 0)
+            remaining = max(0, tb - used)
+            if remaining <= 0:
+                continue
+            take = min(remaining, deficit)
+            t.metadata["_budget_lent"] = (
+                t.metadata.get("_budget_lent", 0) + take)
+            task.metadata["_budget_borrowed"] = (
+                task.metadata.get("_budget_borrowed", 0) + take)
+            borrowed += take
+            deficit -= take
+            if deficit <= 0:
+                break
+        if borrowed:
+            self._decision.record(
+                "budget.borrow", "agent.budget_borrow_enabled",
+                self.config.agent.budget_borrow_enabled,
+                f"任务 {task.id} 借用 {borrowed} token"
+                f"（高优先级借用低优先级未用预算）",
+            )
+        return borrowed
+
+    def _maybe_enforce_budget(self, task: Task) -> None:
+        """安全点预算检查：80% 告警，100% 尝试借用后终止（进阶 2.3）。
+
+        调用方为 _checkpoint 与工具调用返回安全点；
+        耗尽时抛 TaskBudgetExceeded 由 _execute_task 统一处理。
+        """
+        if not self.config.agent.budget_enabled:
+            return
+        token_budget = (task.token_budget
+                        or self.config.agent.default_token_budget)
+        time_budget = (task.time_budget
+                       or self.config.agent.default_time_budget)
+        used = task.metadata.get("_tokens_used", 0)
+        elapsed = time.monotonic() - task.metadata.get(
+            "_started_at", time.monotonic())
+        warn_ratio = self.config.agent.budget_warn_ratio
+        # 80% 告警（每任务每类一次）
+        if (not task.metadata.get("_budget_warned")
+                and used >= token_budget * warn_ratio):
+            task.metadata["_budget_warned"] = True
+            self.metrics.inc("budget_warnings")
+            pct = int(used / token_budget * 100) if token_budget else 0
+            self._emit("budget_warning", task_id=task.id, kind="token",
+                       used=used, budget=token_budget, pct=pct)
+            self._decision.record(
+                "budget.warn", "agent.budget_warn_ratio", warn_ratio,
+                f"任务 {task.id} token 预算 {used}/{token_budget}"
+                f"（{pct}%，达到告警阈值）",
+            )
+        if (not task.metadata.get("_time_warned")
+                and elapsed >= time_budget * warn_ratio):
+            task.metadata["_time_warned"] = True
+            self.metrics.inc("budget_warnings")
+            pct = int(elapsed / time_budget * 100) if time_budget else 0
+            self._emit("budget_warning", task_id=task.id, kind="time",
+                       used=int(elapsed), budget=int(time_budget),
+                       pct=pct)
+            self._decision.record(
+                "budget.warn", "agent.budget_warn_ratio", warn_ratio,
+                f"任务 {task.id} 时间预算 {elapsed:.0f}s/{time_budget:.0f}s"
+                f"（{pct}%，达到告警阈值）",
+            )
+        # token 耗尽：先尝试借用低优先级预算
+        borrowed = task.metadata.get("_budget_borrowed", 0)
+        if used > token_budget + borrowed:
+            deficit = used - (token_budget + borrowed)
+            got = self._borrow_budget(task, deficit)
+            borrowed = task.metadata.get("_budget_borrowed", 0)
+        if used > token_budget + borrowed:
+            report = self._budget_report(
+                task, used, token_budget, elapsed, time_budget, borrowed)
+            raise TaskBudgetExceeded(
+                "token", used, token_budget, report=report,
+                borrowed=borrowed)
+        if elapsed > time_budget:
+            report = self._budget_report(
+                task, used, token_budget, elapsed, time_budget, borrowed)
+            raise TaskBudgetExceeded(
+                "time", elapsed, time_budget, report=report,
+                borrowed=borrowed)
 
     async def _maybe_preempt(self, task: Task) -> None:
         """安全点抢占检查：存在更高优先级的就绪任务时暂停当前任务。
@@ -1219,7 +1381,8 @@ class AgentLoop:
         text = str(params)
         return text if len(text) <= limit else text[:limit] + f"...({len(text)} chars)"
 
-    async def _summarize_observation(self, tool_name: str, result) -> str:
+    async def _summarize_observation(self, tool_name: str, result,
+                                     task: Optional[Task] = None) -> str:
         """工具输出三级处理（方案 2.2）：全文 / 头尾+存档 / LLM 摘要+关键行+存档。
 
         - <= output_truncate：全文保留；
@@ -1243,7 +1406,8 @@ class AgentLoop:
         )
 
         if len(text) > 20_000:
-            summary = await self._llm_summarize_output(tool_name, raw)
+            summary = await self._llm_summarize_output(
+                tool_name, raw, task)
             if summary:
                 body = f"摘要: {summary}"
             else:
@@ -1291,7 +1455,8 @@ class AgentLoop:
                 break
         return key_lines
 
-    async def _llm_summarize_output(self, tool_name: str, raw: str) -> str:
+    async def _llm_summarize_output(self, tool_name: str, raw: str,
+                                     task: Optional[Task] = None) -> str:
         """超长输出用 LLM 生成摘要；MockLLM（脚本化测试）不消费响应。"""
         try:
             from agent.llm import MockLLM
@@ -1303,9 +1468,13 @@ class AgentLoop:
                 f"必须保留所有错误、警告、文件路径与行号。\n\n"
                 f"{raw[:30000]}"
             )
-            self.metrics.record_token_usage(estimate_tokens(prompt))
+            prompt_tokens = estimate_tokens(prompt)
+            self.metrics.record_token_usage(prompt_tokens)
+            self._add_task_tokens(task, prompt_tokens)
             resp = await self.llm.complete([{"role": "user", "content": prompt}])
-            self.metrics.record_token_usage(estimate_tokens(resp))
+            resp_tokens = estimate_tokens(resp)
+            self.metrics.record_token_usage(resp_tokens)
+            self._add_task_tokens(task, resp_tokens)
             return (resp or "").strip()[:800]
         except Exception as e:
             logger.warning("输出摘要生成失败: %s", e)

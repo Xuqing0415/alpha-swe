@@ -62,6 +62,7 @@ _TASK_MARKS = {
     "completed": ("完成 ", "green"),
     "running": ("进行>", "yellow"),
     "waiting": ("等待 ", "bright_black"),
+    "waiting_dep": ("依赖 ", "cyan"),
     "paused": ("暂停 ", "yellow"),
     "retrying": ("重试 ", "yellow"),
     "skipped": ("跳过 ", "bright_black"),
@@ -243,7 +244,8 @@ _HELP_TEXT = """[bold]Alpha-SWE 快捷键[/bold]
 [bold]输入命令（/ 开头）[/bold]
 /pause 暂停   /resume 恢复   /status 详细状态
 /retry 重试   /skip 跳过     /quit 退出
-/queue 任务队列（优先级/状态）  /priority <id> <n> 调整优先级
+/queue 任务队列（优先级/状态）  /deps 依赖关系
+  /priority <id> <n> 调整优先级
 /bg 后台任务列表  /bg <id> 日志  /bg stop <id> 停止
 
 [bold]日志类型[/bold]
@@ -740,13 +742,29 @@ class AlphaSWEApp(App[None]):
                 1 for t in loop.scheduler.dag.all()
                 if t.status.value in ("running", "ready", "paused", "waiting")
             )
+        budget_hint = ""
+        if loop is not None:
+            for t in loop.scheduler.dag.all():
+                if t.status.value == "running":
+                    used = t.metadata.get("_tokens_used", 0)
+                    budget = (t.token_budget
+                              or getattr(loop.config.agent,
+                                         "default_token_budget", 10000))
+                    if budget:
+                        pct = int(used / budget * 100)
+                        style = ("yellow" if pct >= 80
+                                 else "red" if pct >= 100 else "white")
+                        budget_hint = (
+                            f" | 预算: [{style}]{used:,}/{budget:,}"
+                            f" ({pct}%)[/]")
+                    break
         left_names = {"tasks": "任务", "tree": "文件树"}
         left_hint = f"[{left_names.get(self._left_view, '任务')}]"
         bar.update(
             f"tokens: [{t_style}]{tokens:,}[/] | "
             f"round: [{r_style}]{rounds}/{max_rounds}[/] | "
             f"mem: {self._memory_usage()} | session: {self._session_id}"
-            f" | 活跃: {active} | {left_hint} | {view_hint}"
+            f" | 活跃: {active}{budget_hint} | {left_hint} | {view_hint}"
             + self._bg_status_hint()
         )
 
@@ -911,6 +929,8 @@ class AlphaSWEApp(App[None]):
             self._inject("跳过当前步骤" + (f"：{rest}" if rest else ""))
         elif cmd == "/queue":
             self._append_queue_status()
+        elif cmd == "/deps":
+            self._append_deps_status()
         elif cmd == "/priority":
             self._handle_priority(rest)
         elif cmd == "/bg":
@@ -1075,9 +1095,41 @@ class AlphaSWEApp(App[None]):
             return
         lines = [f"任务队列: {len(tasks)} 项（高优先级先执行）"]
         for t in sorted(tasks, key=lambda x: (-x.priority, x.created_at)):
+            deps = (f" 依赖[{",".join(t.dependencies)}]"
+                    if t.dependencies else "")
+            budget = ""
+            if getattr(t, "token_budget", None):
+                used = t.metadata.get("_tokens_used", 0)
+                budget = f" tok {used}/{t.token_budget}"
             lines.append(
                 f"  [{t.priority:>2}] {t.status.value:<9} {t.id}  "
-                f"{t.instruction[:40]}")
+                f"{t.instruction[:40]}{deps}{budget}")
+        self._append_thought(Text("\n".join(lines), style="bright_black"))
+
+    def _append_deps_status(self) -> None:
+        """/deps：列出任务 DAG 依赖边与等待依赖的任务（进阶 2.2）。"""
+        runner = self.runner
+        loop = runner.loop if runner else None
+        if loop is None:
+            self._append_thought(Text("任务 DAG 不可用（Agent 未运行）",
+                                      style="yellow"))
+            return
+        tasks = list(loop.scheduler.dag.all())
+        edges = [(t.id, d) for t in tasks for d in t.dependencies]
+        if not edges:
+            self._append_thought(Text("任务依赖: （无依赖边）",
+                                      style="bright_black"))
+            return
+        lines = [f"任务依赖: {len(edges)} 条边"]
+        for tid, dep in edges:
+            src = next((t for t in tasks if t.id == tid), None)
+            inst = src.instruction[:30] if src else ""
+            lines.append(f"  {tid} -> {dep}  {inst}")
+        waiting = [t for t in tasks
+                   if t.metadata.get("_waiting_reason") == "dependency"]
+        if waiting:
+            lines.append("等待依赖: " + ", ".join(
+                f"{t.id}({','.join(t.dependencies)})" for t in waiting))
         self._append_thought(Text("\n".join(lines), style="bright_black"))
 
     def _handle_priority(self, rest: str) -> None:
@@ -1328,9 +1380,13 @@ def _phase_text(phase: str) -> str:
 
 def _task_row(t: Any) -> str:
     st = t.status.value
-    mark, color = _TASK_MARKS.get(st, ("未知 ", "bright_black"))
-    label = f"{t.instruction[:22]}"
     meta = t.metadata or {}
+    # 进阶 2.2：依赖未满足的任务显示「依赖」标记（等待前驱完成）
+    if st == "waiting" and meta.get("_waiting_reason") == "dependency":
+        mark, color = _TASK_MARKS.get("waiting_dep", ("依赖 ", "cyan"))
+    else:
+        mark, color = _TASK_MARKS.get(st, ("未知 ", "bright_black"))
+    label = f"{t.instruction[:22]}"
     if meta.get("skill"):
         idx = (meta.get("step_index") or 0) + 1
         total = meta.get("step_total") or 0
