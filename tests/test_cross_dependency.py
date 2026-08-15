@@ -122,3 +122,37 @@ def test_task_row_dependency_mark():
     t2 = Task(id="t2", instruction="外部等待")
     t2.mark(TaskStatus.WAITING)
     assert "等待 " in _task_row(t2)
+
+def test_render_dependency_tree_ascii_lines():
+    """依赖图以 ASCII 连线树渲染：|-- 兄弟 / +-- 末位 / 等依赖标记。"""
+    from tui.app import _render_dependency_tree
+    dag = TaskDAG()
+    a = dag.create_task("根任务", task_id="a")
+    b = dag.create_task("依赖A", task_id="b",
+                        dependencies=["a"])
+    c = dag.create_task("依赖B", task_id="c",
+                        dependencies=["b"])
+    b.metadata["_waiting_reason"] = "dependency"
+    b.mark(TaskStatus.WAITING)
+    text = _render_dependency_tree(list(dag.all()))
+    plain = text.plain
+    assert "a 根任务" in plain
+    assert "+-- b 依赖A [等依赖]" in plain
+    assert "    +-- c 依赖B" in plain
+    # 连线只用 ASCII 的 | - + 与空格，不引入特殊 Unicode 框线字符
+    box = set("─│┌┐└┘├┤┬┴┼")
+    assert not (box & set(plain))
+    assert "+--" in plain
+
+
+def test_render_dependency_tree_cycle_marked():
+    """成环依赖渲染为 (环，见上)，不无限递归。"""
+    from tui.app import _render_dependency_tree
+    dag = TaskDAG()
+    a = dag.create_task("A", task_id="a")
+    b = dag.create_task("B", task_id="b",
+                        dependencies=["a"])
+    a.dependencies = ["b"]
+    text = _render_dependency_tree(list(dag.all()))
+    assert "环，见上" in text.plain
+

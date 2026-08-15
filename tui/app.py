@@ -1115,21 +1115,28 @@ class AlphaSWEApp(App[None]):
                                       style="yellow"))
             return
         tasks = list(loop.scheduler.dag.all())
+        if not tasks:
+            self._append_thought(Text("任务依赖: （无任务）",
+                                      style="bright_black"))
+            return
         edges = [(t.id, d) for t in tasks for d in t.dependencies]
         if not edges:
             self._append_thought(Text("任务依赖: （无依赖边）",
                                       style="bright_black"))
             return
-        lines = [f"任务依赖: {len(edges)} 条边"]
-        for tid, dep in edges:
-            src = next((t for t in tasks if t.id == tid), None)
-            inst = src.instruction[:30] if src else ""
-            lines.append(f"  {tid} -> {dep}  {inst}")
+        text = Text()
+        text.append(f"任务依赖 DAG: {len(tasks)} 任务 / {len(edges)} 条边\n",
+                    style="bold")
+        text.append_text(_render_dependency_tree(tasks))
         waiting = [t for t in tasks
                    if t.metadata.get("_waiting_reason") == "dependency"]
         if waiting:
-            lines.append("等待依赖: " + ", ".join(
-                f"{t.id}({','.join(t.dependencies)})" for t in waiting))
+            text.append("等待依赖: ", style="bright_black")
+            text.append(", ".join(
+                f"{t.id}({','.join(t.dependencies)})" for t in waiting),
+                style="cyan")
+            text.append("\n")
+        self._append_thought(text)
         self._append_thought(Text("\n".join(lines), style="bright_black"))
 
     def _handle_priority(self, rest: str) -> None:
@@ -1378,6 +1385,78 @@ def _phase_text(phase: str) -> str:
     return f"[{color}]{phase.upper()}[/{color}]"
 
 
+def _dep_style(t: Any) -> str:
+    """依赖树节点配色：等待依赖青色，终态/运行态按状态着色。"""
+    st = t.status.value
+    meta = t.metadata or {}
+    if st == "waiting" and meta.get("_waiting_reason") == "dependency":
+        return "cyan"
+    return {"completed": "green", "running": "yellow",
+            "failed": "red", "retrying": "yellow",
+            "skipped": "bright_black"}.get(st, "white")
+
+
+def _dep_label(t: Any) -> str:
+    """依赖树节点文本：任务 id + 指令摘要 + 状态/依赖标记。"""
+    label = f"{t.id} {t.instruction[:24]}"
+    meta = t.metadata or {}
+    if meta.get("_waiting_reason") == "dependency":
+        label += " [等依赖]"
+    elif t.status.value in ("running", "ready", "retrying"):
+        label += f" [{t.status.value}]"
+    return label
+
+
+def _render_dependency_tree(tasks: List[Any]) -> Text:
+    """把任务 DAG 渲染成 ASCII 连线树（进阶 2.2 依赖图可视化）。
+
+    以无依赖任务为根，向下展开依赖方；`|--` 表示后续还有兄弟节点，
+    `+--` 表示最后一个兄弟；环通过 on_path 检测避免无限展开。
+    """
+    by_id = {t.id: t for t in tasks}
+    dependents: dict = {}
+    for t in tasks:
+        for d in t.dependencies:
+            if d in by_id:
+                dependents.setdefault(d, []).append(t.id)
+    roots = [t for t in tasks if not t.dependencies] or (tasks[:1] or [])
+    text = Text()
+
+    def node(t: Any, line_prefix: str, cont_prefix: str,
+             on_path: set) -> None:
+        text.append(line_prefix, style="bright_black")
+        text.append(_dep_label(t), style=_dep_style(t))
+        text.append("\n")
+        kids = [k for k in dependents.get(t.id, []) if k in by_id]
+        for i, kid in enumerate(kids):
+            last = i == len(kids) - 1
+            conn = "+-- " if last else "|-- "
+            if kid in on_path:
+                text.append(cont_prefix + conn, style="bright_black")
+                text.append(f"{kid}（环，见上）\n", style="yellow")
+                continue
+            node(by_id[kid], cont_prefix + conn,
+                 cont_prefix + ("    " if last else "|   "),
+                 on_path | {kid})
+
+    for t in roots:
+        node(t, "", "", {t.id})
+    reachable: set = set()
+
+    def mark(t: Any) -> None:
+        if t.id in reachable:
+            return
+        reachable.add(t.id)
+        for k in dependents.get(t.id, []):
+            mark(by_id[k])
+    for t in roots:
+        mark(t)
+    dangling = [t for t in tasks if t.id not in reachable]
+    if dangling:
+        text.append("\n环/不可达节点: ", style="yellow")
+        text.append(", ".join(t.id for t in dangling), style="yellow")
+        text.append("\n")
+    return text
 def _task_row(t: Any) -> str:
     st = t.status.value
     meta = t.metadata or {}
