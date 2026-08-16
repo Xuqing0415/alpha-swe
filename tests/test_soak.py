@@ -215,3 +215,21 @@ def test_soak_no_temp_residue(ws_tmp):
     assert residue == [], "工作区不应残留临时文件: %r" % residue
     assert sorted(p.name for p in root.iterdir()) == [
         "f0.txt", "f1.txt", "f2.txt", "f3.txt"]
+
+
+@pytest.mark.asyncio
+async def test_loop_events_bounded_with_tiny_cap(ws_tmp):
+    """max_events 生效：超出上限丢弃最旧事件并记录 events.trimmed 决策点。"""
+    cfg = _make_config(ws_tmp)
+    cfg.agent.max_events = 5
+    loop = AgentLoop(config=cfg, llm=MockLLM(), planner=StubPlanner())
+    try:
+        for i in range(20):
+            loop._emit("probe", i=i)
+        assert len(loop.events) == 5, "事件列表应裁剪到 max_events"
+        assert loop.events[0]["data"]["i"] == 15, "应保留最近 5 条"
+        assert loop.events[-1]["data"]["i"] == 19
+        assert any(d["name"] == "events.trimmed"
+                   for d in loop._decision.records()),             "首次裁剪应记录 events.trimmed 决策点"
+    finally:
+        await loop.close()

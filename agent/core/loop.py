@@ -114,6 +114,10 @@ class AgentLoop:
         self.state = StateMachine()
         self.cancel_event = asyncio.Event()
         self.events: List[Dict[str, Any]] = []
+        # 收敛期 P1：内存事件列表有界（max_events=0 表示不裁剪）
+        self._max_events = int(getattr(
+            self.config.agent, "max_events", 10000) or 0)
+        self._events_trimmed = False
         self._subscribers: List[Callable[[Dict[str, Any]], None]] = []
         self._output_callback = output_callback
         self._pause_event = asyncio.Event()
@@ -292,6 +296,15 @@ class AgentLoop:
     def _emit(self, event_type: str, **data: Any) -> None:
         record = {"type": event_type, "data": data, "ts": time.time()}
         self.events.append(record)
+        if self._max_events > 0 and len(self.events) > self._max_events:
+            del self.events[: len(self.events) - self._max_events]
+            if not self._events_trimmed:
+                self._events_trimmed = True
+                self._decision.record(
+                    "events.trimmed", "agent.max_events",
+                    self._max_events,
+                    "事件列表超限，丢弃最旧事件（内存有界）",
+                )
         for callback in list(self._subscribers):
             try:
                 callback(record)

@@ -252,6 +252,8 @@ class AgentConfig(BaseModel):
     token_threshold: float = 0.8
     max_token_limit: int = 100_000
     keep_recent_rounds: int = 3
+    # 内存事件列表上限：超出丢弃最旧事件（超长会话防泄漏，档案保留最近 N 条）
+    max_events: int = 10000
     max_concurrency: int = 1
     # 进阶 2.1：任务队列与动态抢占——高优先级任务就绪时在安全点
     # 暂停低优先级任务（PAUSED），高优先级完成后自动恢复

@@ -13,7 +13,6 @@ import json
 import logging
 import queue
 import threading
-import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
