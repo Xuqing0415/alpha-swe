@@ -14,7 +14,7 @@ from agent.llm import MockLLM
 from agent.tools.base import ExecutionContext
 from agent.tools.terminal import TerminalTool
 from tui.formatting import format_event
-from tui.app import AlphaSWEApp, CommandInput
+from tui.app import (AlphaSWEApp, CommandInput, RegressionScreen)
 from tui.messages import AgentEventMessage
 from textual.widgets import Input, Static
 
@@ -1125,3 +1125,84 @@ async def test_tui_regression_event_linkage(ws_tmp):
         assert "回归" in rendered
         assert "通过1" in rendered and "失败1" in rendered and "跳过1" in rendered
 
+
+# ---- 进阶 3.3 联动补强：回归失败全屏摘要视图（F7 / /reg） ----
+def test_tui_regression_failure_tracking_bounded():
+    """回归失败明细按记录追加，缓存上限 200 条。"""
+    app = AlphaSWEApp("回归明细缓存", planner=StubPlanner())
+    app._append_terminal = lambda renderable: None  # 未挂载时屏蔽终端区渲染
+    for i in range(250):
+        app._track_regression({
+            "type": "regression_detected",
+            "data": {"module": "m%d.py" % i,
+                     "test_file": "test_m%d.py" % i,
+                     "summary": "assert %d == %d failed" % (i, i + 1)},
+        })
+    assert len(app._regression_failures) == 200, "失败明细应裁剪到 200 条"
+    first = app._regression_failures[0]
+    assert first["module"] == "m50.py"
+    last = app._regression_failures[-1]
+    assert last["module"] == "m249.py"
+    assert "assert 249 == 250 failed" in last["summary"]
+
+
+@pytest.mark.asyncio
+async def test_tui_regression_fullscreen_summary(ws_tmp):
+    """F7 全屏摘要：统计头 + 逐条失败项，Esc 关闭。"""
+    cfg = make_config(ws_tmp)
+    app = AlphaSWEApp("回归全屏测试", config=cfg, planner=StubPlanner())
+    async with app.run_test(size=(120, 40)) as pilot:
+        app.post_message(AgentEventMessage({
+            "type": "regression_clean",
+            "data": {"module": "app.py", "test_file": "test_app.py"},
+        }))
+        app.post_message(AgentEventMessage({
+            "type": "regression_detected",
+            "data": {"module": "app.py", "test_file": "test_app.py",
+                     "summary": "assert 1 == 2 failed\nat test_app.py:42"},
+        }))
+        app.post_message(AgentEventMessage({
+            "type": "regression_clean",
+            "data": {"module": "auth.py", "test_file": "test_auth.py"},
+        }))
+        app.post_message(AgentEventMessage({
+            "type": "regression_skip",
+            "data": {"module": "x.py", "test_file": "test_x.py"},
+        }))
+        await pilot.pause()
+        await pilot.pause()
+        assert app._regression_stats == {"clean": 2, "detected": 1, "skip": 1}
+        assert len(app._regression_failures) == 1
+
+        await pilot.press("f7")
+        await pilot.pause()
+        assert isinstance(app.screen, RegressionScreen), "F7 应打开全屏视图"
+        reg = app.screen
+        log = reg.query_one("#reg-full-log")
+        joined = "".join(getattr(line, "text", "") or str(line)
+                         for line in log.lines)
+        assert "回归统计" in joined
+        assert "通过 2" in joined and "失败 1" in joined and "跳过 1" in joined
+        assert "app.py" in joined and "test_app.py" in joined
+        assert "assert 1 == 2 failed" in joined
+        assert "test_app.py:42" in joined
+
+        # Esc 关闭回到主界面
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not isinstance(app.screen, RegressionScreen)
+
+
+@pytest.mark.asyncio
+async def test_tui_regression_fullscreen_no_records(ws_tmp):
+    """无回归记录时 F7 不弹窗，仅提示；/reg 命令同样触发。"""
+    cfg = make_config(ws_tmp)
+    app = AlphaSWEApp("回归空状态", config=cfg, planner=StubPlanner())
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        await pilot.press("f7")
+        await pilot.pause()
+        assert not isinstance(app.screen, RegressionScreen), "无记录不应弹窗"
+        log = app.query_one("#main-log")
+        joined = "".join(str(line) for line in log.lines)
+        assert "暂无回归检测记录" in joined

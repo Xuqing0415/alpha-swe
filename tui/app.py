@@ -10,6 +10,7 @@
 
 交互：
 - F1 帮助 / F2 任务面板 / F3 终端全屏 / F4 宽窄切换 / F5 主区视图；
+- F7 回归失败摘要全屏（Esc 退出）；
 - Ctrl+I 注入指令 / Ctrl+P 暂停 / Ctrl+R 重试 / Ctrl+S 跳过；
 - 输入栏支持 /pause /resume /status /retry /skip /quit，上下箭头浏览历史。
 """
@@ -169,7 +170,7 @@ Screen {
 }
 
 /* 弹窗 */
-HelpScreen, TerminalScreen {
+HelpScreen, TerminalScreen, RegressionScreen {
     align: center middle;
 }
 
@@ -190,6 +191,18 @@ HelpScreen, TerminalScreen {
 }
 
 #term-full-log {
+    height: 1fr;
+}
+
+#reg-box {
+    width: 90%;
+    height: 90%;
+    border: round white;
+    padding: 0 1;
+    background: $panel;
+}
+
+#reg-full-log {
     height: 1fr;
 }
 
@@ -233,6 +246,7 @@ _HELP_TEXT = """[bold]Alpha-SWE 快捷键[/bold]
 [green]F3[/green]  终端全屏  [green]F4[/green]  宽屏/窄屏切换
 [green]F5[/green]  主区视图（日志/变更/监控/时间线/后台）
 [green]F6[/green]  任务面板/文件树切换
+[green]F7[/green]  回归失败摘要全屏
 [green]Ctrl+I[/green]  注入指令    [green]Ctrl+P[/green]  暂停/继续
 [green]Ctrl+R[/green]  重试当前步骤 [green]Ctrl+S[/green]  跳过当前步骤
 [green]Ctrl+L[/green]  日志级别过滤 [green]Ctrl+U[/green]  清空终端
@@ -247,6 +261,7 @@ _HELP_TEXT = """[bold]Alpha-SWE 快捷键[/bold]
 /queue 任务队列（优先级/状态）  /deps 依赖关系
   /priority <id> <n> 调整优先级
 /bg 后台任务列表  /bg <id> 日志  /bg stop <id> 停止
+/reg 回归失败摘要全屏（同 F7）
 
 [bold]日志类型[/bold]
 [cyan]THINK[/cyan] 思考   [white]ACT[/white] 动作   OBS 观察
@@ -372,6 +387,56 @@ class TerminalScreen(ModalScreen[None]):
         self.dismiss(None)
 
 
+class RegressionScreen(ModalScreen[None]):
+    """F7 回归失败摘要全屏视图：统计头 + 逐条失败项（模块/测试/摘要），Esc 退出。"""
+
+    BINDINGS = [Binding("escape", "close_reg", "关闭")]
+
+    def __init__(self, stats: Dict[str, int],
+                 failures: List[Dict[str, Any]]) -> None:
+        super().__init__()
+        self._stats = dict(stats)
+        self._failures = list(failures)
+
+    def compose(self):
+        with Vertical(id="reg-box"):
+            yield Label("回归检测失败摘要（Esc 退出）", classes="pane-title")
+            yield RichLog(id="reg-full-log", highlight=True, markup=True,
+                          wrap=True, auto_scroll=True)
+
+    def on_mount(self) -> None:
+        log = self.query_one("#reg-full-log", RichLog)
+        log.clear()
+        st = self._stats
+        header = Text()
+        header.append("回归统计: ", style="bold white")
+        header.append(f"通过 {st.get('clean', 0)}", style="green")
+        header.append("  / 失败 ", style="white")
+        header.append(f"{st.get('detected', 0)}", style="red")
+        header.append("  / 跳过 ", style="white")
+        header.append(f"{st.get('skip', 0)}", style="dim")
+        log.write(header)
+        log.write(Text("=" * 60, style="dim"))
+        if not self._failures:
+            log.write(Text("（无回归失败记录）", style="dim"))
+            return
+        for i, f in enumerate(self._failures, 1):
+            line = Text()
+            line.append(f"[{f.get('ts', '--:--:--')}] ", style="bright_black")
+            line.append(f"#{i} ", style="bright_black")
+            line.append(f"{f.get('module', '')}", style="bold white")
+            line.append(" -> ", style="dim")
+            line.append(f"{f.get('test_file', '')}", style="yellow")
+            log.write(line)
+            summary = f.get("summary", "")
+            if summary:
+                log.write(Text(summary, style="red"))
+            log.write(Text("", style="dim"))
+
+    def action_close_reg(self) -> None:
+        self.dismiss(None)
+
+
 class AlphaSWEApp(App[None]):
     """纯终端风格的 Alpha-SWE Agent 界面（设计：信息优先、键盘优先）。"""
 
@@ -388,6 +453,7 @@ class AlphaSWEApp(App[None]):
         Binding("f5", "cycle_main_view", "主区视图"),
         Binding("d", "toggle_terminal_diff", "变更切换"),
         Binding("f6", "toggle_file_tree", "文件树"),
+        Binding("f7", "show_regression_summary", "回归摘要"),
         Binding("ctrl+i", "focus_input", "注入指令"),
         Binding("ctrl+p", "toggle_pause", "暂停/继续"),
         Binding("ctrl+r", "retry_step", "重试"),
@@ -443,6 +509,7 @@ class AlphaSWEApp(App[None]):
         self._session_id = uuid.uuid4().hex[:6]
         self._bg_tasks: Dict[str, Dict[str, Any]] = {}  # 后台任务事件追踪
         self._regression_stats = {"clean": 0, "detected": 0, "skip": 0}  # 回归检测统计（进阶 3.3）
+        self._regression_failures: List[Dict[str, Any]] = []  # 回归失败详情（F7 全屏摘要视图）
 
     # ---- 装配 ----
     def _make_runner(self) -> AgentRunner:
@@ -547,6 +614,14 @@ class AlphaSWEApp(App[None]):
             self._regression_stats["clean"] += 1
         elif etype == "regression_detected":
             self._regression_stats["detected"] += 1
+            self._regression_failures.append({
+                "ts": time.strftime("%H:%M:%S"),
+                "module": str(data.get("module", "")),
+                "test_file": str(data.get("test_file", "")),
+                "summary": str(data.get("summary", ""))[:600],
+            })
+            if len(self._regression_failures) > 200:
+                self._regression_failures = self._regression_failures[-200:]
             line = Text()
             line.append("回归检测失败: ", style="bold red")
             line.append(f"{data.get('module', '')} -> "
@@ -734,6 +809,8 @@ class AlphaSWEApp(App[None]):
         reg = self._regression_stats
         if any(reg.values()):
             lines.append(f"回归: 通过 {reg['clean']} / 失败 {reg['detected']} / 跳过 {reg['skip']}")
+            if reg['detected']:
+                lines.append(f"  F7 查看失败摘要 ({len(self._regression_failures)} 条)")
         lines.append(f"耗时: {_fmt_elapsed(time.monotonic() - self._started_at)}")
         panel.update("\n".join(lines))
 
@@ -957,6 +1034,8 @@ class AlphaSWEApp(App[None]):
             self._append_queue_status()
         elif cmd == "/deps":
             self._append_deps_status()
+        elif cmd == "/reg":
+            self.action_show_regression_summary()
         elif cmd == "/priority":
             self._handle_priority(rest)
         elif cmd == "/bg":
@@ -1408,6 +1487,15 @@ class AlphaSWEApp(App[None]):
         self._diff_lines = []
         self._diff_path = ""
         self._terminal_diff_mode = False
+
+    def action_show_regression_summary(self) -> None:
+        """F7 / /reg：回归失败摘要全屏视图（无记录时仅提示）。"""
+        if not any(self._regression_stats.values()):
+            self._append_thought(Text("暂无回归检测记录（F7）",
+                                      style="bright_black"))
+            return
+        self.push_screen(RegressionScreen(
+            self._regression_stats, self._regression_failures))
 
 
 # ---- 渲染辅助（纯函数，便于单测） ----
