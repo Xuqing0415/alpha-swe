@@ -79,7 +79,7 @@ def write_mock_config(root, max_tokens: int = 200) -> str:
         context:
           max_tokens: {max_tokens}
           compression_threshold: 0.5
-          archive_dir: "./logs/archives"
+          archive_dir: "{root.as_posix()}/logs/archives"
           output_truncate: 2000
         """), encoding="utf-8")
     return str(cfg_path)
