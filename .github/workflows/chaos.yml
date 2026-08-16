@@ -1,0 +1,50 @@
+name: chaos-stage
+
+on:
+  workflow_dispatch:
+  schedule:
+    # UTC 18:00 = 北京时间次日 02:00，每日跑一次混沌回归
+    - cron: "0 18 * * *"
+  push:
+    paths:
+      - "tests/test_benchmark_suite.py"
+      - "tests/test_fault_injection.py"
+      - "tests/test_chaos_smoke.py"
+      - "tests/test_soak.py"
+      - ".github/workflows/chaos.yml"
+
+jobs:
+  chaos:
+    name: Chaos / soak / benchmark
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyyaml pydantic jinja2 pytest pytest-asyncio litellm psutil numpy
+
+      - name: Chaos stage - benchmark + fault injection + random chaos + soak
+        env:
+          # 每次运行用新的随机种子（workflow run id），CI 加大规模
+          CHAOS_SEED: ${{ github.run_id }}
+          CHAOS_ITERATIONS: "24"
+          CHAOS_INJECT_RATE: "0.6"
+          CHAOS_LLM_FAIL_RATE: "0.2"
+          SOAK_SESSIONS: "40"
+        run: |
+          python -X utf8 -m pytest \
+            tests/test_benchmark_suite.py \
+            tests/test_fault_injection.py \
+            tests/test_chaos_smoke.py \
+            tests/test_soak.py \
+            -q -p no:cacheprovider --durations=10
