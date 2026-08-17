@@ -133,6 +133,49 @@ def test_classify_role_capability_tiebreak():
         "编写安全补丁", capability_scores={}) == "security"
 
 
+# ---- 交叉集成深化：能力画像 → 角色分配的置信度加权路由 ----
+
+def test_capability_effective_score_confidence_weight(ws_tmp):
+    """置信加权分：可靠维度取 95% 区间下界，数据不足（<5 样本）归零。"""
+    prof = CapabilityProfile(path=str(ws_tmp / "cap.json"))
+    for _ in range(12):
+        prof.record("修复登录空指针崩溃", ok=True)
+    assert prof.reliable("debug") is True
+    assert prof.effective_score("debug", confidence_weight=0) ==         prof.score("debug")
+    assert prof.effective_score("debug", confidence_weight=1) <         prof.score("debug")
+    # 数据不足的维度不参与路由决策
+    fresh = CapabilityProfile(path=str(ws_tmp / "cap2.json"))
+    fresh.record("修复登录空指针崩溃", ok=True)
+    assert fresh.reliable("debug") is False
+    assert fresh.effective_score("debug") == 0.0
+    fresh.close()
+    prof.close()
+
+
+def test_effective_score_routing_flips_winner(ws_tmp):
+    """高原始分低置信度不再主导路由：样本不足的 coder 被充分验证的
+    security 反超（置信加权后路由结果翻转）。"""
+    coder = CapabilityProfile(path=str(ws_tmp / "coder.json"))
+    for _ in range(3):
+        coder.record("重构数据处理", ok=True)   # code_understand 3 样本
+    security = CapabilityProfile(path=str(ws_tmp / "security.json"))
+    for i in range(12):
+        security.record("修复注入漏洞", ok=(i % 3 != 0))  # security 12 样本
+    ins = "编写安全补丁"
+    raw = {"coder": coder.score_for_instruction(ins),
+           "security": security.score_for_instruction(ins)}
+    eff = {"coder": coder.effective_score_for_instruction(ins),
+           "security": security.effective_score_for_instruction(ins)}
+    assert raw["coder"] > raw["security"], "原始分 coder 应占优"
+    assert eff["coder"] == 0.0, "coder 样本不足（<5），置信加权后归零"
+    assert eff["security"] > 0.0
+    # 原始分路由 -> coder；置信加权路由 -> security（不信任偶然高分）
+    assert TeamPlanner._classify_role(ins, capability_scores=raw) == "coder"
+    assert TeamPlanner._classify_role(ins, capability_scores=eff) == "security"
+    coder.close()
+    security.close()
+
+
 @pytest.mark.asyncio
 async def test_team_planner_injects_capability_hint(ws_tmp):
     base = ws_tmp / "improve"

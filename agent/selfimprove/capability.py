@@ -171,6 +171,33 @@ class CapabilityProfile:
             return 0.0
         return sum(self.score(d) for d in dims) / len(dims)
 
+    def effective_score(self, dim: str,
+                        confidence_weight: float = 1.0) -> float:
+        """置信度加权保守分数：95% 区间下界（score - margin×weight）。
+
+        样本不足（<5，数据不足）的维度返回 0——不参与路由决策，
+        避免「几次偶然成功」的高原始分主导角色分配。
+        """
+        if not self.reliable(dim):
+            return 0.0
+        score = self.score(dim)
+        return max(score - self.margin(dim) * max(0.0, confidence_weight),
+                   0.0)
+
+    def effective_score_for_instruction(
+            self, instruction: str,
+            confidence_weight: float = 1.0) -> float:
+        """按指令推导相关维度，返回置信度加权平均分（角色路由用）。
+
+        confidence_weight=1.0 时取 95% 区间下界（完全折减不确定性）；
+        传 0 时仅保留「数据不足归零」门槛，不做区间折减。
+        """
+        dims = _dimensions_for(instruction)
+        if not dims:
+            return 0.0
+        return sum(self.effective_score(d, confidence_weight=confidence_weight)
+                   for d in dims) / len(dims)
+
     def record(self, instruction: str, ok: bool) -> List[str]:
         """记录一次任务结果，返回受影响的能力维度。"""
         if not self.enabled:

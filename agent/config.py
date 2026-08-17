@@ -317,6 +317,7 @@ class AgentConfig(BaseModel):
     self_improve_enabled: bool = True          # 总开关（能力画像 + 改进循环 + 基准提取）
     capability_enabled: bool = True            # 3.1 能力画像（EWMA 成功率 + 弱项提示）
     capability_prompt_inject: bool = True      # 规划时注入能力画像提示
+    capability_routing_confidence: float = 1.0  # 角色路由置信加权：1=取95%区间下界，0=仅数据不足门槛
     proposals_enabled: bool = True             # 3.2 失败驱动改进循环（提议队列）
     proposal_promote_threshold: int = 3        # 提议连续验证成功 N 次晋升自学策略
     proposal_reject_after: int = 5             # 应用 N 次未达标则丢弃

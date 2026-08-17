@@ -317,9 +317,16 @@ class OrchestratorAgent:
         if task.role is not None:
             role = task.role
         else:
-            # 能力感知路由：多个关键词角色命中时优先高能力分角色
-            cap_scores = {
+            # 能力感知路由（交叉集成·置信加权）：多个关键词角色命中时，
+            # 按置信度加权能力分选择——高分低置信度不再主导路由决策
+            raw_scores = {
                 name: prof.score_for_instruction(task.instruction)
+                for name, prof in self._role_profiles.items()
+            }
+            weight = float(self.config.agent.capability_routing_confidence)
+            cap_scores = {
+                name: prof.effective_score_for_instruction(
+                    task.instruction, confidence_weight=weight)
                 for name, prof in self._role_profiles.items()
             }
             role = TeamPlanner._classify_role(
@@ -327,8 +334,9 @@ class OrchestratorAgent:
             if cap_scores:
                 self.decision_logger.record(
                     "role.capability", "team.roles", role,
-                    f"关键词路由命中多角色，按能力分选 {role}"
-                    f"（{cap_scores.get(role, 0.0):.2f}）",
+                    f"关键词路由命中多角色，按置信加权能力分选 {role}"
+                    f"（原始 {raw_scores.get(role, 0.0):.2f} → "
+                    f"加权 {cap_scores.get(role, 0.0):.2f}）",
                 )
         worker = self.workers.get(role)
         if worker is None:
