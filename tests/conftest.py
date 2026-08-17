@@ -63,7 +63,8 @@ def _isolate_agent_log_dirs():
     redirects = (
         (AgentConfig, (("trace_dir", "traces"),
                        ("session_archive_dir", "sessions"),
-                       ("snapshot_dir", "snapshots"))),
+                       ("snapshot_dir", "snapshots"),
+                       ("self_improve_dir", "selfimprove"))),
         (SandboxConfig, (("audit_dir", "audit"),)),
         (ContextConfig, (("archive_dir", "archives"),)),
         (SkillConfig, (("usage_log", "skill_usage.jsonl"),)),

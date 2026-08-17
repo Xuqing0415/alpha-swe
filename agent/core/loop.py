@@ -216,6 +216,12 @@ class AgentLoop:
         self.summarizer = summarizer or ExperienceSummarizer(
             llm=self.llm, enabled=self.config.memory.auto_experience
         )
+        # 主线三：自我评估与持续进化（能力画像 / 改进提议 / 基准提取）
+        self.capability = None
+        self.proposals = None
+        self.benchmark = None
+        self._active_proposals: List[str] = []
+        self._init_self_improve()
         self.mcp = mcp_manager or MCPManager.from_config(
             load_mcp_config(), self.config.mcp,
             decision_logger=self._decision,
@@ -556,6 +562,8 @@ class AgentLoop:
                 self._decision.records(), self.metrics.snapshot(), result,
             )
             self._maybe_counterfactual(prompt, result)
+            self._maybe_self_improve(prompt, result)
+            self._maybe_extract_benchmark(prompt, result)
             self._last_result = result
             self._end_persistent_session(prompt, result)
             return result
@@ -594,6 +602,8 @@ class AgentLoop:
             self._decision.records(), self.metrics.snapshot(), result,
         )
         self._maybe_counterfactual(prompt, result)
+        self._maybe_self_improve(prompt, result)
+        self._maybe_extract_benchmark(prompt, result)
         self._last_result = result
         self._end_persistent_session(prompt, result)
         return result
@@ -1695,6 +1705,20 @@ class AgentLoop:
             kwargs["call_graph"] = self._project_ctx.call_graph
         if "project_context" in params:
             kwargs["project_context"] = self._project_ctx.profile_text
+        if "capability_profile" in params:
+            kwargs["capability_profile"] = self._capability_hint()
+        # 主线三 3.2：匹配待验证改进提议，作为本轮应用目标
+        self._active_proposals = []
+        if self.proposals is not None:
+            try:
+                self._active_proposals = self.proposals.match(prompt)
+                if self._active_proposals:
+                    self._decision.record(
+                        "selflearn.applying", "agent.proposals_enabled", True,
+                        f"应用 {len(self._active_proposals)} 条改进提议（待验证）",
+                    )
+            except Exception as e:
+                logger.warning("改进提议匹配失败: %s", e)
         return await self.planner.plan(prompt, **kwargs)
 
     def _expand_skills(self, prompt: str) -> List[Task]:
@@ -1860,6 +1884,7 @@ class AgentLoop:
                 getattr(self, "_current_prompt", ""),
                 getattr(self, "_last_result", None),
             )
+        self._flush_self_improve()
         closer = getattr(self.memory, "close", None)
         if closer is not None:
             try:
@@ -2015,6 +2040,144 @@ class AgentLoop:
                        turning_point=analysis.get("turning_point", ""))
         except Exception as e:
             logger.warning("反事实分析/存储失败（不影响任务）: %s", e)
+
+    # ---- 主线三：自我评估与持续进化（3.1 能力画像 / 3.2 改进循环 / 3.3 基准提取） ----
+    def _init_self_improve(self) -> None:
+        """按配置装配能力画像 / 改进提议 / 基准提取器（失败则整体降级关闭）。"""
+        if not self.config.agent.self_improve_enabled:
+            return
+        try:
+            from agent.selfimprove.benchmark import BenchmarkExtractor
+            from agent.selfimprove.capability import CapabilityProfile
+            from agent.selfimprove.proposals import ProposalStore
+
+            base = Path(self.config.agent.self_improve_dir).expanduser()
+            if self.config.agent.capability_enabled:
+                self.capability = CapabilityProfile(
+                    path=str(base / "capability.json"))
+            if self.config.agent.proposals_enabled:
+                self.proposals = ProposalStore(
+                    path=str(base / "proposals.json"),
+                    promote_threshold=self.config.agent.proposal_promote_threshold,
+                    reject_after=self.config.agent.proposal_reject_after,
+                )
+            if self.config.agent.benchmark_extraction_enabled:
+                self.benchmark = BenchmarkExtractor(
+                    path=str(base / "benchmark_store.json"),
+                    profile=self.capability,
+                )
+            self._decision.record(
+                "self_improve.ready", "agent.self_improve_enabled", True,
+                f"自我改进组件装配: 画像={self.capability is not None}，"
+                f"提议={self.proposals is not None}，基准={self.benchmark is not None}",
+            )
+        except Exception as e:
+            logger.warning("自我改进组件初始化失败（降级为关闭）: %s", e)
+            self.capability = self.proposals = self.benchmark = None
+
+    def _capability_hint(self) -> str:
+        """规划时注入的能力画像弱项提示（3.1）。"""
+        if self.capability is None or not self.config.agent.capability_prompt_inject:
+            return ""
+        try:
+            return self.capability.profile_text()
+        except Exception as e:
+            logger.warning("能力画像提示构建失败: %s", e)
+            return ""
+
+    def _flush_self_improve(self) -> None:
+        """关闭时落盘各台账。"""
+        for store in (self.capability, self.proposals, self.benchmark):
+            if store is None:
+                continue
+            closer = getattr(store, "close", None)
+            if closer is not None:
+                try:
+                    closer()
+                except Exception:
+                    logger.exception("自我改进台账落盘失败")
+
+    def _maybe_self_improve(self, prompt: str, result: LoopResult) -> None:
+        """任务结束：更新能力画像、验证/登记失败改进提议（非阻塞）。"""
+        try:
+            ok = result.phase == AgentPhase.COMPLETED
+            if self.capability is not None:
+                dims = self.capability.record(prompt, ok)
+                self._decision.record(
+                    "capability.updated", "agent.capability_enabled", True,
+                    f"能力画像更新: {'成功' if ok else '失败'}，"
+                    f"维度={','.join(dims)}",
+                )
+                for w in self.capability.trend_warnings()[:2]:
+                    self._decision.record(
+                        "capability.declining", "agent.capability_enabled",
+                        True, w,
+                    )
+                    self._emit("capability_declining", warning=w)
+            if self.proposals is not None:
+                for pid in self._active_proposals:
+                    status = self.proposals.verify(pid, ok=ok)
+                    if status == "promoted":
+                        self._decision.record(
+                            "selflearn.promoted", "agent.proposals_enabled",
+                            True,
+                            f"改进提议晋升自学策略: {pid}"
+                            f"（连续 {self.config.agent.proposal_promote_threshold} 次验证成功）",
+                        )
+                        self._emit("selflearn_promoted", proposal_id=pid)
+                self._active_proposals = []
+                if not ok:
+                    self._register_proposal(prompt, result)
+        except Exception as e:
+            logger.warning("自我改进流程失败（不影响任务）: %s", e)
+
+    def _register_proposal(self, prompt: str, result: LoopResult) -> None:
+        """失败任务归因后登记/刷新改进提议（3.2）。"""
+        try:
+            from agent.attribution import IMPROVEMENT_ACTIONS, classify_failure
+
+            doc = self.archive.build(
+                prompt, self.events, self.tracer.snapshot(),
+                self._decision.records(), self.metrics.snapshot(), result,
+            )
+            analysis = classify_failure(
+                events=doc.get("events", self.events),
+                decisions=doc.get("decisions", self._decision.records()),
+                metrics=doc.get("metrics", self.metrics.snapshot()),
+                final_answer=getattr(result, "final_answer", ""),
+                prompt=prompt,
+            )
+            category = analysis.get("category", "unknown")
+            action = IMPROVEMENT_ACTIONS.get(category, "")
+            pid = self.proposals.create_or_bump(category, prompt, action)
+            self._decision.record(
+                "selflearn.proposal", "agent.proposals_enabled", True,
+                f"失败归因={category}，改进提议登记: "
+                f"{(action[:60] or '(无预设措施)')}",
+            )
+            self._emit("selflearn_proposal_created",
+                       category=category, proposal_id=pid)
+        except Exception as e:
+            logger.warning("失败改进提议登记失败: %s", e)
+
+    def _maybe_extract_benchmark(self, prompt: str,
+                                 result: LoopResult) -> None:
+        """任务完成后评估代表性，提取基准集条目（待用户确认，3.3）。"""
+        if self.benchmark is None:
+            return
+        try:
+            entry = self.benchmark.evaluate(prompt, result)
+            if entry and not entry.get("duplicate"):
+                self._decision.record(
+                    "benchmark.extracted", "agent.benchmark_extraction_enabled",
+                    True,
+                    f"代表性任务提取（score={entry['score']:.2f}）: "
+                    f"{str(entry.get('reason', ''))[:80]}",
+                )
+                self._emit("benchmark_entry_pending",
+                           entry_id=entry["id"], score=entry["score"])
+        except Exception as e:
+            logger.warning("基准集提取失败（不影响任务）: %s", e)
 
     # ---- 进阶 3.1：自动测试生成（改动无测试覆盖时补齐 test_*.py） ----
     async def _maybe_auto_testgen(self, name: str, params: Dict[str, Any],

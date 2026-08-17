@@ -312,6 +312,15 @@ class AgentConfig(BaseModel):
     # 主线一 1.1/1.2：项目状态感知与会话间工作流连续性（.swe-agent/）
     state_tracker_enabled: bool = True       # 项目状态快照与跨会话差异注入
     workspace_context_enabled: bool = True   # 会话间工作流续接（next_session_hint）
+    # 主线三 3.1-3.3：自我评估与持续进化
+    self_improve_enabled: bool = True          # 总开关（能力画像 + 改进循环 + 基准提取）
+    capability_enabled: bool = True            # 3.1 能力画像（EWMA 成功率 + 弱项提示）
+    capability_prompt_inject: bool = True      # 规划时注入能力画像提示
+    proposals_enabled: bool = True             # 3.2 失败驱动改进循环（提议队列）
+    proposal_promote_threshold: int = 3        # 提议连续验证成功 N 次晋升自学策略
+    proposal_reject_after: int = 5             # 应用 N 次未达标则丢弃
+    benchmark_extraction_enabled: bool = True  # 3.3 基准集自动提取（代表性任务）
+    self_improve_dir: str = "~/.swe-agent"     # 画像/提议/基准台账目录（跨会话）
 
 
 class MCPClientConfig(BaseModel):

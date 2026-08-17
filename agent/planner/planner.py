@@ -53,11 +53,13 @@ class Planner:
         self.decision_logger = decision_logger
 
     async def plan(self, prompt: str, context: str = "",
-                   call_graph=None, project_context: str = "") -> List[Task]:
+                   call_graph=None, project_context: str = "",
+                   capability_profile: str = "") -> List[Task]:
         """返回规划出的任务列表（由调用方提交给 Scheduler）。
 
         call_graph: 项目级 CallGraph，命中时把高频符号/影响面注入拆分提示；
-        project_context: 项目约定/技术栈摘要（阶段一 1.3）。
+        project_context: 项目约定/技术栈摘要（阶段一 1.3）；
+        capability_profile: 能力画像弱项提示（主线三 3.1），指导规划更谨慎。
         """
         complexity = self._estimate_complexity(prompt)
         if complexity < self.config.split_threshold_complexity:
@@ -87,7 +89,8 @@ class Planner:
                 {"role": "user",
                  "content": _render_plan_prompt(prompt, context,
                                                 project_context,
-                                                call_graph_text)},
+                                                call_graph_text,
+                                                capability_profile)},
             ])
             tasks = self._parse_plan(raw, prompt)
             if tasks:
@@ -208,11 +211,14 @@ class Planner:
 
 def _render_plan_prompt(prompt: str, context: str,
                           project_context: str = "",
-                          call_graph_text: str = "") -> str:
+                          call_graph_text: str = "",
+                          capability_profile: str = "") -> str:
     """渲染规划提示，避免用户指令中的花括号触发 format() 错误。"""
     ctx = context
     if project_context:
         ctx = (ctx + "\n" if ctx else "") + project_context
+    if capability_profile:
+        ctx = (ctx + "\n" if ctx else "") + capability_profile
     block = ""
     if call_graph_text:
         block = CALL_GRAPH_HINT.replace("{call_graph_text}", call_graph_text)
