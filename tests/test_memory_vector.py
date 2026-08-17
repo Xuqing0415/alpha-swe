@@ -118,6 +118,7 @@ def test_chroma_backend(ws_tmp):
     store.remember("note", "chroma 向量记忆")
     hits = store.search("chroma 向量")
     assert hits and hits[0]["kind"] == "note"
+    store.close()
 
 
 @pytest.mark.skipif(importlib.util.find_spec("chromadb") is None,

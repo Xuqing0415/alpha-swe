@@ -730,7 +730,12 @@ class ChromaMemoryStore(VectorMemoryStore):
             logger.warning("chroma bump 失败: %s", e)
 
     def close(self) -> None:
-        pass  # chromadb PersistentClient 无需显式关闭
+        # chromadb Client 在 Windows 上持有目录文件句柄，必须显式
+        # 关闭才能释放；否则测试临时目录删除失败、磁盘持续堆积。
+        try:
+            self._client.close()
+        except Exception as e:
+            logger.warning("chroma 客户端关闭失败: %s", e)
 
 
 class QdrantMemoryStore(VectorMemoryStore):
