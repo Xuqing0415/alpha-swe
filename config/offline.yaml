@@ -1,0 +1,40 @@
+# Alpha-SWE 离线/演示配置 —— 零 API Key、零网络、零外部依赖。
+# 用法: python -m agent run "任务描述" --config config/offline.yaml --workspace ./workspace
+# 说明: LLM 用内置 MockLLM（固定返回 final_answer），适合流程演示 / 本地自检 / CI。
+agent:
+  max_rounds: 10
+  max_retries: 2
+  max_concurrency: 1
+  keep_recent_rounds: 3
+  snapshot_enabled: true
+
+sandbox:
+  workspace: "./workspace"
+  docker_enabled: false
+  network_policy: deny
+  no_network: true
+  fake_network: true
+  resource_monitor: false
+
+memory:
+  backend: hybrid            # 本地 SQLite + TF-IDF，持久有效，无需下载模型
+  db_path: "memory.db"
+  embedder: tfidf
+  auto_experience: true
+
+llm:
+  provider: mock             # mock | litellm | openai | anthropic | ollama
+  model: mock
+
+mcp:
+  enabled: false
+
+plugin:
+  enabled: true
+  dir: "./plugins"
+
+skills:
+  enabled: true
+  dir: "./skills/workflows"
+  workflow_enabled: true
+  require_task_intent: false

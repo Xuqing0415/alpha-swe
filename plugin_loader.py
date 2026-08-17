@@ -30,7 +30,7 @@ class PluginLoader:
         manifest_path = os.path.join(self.skills_dir, "skill_manifest.json")
         if os.path.exists(manifest_path):
             try:
-                with open(manifest_path, "r", encoding="utf-8") as f:
+                with open(manifest_path, "r", encoding="utf-8-sig") as f:
                     data = json.load(f)
                     self.manifest = data.get("skills", {})
                     logger.info(f"Manifest 加载完成: {len(self.manifest)} 个技能定义")
@@ -69,7 +69,7 @@ class PluginLoader:
     def _load_md_skill(self, filename: str, filepath: str):
         """加载 Markdown 技能文件"""
         try:
-            with open(filepath, "r", encoding="utf-8") as f:
+            with open(filepath, "r", encoding="utf-8-sig") as f:
                 content = f.read()
 
             skill_names = self.SKILL_PATTERN.findall(content)
@@ -98,7 +98,7 @@ class PluginLoader:
     def _load_py_skill(self, filename: str, filepath: str):
         """加载 Python 技能文件"""
         try:
-            with open(filepath, "r", encoding="utf-8") as f:
+            with open(filepath, "r", encoding="utf-8-sig") as f:
                 content = f.read()
 
             skill_names = self.SKILL_PATTERN.findall(content)

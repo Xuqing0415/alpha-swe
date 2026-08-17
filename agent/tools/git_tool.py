@@ -99,6 +99,22 @@ class GitTool(Tool):
                                        workspace)
         return out if code == 0 and out and out != "HEAD" else None
 
+    async def _verify_branch(self, branch: str, workspace: str) -> bool:
+        """校验分支真实创建：ref 存在，或 HEAD 为指向该分支的 unborn 状态。
+
+        Windows 沙箱下 checkout -b 曾出现 exit 0 但分支 ref 未创建的问题；
+        而全新仓库（无首次提交）中分支 ref 本身合法地不存在，此时用
+        symbolic-ref 校验 HEAD 是否已指向新分支，两种场景都能覆盖。
+        """
+        code, _, _ = await self._run(
+            ["show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+            workspace)
+        if code == 0:
+            return True
+        code2, head, _ = await self._run(
+            ["symbolic-ref", "--quiet", "HEAD"], workspace)
+        return code2 == 0 and head.strip() == f"refs/heads/{branch}"
+
     async def execute(self, params: Dict[str, Any],
                       context: ExecutionContext) -> ToolResult:
         action = str(params.get("action", ""))
@@ -141,10 +157,27 @@ class GitTool(Tool):
 
             if action == "branch":
                 if params.get("branch"):
+                    branch = str(params["branch"]).strip()
+                    if not branch:
+                        return ToolResult(
+                            success=False, error="branch 创建需要非空分支名",
+                            elapsed_ms=(time.time() - start) * 1000,
+                            error_category=ErrorCategory.PERMANENT,
+                        )
                     code, out, err = await self._run(
-                        ["checkout", "-b", str(params["branch"])], workspace)
+                        ["switch", "-c", branch], workspace)
+                    if code == 0 and not await self._verify_branch(
+                            branch, workspace):
+                        return ToolResult(
+                            success=False,
+                            error=(f"分支 {branch} 创建后校验失败："
+                                   f"show-ref 未找到且 HEAD 未指向该分支"),
+                            output=out,
+                            elapsed_ms=(time.time() - start) * 1000,
+                            error_category=ErrorCategory.PERMANENT,
+                        )
                     self._log("git.branch_create", "tools.git_ops", action,
-                              f"创建并切换分支: {params['branch']}")
+                              f"创建并切换分支: {branch}")
                     return self._result(code, out, err, start, "branch_create")
                 code, out, err = await self._run(
                     ["branch", "--list", "--no-color"], workspace)

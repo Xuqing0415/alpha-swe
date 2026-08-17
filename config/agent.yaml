@@ -74,12 +74,15 @@ sandbox:
   auto_rollback: true            # 任务失败时自动回滚到任务前快照
 
 memory:
-  backend: chroma            # auto | sqlite | hybrid | chroma | qdrant
+  # 出厂默认 offline-safe：本地 SQLite + TF-IDF，零外部依赖，长期记忆持久有效。
+  # 需要向量检索时改回 chroma + sentence-transformers，并先运行
+  # scripts/download_embedding_model.py 下载本地模型，避免维度不匹配触发重建清空。
+  backend: hybrid             # auto | sqlite | hybrid | chroma | qdrant
   db_path: "memory.db"
   max_entities: 1000
   top_k: 5
   collection: "alpha_swe_memories"
-  embedder: sentence-transformers  # auto | tfidf | sentence-transformers | openai
+  embedder: tfidf             # auto | tfidf | sentence-transformers | openai
   embedding_model: "all-MiniLM-L6-v2"  # 例如 all-MiniLM-L6-v2 / text-embedding-3-small
   embedding_model_path: "models/sentence-transformers/all-MiniLM-L6-v2"  # 本地模型目录（相对项目根，离线加载，优先于 embedding_model）
   embedding_offline: true   # 离线：禁止 HuggingFace 联网下载，规避 SSL/httpx 错误
