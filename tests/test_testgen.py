@@ -73,6 +73,30 @@ def test_extract_targets_syntax_error_returns_empty():
     assert extract_targets("def broken(:\n") == []
 
 
+def test_extract_targets_excludes_class_methods():
+    source = (
+        "class Store:\n"
+        "    def create(self, title):\n"
+        "        return title\n"
+        "    def list_all(self):\n"
+        "        return []\n"
+    )
+    # 类方法无法用 getattr(MODULE, name) 直接校验，不应成为测试目标，
+    # 否则生成的测试会因 AttributeError 误报（曾导致 todo-crud 工具失败计数）
+    assert extract_targets(source) == []
+    assert generate_tests(source, "store.py") == ""
+    mixed = (
+        "def helper():\n"
+        "    return 1\n"
+        "\n"
+        "class Store:\n"
+        "    def get(self, key):\n"
+        "        return key\n"
+    )
+    names = {t["name"] for t in extract_targets(mixed)}
+    assert names == {"helper"}
+
+
 # ---- 生成内容 ----
 
 def test_generate_tests_content():

@@ -1124,12 +1124,16 @@ class AgentLoop:
             if result.metadata.get("timed_out"):
                 self._track_timeout(name, params, task, result)
             # 进阶 3.1：代码写入后自动补齐测试（无测试覆盖时生成 test_*.py）
+            generated_test = None
             if result.success and self.config.agent.auto_testgen:
-                await self._maybe_auto_testgen(name, params, task)
-            # 进阶 3.3：回归检测——改完就测，测不过把失败回写该步骤
+                generated_test = await self._maybe_auto_testgen(
+                    name, params, task)
+            # 进阶 3.3：回归检测——改完就测，测不过把失败回写该步骤；
+            # 本步自动生成的测试不参与回归判定（生成失败属测试生成器问题，
+            # 而非代码变更引入的回归）
             if result.success and self.config.agent.regression_check_enabled:
                 result = await self._maybe_regression_check(
-                    name, params, task, result)
+                    name, params, task, result, skip_test=generated_test)
             self.metrics.record_tool_result(result.success)
             # 方案 2.3：进度回写事件（TUI 任务面板/状态栏实时刷新）
             self._emit(
@@ -1890,8 +1894,12 @@ class AgentLoop:
 
     # ---- 进阶 3.1：自动测试生成（改动无测试覆盖时补齐 test_*.py） ----
     async def _maybe_auto_testgen(self, name: str, params: Dict[str, Any],
-                                  task: Task) -> None:
-        """file_ops 写入 .py 且无测试覆盖时自动生成测试（非阻塞）。"""
+                                  task: Task) -> Optional[str]:
+        """file_ops 写入 .py 且无测试覆盖时自动生成测试（非阻塞）。
+
+        返回生成测试的工作区相对路径（未生成返回 None），供回归检测
+        排除“本步自动生成”的测试，避免把生成器自身的缺陷误判为代码回归。
+        """
         if name != "file_ops":
             return
         action = str(params.get("action", ""))
@@ -1922,6 +1930,12 @@ class AgentLoop:
                 )
                 return
             test_path, targets = written
+            root = Path(workspace).resolve()
+            try:
+                rel_test = str(Path(test_path).resolve().relative_to(root))
+            except ValueError:
+                rel_test = str(test_path)
+            rel_test = rel_test.replace("\\", "/")
             self._decision.record(
                 "testgen.generated", "agent.auto_testgen", True,
                 f"为 {path} 生成 {targets} 个测试目标: {test_path}",
@@ -1933,6 +1947,7 @@ class AgentLoop:
                     path, test_path, content, task)
             if self.config.agent.auto_testgen_verify:
                 asyncio.create_task(self._verify_testgen(path, test_path))
+            return rel_test
         except Exception as e:
             logger.warning("自动测试生成失败（不影响任务）: %s", e)
             try:
@@ -1961,12 +1976,15 @@ class AgentLoop:
     async def _maybe_regression_check(self, name: str,
                                       params: Dict[str, Any],
                                       task: Task,
-                                      result: ToolResult) -> ToolResult:
+                                      result: ToolResult,
+                                      skip_test: Optional[str] = None,
+                                      ) -> ToolResult:
         """阶段三 3.3：运行受影响测试，回归失败时把失败回写为该步骤结果。
 
-        返回替换后的 ToolResult；无对应测试或测试无法运行（skip）时保持
-        原结果，只记录回归决策点。回归失败通过结果回写触发"修复-重测"，
-        重试耗尽后由 criticality 决定失败/跳过，依赖步骤自动停止。
+        返回替换后的 ToolResult；无对应测试、测试无法运行（skip）或受影响
+        测试恰为本步自动生成（skip_test 命中）时保持原结果，只记录回归决策
+        点。回归失败通过结果回写触发"修复-重测"，重试耗尽后由 criticality
+        决定失败/跳过，依赖步骤自动停止。
         """
         if name != "file_ops":
             return result
@@ -1986,6 +2004,12 @@ class AgentLoop:
                 self._decision.record(
                     "regression.skip", "agent.regression_check_enabled", True,
                     f"无对应测试文件，跳过回归检测: {path}",
+                )
+                return result
+            if skip_test and test_path == skip_test.replace("\\", "/"):
+                self._decision.record(
+                    "regression.skip", "agent.regression_check_enabled", True,
+                    f"受影响测试由本步自动生成，不作为回归基线: {test_path}",
                 )
                 return result
             test_result = await run_tests(

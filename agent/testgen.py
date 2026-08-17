@@ -74,6 +74,11 @@ def extract_targets(source: str) -> List[Dict[str, Any]]:
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
+        # 只提取模块级函数：类方法/嵌套函数无法用 getattr(MODULE, name)
+        # 直接校验（生成的测试会出现 AttributeError 假失败），且方法常需
+        # 实例化才能调用，超出保守冒烟测试的职责范围。
+        if node.col_offset != 0:
+            continue
         if node.name.startswith("_"):
             continue
         if node.name == "main" and node.col_offset == 0:

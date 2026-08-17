@@ -109,6 +109,37 @@ async def test_loop_regression_skip_when_tests_cannot_run(ws_tmp):
 
 
 @pytest.mark.asyncio
+async def test_loop_regression_skips_just_generated_test(ws_tmp, monkeypatch):
+    """本步自动生成的测试不作为回归基线：生成器缺陷不误判为代码回归。"""
+    cfg = make_config(ws_tmp)  # auto_testgen 默认开启
+    ws = Path(cfg.sandbox.workspace)
+    ws.mkdir(parents=True, exist_ok=True)
+
+    async def fake_run_tests(framework, target, workspace, timeout=60.0, **kw):
+        return TestResult(
+            success=False,
+            output="FAILED test_calc.py::test_add_callable - AttributeError",
+            failures=[TestCaseFailure(
+                name="test_calc.py::test_add_callable",
+                reason="AttributeError")],
+            framework="pytest")
+
+    # mutation 模块在导入期绑定 run_tests 引用，需与 test_runner 一并替换
+    monkeypatch.setattr("agent.code.test_runner.run_tests", fake_run_tests)
+    monkeypatch.setattr("agent.mutation.run_tests", fake_run_tests)
+    llm = ScriptedLLM(WRITE, '{"final_answer": "done"}')
+    loop = AgentLoop(config=cfg, llm=llm, planner=StubPlanner())
+    result = await loop.run("写一个 calc.py")
+    assert result.ok
+    names = {d["name"] for d in loop._decision.records()}
+    assert "testgen.generated" in names
+    assert "regression.skip" in names
+    assert "regression.detected" not in names
+    snap = loop.metrics.snapshot()
+    assert snap["counters"].get("tool_failures", 0) == 0
+
+
+@pytest.mark.asyncio
 async def test_loop_regression_clean(ws_tmp, monkeypatch):
     cfg = make_config(ws_tmp, auto_testgen=False)
     ws = Path(cfg.sandbox.workspace)
