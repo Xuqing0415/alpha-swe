@@ -97,6 +97,29 @@ async def test_agent_loop_memory_creator_wires_shared_store(ws_tmp):
         await loop.close()
 
 
+@pytest.mark.asyncio
+async def test_loop_records_memory_arbitration_decision(ws_tmp):
+    """跨 Agent 碰撞仲裁应写入决策日志（memory.arbitration）。"""
+    cfg = make_config(ws_tmp)
+    store = SqliteMemoryStore(db_path=str(ws_tmp / "mem.db"))
+    loop_a = AgentLoop(config=cfg, llm=MockLLM(), memory_creator="alice",
+                       memory=store)
+    loop_b = AgentLoop(config=cfg, llm=MockLLM(), memory_creator="bob",
+                       memory=store)
+    try:
+        loop_a.memory.remember("note", "AuthService 存在 N+1 查询问题")
+        loop_b.memory.remember("note", "AuthService 存在 N+1 查询问题")
+        recs = loop_b._decision.find(name="memory.arbitration")
+        assert recs, "仲裁应产生 memory.arbitration 决策"
+        assert recs[0]["config_key"] == "memory.dedup_threshold"
+        detail = recs[0]["decision"]
+        assert "alice" in detail and "bob" in detail
+        assert "bump_existing" in detail
+    finally:
+        await loop_a.close()
+        await loop_b.close()
+
+
 def test_shared_memory_cross_agent_collision_arbitrated(ws_tmp):
     """跨 Agent 写入相同知识点：仲裁 bump 已有条目，不产生重复行。"""
     key = str(ws_tmp / "arb.db")

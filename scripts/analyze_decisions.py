@@ -24,6 +24,7 @@ EXPECTED_KEYS = [
     "context.max_tokens", "context.compression_threshold",
     "context.compression_method",
     "memory.backend", "memory.top_k_retrieval", "memory.similarity_threshold",
+    "memory.dedup_threshold",
     "agent.max_loop_iterations", "agent.parallel_tool_calls",
     "agent.require_confirmation", "agent.auto_approve",
     "active_skills",

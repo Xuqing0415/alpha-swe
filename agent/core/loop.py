@@ -223,6 +223,7 @@ class AgentLoop:
                     self.memory, creator=self.memory_creator,
                     lock_key=self.config.memory.db_path,
                     dedup_threshold=self.config.memory.dedup_threshold,
+                    on_arbitration=self._record_memory_arbitration,
                 )
             except Exception as e:
                 logger.warning("共享记忆包装失败（继续使用原始记忆）: %s", e)
@@ -1569,6 +1570,25 @@ class AgentLoop:
         except Exception as e:
             logger.warning("输出摘要生成失败: %s", e)
             return ""
+
+    def _record_memory_arbitration(self, record: Dict[str, Any]) -> None:
+        """共享记忆写入冲突仲裁接入决策日志（memory.arbitration）。"""
+        try:
+            self._decision.record(
+                "memory.arbitration", "memory.dedup_threshold",
+                self.config.memory.dedup_threshold,
+                "跨 Agent 记忆写入碰撞: existing=%r incoming=%r "
+                "score=%.3f id=%s action=%s kind=%s" % (
+                    record.get("existing_creator", ""),
+                    record.get("incoming_creator", ""),
+                    float(record.get("score") or 0),
+                    record.get("memory_id"),
+                    record.get("action", "bump_existing"),
+                    record.get("kind", ""),
+                ),
+            )
+        except Exception as e:
+            logger.warning("仲裁决策记录失败: %s", e)
 
     async def _remember_experience(self, task: Task) -> None:
         """任务完成后生成经验摘要并写入长期记忆（设计 7.2 节）。

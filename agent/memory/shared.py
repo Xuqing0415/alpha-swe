@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections import deque
-from typing import Any, Deque, Dict, List, Optional
+from typing import Any, Callable, Deque, Dict, List, Optional
 
 from agent.memory.store import MemoryStore
 
@@ -52,7 +52,8 @@ class SharedMemoryStore(MemoryStore):
     def __init__(self, inner: MemoryStore, creator: str = "",
                  lock_key: Optional[str] = None,
                  dedup_threshold: float = 0.95,
-                 max_arbitration_records: int = 20) -> None:
+                 max_arbitration_records: int = 20,
+                 on_arbitration: Optional[Callable[[Dict[str, Any]], None]] = None) -> None:
         self.inner = inner
         self.creator = creator or ""
         self.dedup_threshold = max(0.0, float(dedup_threshold))
@@ -61,6 +62,7 @@ class SharedMemoryStore(MemoryStore):
         self._closed = False
         # 仲裁可观测性：跨 Agent 碰撞次数 + 最近决策（deque，避免无限累积）
         self.arbitration_count = 0
+        self._on_arbitration = on_arbitration
         self._arbitrations: Deque[Dict[str, Any]] = deque(
             maxlen=max(1, int(max_arbitration_records)))
         with _REGISTRY_GUARD:
@@ -113,6 +115,11 @@ class SharedMemoryStore(MemoryStore):
                 "action": "bump_existing",
             }
             self._arbitrations.append(record)
+            if self._on_arbitration is not None:
+                try:
+                    self._on_arbitration(record)
+                except Exception as e:  # 仲裁回调失败不应阻断写入
+                    logger.warning("仲裁决策回调失败: %s", e)
             logger.warning(
                 "共享记忆写入冲突仲裁: %r 与现有创建者 %r 写入相似内容"
                 "（score=%.3f, id=%s），bump 已有条目，跳过重复写入",
