@@ -48,6 +48,16 @@ _DIMENSION_KEYWORDS: Dict[str, List[str]] = {
 
 # 每次更新应用一次衰减：尝试权重收敛到 1/(1-DECAY)，旧事件指数级淡出
 _DECAY = 0.9
+# 3.1B 滑动窗口评分：最近 N 次加权平均 × 0.6 + 历史 EWA 成功率 × 0.4。
+# 窗口权重按“最近一次最高（0.5）、依次递减（0.3、0.2）”；不足 3 次时归一化。
+_WINDOW_WEIGHTS = (0.5, 0.3, 0.2)
+_RECENT_WEIGHT = 0.6
+_OVERALL_WEIGHT = 0.4
+# 3.1B 置信区间：样本 < _MIN_CONFIDENCE_SAMPLES 视为“数据不足”；
+# < _LOW_CONFIDENCE_SAMPLES 提示“样本较少，评估可信度低”。
+_MIN_CONFIDENCE_SAMPLES = 5
+_LOW_CONFIDENCE_SAMPLES = 10
+_Z95 = 1.96  # 95% 置信区间 z 值
 
 
 def _safe_identity(identity: str) -> str:
@@ -70,6 +80,17 @@ def _dimensions_for(instruction: str) -> List[str]:
         if any(k in text for k in kws):
             dims.add(dim)
     return sorted(dims)
+
+
+def _recent_window_score(history) -> float:
+    """最近 N 次表现的加权平均（权重 0.5/0.3/0.2，不足时归一化）。"""
+    recent = list(reversed(list(history)[-len(_WINDOW_WEIGHTS):]))
+    if not recent:
+        return 0.0
+    weights = _WINDOW_WEIGHTS[:len(recent)]
+    total = sum(weights)
+    return sum(w * (1.0 if ok else 0.0)
+               for w, ok in zip(weights, recent)) / total
 
 
 class CapabilityProfile:
@@ -133,11 +154,14 @@ class CapabilityProfile:
              for dim, cur in self._data.items()),
             key=lambda x: -x[1],
         )
-        parts = [
-            f"{CAPABILITY_DIMENSIONS.get(dim, dim)} {score:.0%}"
-            f"（{samples} 样本）"
-            for dim, score, samples in scored[:max_dims]
-        ]
+        parts = []
+        for dim, score, samples in scored[:max_dims]:
+            note = f"（{samples} 样本"
+            if samples >= _MIN_CONFIDENCE_SAMPLES:
+                note += f"，±{self.margin(dim):.0%}"
+            note += "）"
+            parts.append(f"{CAPABILITY_DIMENSIONS.get(dim, dim)} "
+                         f"{score:.0%}{note}")
         return "；".join(parts)
 
     def score_for_instruction(self, instruction: str) -> float:
@@ -157,12 +181,16 @@ class CapabilityProfile:
                 dim, {"attempts": 0.0, "successes": 0.0, "history": []})
             cur["attempts"] = cur["attempts"] * _DECAY + 1.0
             cur["successes"] = cur["successes"] * _DECAY + (1.0 if ok else 0.0)
-            cur["score"] = (round(cur["successes"] / cur["attempts"], 4)
-                            if cur["attempts"] > 0 else 0.0)
+            cur["overall"] = (round(cur["successes"] / cur["attempts"], 4)
+                              if cur["attempts"] > 0 else 0.0)
             hist = cur.setdefault("history", [])
             hist.append(bool(ok))
             del hist[: max(0, len(hist) - _HISTORY_LIMIT)]
             cur["samples"] = len(hist)
+            # 3.1B：score = 0.6×近期窗口加权平均 + 0.4×历史 EWA 成功率
+            cur["score"] = round(
+                _RECENT_WEIGHT * _recent_window_score(hist)
+                + _OVERALL_WEIGHT * cur["overall"], 4)
         self._save()
         return dims
 
@@ -170,6 +198,55 @@ class CapabilityProfile:
     def score(self, dim: str) -> float:
         cur = self._data.get(dim) or {}
         return float(cur.get("score", 0.0) or 0.0)
+
+    def overall(self, dim: str) -> float:
+        """历史 EWA 总体成功率（不受近期波动影响，供趋势对比）。"""
+        cur = self._data.get(dim) or {}
+        return float(cur.get("overall", cur.get("score", 0.0) or 0.0))
+
+    def samples(self, dim: str) -> int:
+        cur = self._data.get(dim) or {}
+        return int(cur.get("samples", 0) or 0)
+
+    def reliable(self, dim: str) -> bool:
+        """样本数是否足以支撑可信评估（>= 5）。"""
+        return self.samples(dim) >= _MIN_CONFIDENCE_SAMPLES
+
+    def margin(self, dim: str) -> float:
+        """95% Wilson 置信区间半宽（p 取滑动窗口合成分数，n 为样本数）。"""
+        p = self.score(dim)
+        n = self.samples(dim)
+        if n <= 0:
+            return 0.0
+        z2 = _Z95 * _Z95
+        half = (_Z95 * ((p * (1 - p) + z2 / (4 * n)) / n) ** 0.5
+                / (1 + z2 / n))
+        return round(min(max(half, 0.0), 0.5), 4)
+
+    def score_with_confidence(self, dim: str) -> Dict[str, Any]:
+        return {
+            "score": self.score(dim),
+            "margin": self.margin(dim),
+            "samples": self.samples(dim),
+            "reliable": self.reliable(dim),
+        }
+
+    def confidence_text(self, dim: str) -> str:
+        """形如「调试定位 72% ± 12%（基于 8 次尝试，样本较少，评估可信度低）」。"""
+        label = CAPABILITY_DIMENSIONS.get(dim, dim)
+        n = self.samples(dim)
+        if n == 0:
+            return f"{label} 数据不足"
+        base = f"{label} {self.score(dim):.0%}（基于 {n} 次尝试"
+        if not self.reliable(dim):
+            return base + "，样本较少，评估可信度低）"
+        return (f"{label} {self.score(dim):.0%}"
+                f" ± {self.margin(dim):.0%}（基于 {n} 次尝试）")
+
+    def confidence_report(self) -> List[str]:
+        """已记录维度的置信度摘要（供 TUI / 报告展示，跳过无数据项）。"""
+        return [self.confidence_text(dim)
+                for dim in sorted(self._data) if self.samples(dim) > 0]
 
     def profile_text(self, top: int = 3) -> str:
         """生成注入 Prompt 的画像摘要：突出弱项与改进建议。"""
@@ -209,7 +286,7 @@ class CapabilityProfile:
             if len(hist) < _TREND_WINDOW:
                 continue
             recent = sum(1 for x in hist[-_TREND_WINDOW:] if x) / _TREND_WINDOW
-            overall = float(cur.get("score", 0.0) or 0.0)
+            overall = self.overall(dim)
             if overall >= 0.3 and recent < overall - _TREND_GAP:
                 warns.append(
                     f"{CAPABILITY_DIMENSIONS.get(dim, dim)} 能力下降"
@@ -218,7 +295,9 @@ class CapabilityProfile:
 
     def summary(self) -> Dict[str, Any]:
         return {
-            dim: {"score": self.score(dim), "label": label}
+            dim: {"score": self.score(dim), "label": label,
+                  "margin": self.margin(dim), "samples": self.samples(dim),
+                  "reliable": self.reliable(dim)}
             for dim, label in CAPABILITY_DIMENSIONS.items()
             if dim in self._data
         }

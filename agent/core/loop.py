@@ -2157,6 +2157,8 @@ class AgentLoop:
                     path=str(base / "proposals.json"),
                     promote_threshold=self.config.agent.proposal_promote_threshold,
                     reject_after=self.config.agent.proposal_reject_after,
+                    require_generalization=
+                    self.config.agent.proposal_require_generalization,
                 )
             if self.config.agent.benchmark_extraction_enabled:
                 self.benchmark = BenchmarkExtractor(
@@ -2213,15 +2215,28 @@ class AgentLoop:
                     self._emit("capability_declining", warning=w)
             if self.proposals is not None:
                 for pid in self._active_proposals:
-                    status = self.proposals.verify(pid, ok=ok)
+                    status = self.proposals.verify(
+                        pid, ok=ok, instruction=prompt)
                     if status == "promoted":
+                        report = self.proposals.scene_report(pid)
                         self._decision.record(
                             "selflearn.promoted", "agent.proposals_enabled",
                             True,
                             f"改进提议晋升自学策略: {pid}"
-                            f"（连续 {self.config.agent.proposal_promote_threshold} 次验证成功）",
+                            f"（{self.config.agent.proposal_promote_threshold} 次验证成功，"
+                            f"相似={report.get('similar', 0)}"
+                            f" 相关={report.get('related', 0)} 场景）",
                         )
                         self._emit("selflearn_promoted", proposal_id=pid)
+                    elif status == "local":
+                        self._decision.record(
+                            "selflearn.demoted_local",
+                            "agent.proposals_enabled", True,
+                            f"改进提议降级为项目级经验: {pid}"
+                            "（仅单一场景有效，未达泛化晋升标准）",
+                        )
+                        self._emit("selflearn_demoted_local",
+                                   proposal_id=pid)
                 self._active_proposals = []
                 if not ok:
                     self._register_proposal(prompt, result)

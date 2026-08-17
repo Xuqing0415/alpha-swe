@@ -8,11 +8,14 @@
 from agent.selfimprove.benchmark import BenchmarkExtractor
 from agent.selfimprove.capability import (CAPABILITY_DIMENSIONS,
                                           CapabilityProfile)
-from agent.selfimprove.proposals import (STATUS_PENDING, STATUS_PROMOTED,
-                                         STATUS_REJECTED, ProposalStore)
+from agent.selfimprove.proposals import (STATUS_LOCAL, STATUS_PENDING,
+                                         STATUS_PROMOTED, STATUS_REJECTED,
+                                         ProposalStore, scene_bucket,
+                                         scene_similarity)
 
 __all__ = [
     "CapabilityProfile", "CAPABILITY_DIMENSIONS",
     "ProposalStore", "STATUS_PENDING", "STATUS_PROMOTED", "STATUS_REJECTED",
+    "STATUS_LOCAL", "scene_similarity", "scene_bucket",
     "BenchmarkExtractor",
 ]

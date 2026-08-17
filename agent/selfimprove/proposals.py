@@ -23,6 +23,14 @@ logger = logging.getLogger("alpha-swe.selfimprove.proposals")
 STATUS_PENDING = "pending"
 STATUS_PROMOTED = "promoted"
 STATUS_REJECTED = "rejected"
+STATUS_LOCAL = "local"  # 项目级经验：仅单一场景有效，未达泛化晋升标准
+
+# 3.2A 泛化性测试：晋升前需在“相似（>=0.7）+ 相关（0.4~0.7）”两个场景验证有效
+SCENE_SIMILAR = "similar"
+SCENE_RELATED = "related"
+SCENE_DISTANT = "distant"
+_SIMILAR_THRESHOLD = 0.7
+_RELATED_THRESHOLD = 0.4
 
 _CJK_RE = re.compile(r"[\u4e00-\u9fff]+")
 _ASCII_RE = re.compile(r"[a-zA-Z_][a-zA-Z0-9_]{2,}")
@@ -55,15 +63,45 @@ def _key(category: str, action: str) -> str:
     return hashlib.sha1(f"{category}:{action}".encode("utf-8")).hexdigest()[:12]
 
 
+def _similarity_tokens(text: str):
+    """场景相似度 token：2 字 CJK 滑窗 + ASCII 标识符（粒度适中，抗噪声）。"""
+    t = str(text or "").lower()
+    toks = set()
+    for run in _CJK_RE.findall(t):
+        toks.update(run[i:i + 2] for i in range(len(run) - 1))
+    toks.update(_ASCII_RE.findall(t))
+    return toks
+
+
+def scene_similarity(origin: str, verify: str) -> float:
+    """重叠系数（共享 token / 较小集合），衡量两个场景的相关程度。"""
+    a = _similarity_tokens(origin)
+    b = _similarity_tokens(verify)
+    if not a or not b:
+        return 0.0
+    shared = len(a & b)
+    return shared / min(len(a), len(b))
+
+
+def scene_bucket(sim: float) -> str:
+    if sim >= _SIMILAR_THRESHOLD:
+        return SCENE_SIMILAR
+    if sim >= _RELATED_THRESHOLD:
+        return SCENE_RELATED
+    return SCENE_DISTANT
+
+
 class ProposalStore:
     """改进提议队列：登记 / 匹配 / 验证 / 晋升 / 否决。"""
 
     def __init__(self, path: Optional[str] = None, enabled: bool = True,
-                 promote_threshold: int = 3, reject_after: int = 5) -> None:
+                 promote_threshold: int = 3, reject_after: int = 5,
+                 require_generalization: bool = True) -> None:
         self.enabled = enabled
         self.path = Path(path).expanduser() if path else None
         self.promote_threshold = max(1, int(promote_threshold))
         self.reject_after = max(1, int(reject_after))
+        self.require_generalization = bool(require_generalization)
         self._data: Dict[str, Any] = self._load()
 
     def _load(self) -> Dict[str, Any]:
@@ -114,7 +152,10 @@ class ProposalStore:
             "action": action,
             "status": STATUS_PENDING,
             "trigger_keywords": _keywords(instruction),
+            "origin_instruction": str(instruction or "")[:200],
             "verified_successes": 0,
+            "verified_scenes": {SCENE_SIMILAR: 0, SCENE_RELATED: 0,
+                                SCENE_DISTANT: 0},
             "applied_count": 0,
             "seen_count": 1,
             "created_at": now,
@@ -139,26 +180,71 @@ class ProposalStore:
         return ids
 
     # ---- 验证 ----
-    def verify(self, pid: str, ok: bool) -> str:
-        """应用目标提议后验证：成功计数，达到阈值晋升；应用过多未达标则丢弃。"""
+    def verify(self, pid: str, ok: bool, instruction: str = "",
+               require_generalization: Optional[bool] = None) -> str:
+        """应用目标提议后验证（3.2A 泛化性测试）。
+
+        成功计数并按验证场景落桶（similar/related/distant）；晋升需同时满足：
+        连续成功达到阈值，且至少在一个“相似（>=0.7）”和一个“相关（0.4~0.7）”
+        场景验证有效。仅单一场景有效的提议在应用达到上限后降级为项目级经验
+        （STATUS_LOCAL），零成功则照旧丢弃（STATUS_REJECTED）。
+        """
         p = self._data["proposals"].get(pid)
         if p is None or p.get("status") != STATUS_PENDING:
             return str(p.get("status", "")) if p else ""
+        need_general = (self.require_generalization
+                        if require_generalization is None
+                        else bool(require_generalization))
         p["applied_count"] = int(p.get("applied_count", 0)) + 1
         if ok:
+            if instruction:
+                sim = scene_similarity(
+                    p.get("origin_instruction", ""), instruction)
+                bucket = scene_bucket(sim)
+            else:
+                # 未提供验证场景时默认视为“诞生场景”重复验证
+                bucket = SCENE_SIMILAR
+            scenes = p.setdefault("verified_scenes", {})
+            scenes[bucket] = int(scenes.get(bucket, 0)) + 1
             p["verified_successes"] = int(p.get("verified_successes", 0)) + 1
-            if p["verified_successes"] >= self.promote_threshold:
+            if (p["verified_successes"] >= self.promote_threshold
+                    and (not need_general or self._generalized(p))):
                 p["status"] = STATUS_PROMOTED
                 p["promoted_at"] = time.time()
                 self._save()
                 return STATUS_PROMOTED
-        elif int(p.get("applied_count", 0)) >= self.reject_after:
-            p["status"] = STATUS_REJECTED
-            p["rejected_at"] = time.time()
+        if int(p.get("applied_count", 0)) >= self.reject_after:
+            if int(p.get("verified_successes", 0)) >= 1:
+                # 有成功但未覆盖相似+相关两个场景 -> 降级为项目级经验
+                p["status"] = STATUS_LOCAL
+                p["demoted_at"] = time.time()
+            else:
+                p["status"] = STATUS_REJECTED
+                p["rejected_at"] = time.time()
             self._save()
-            return STATUS_REJECTED
+            return p["status"]
         self._save()
         return p["status"]
+
+    @staticmethod
+    def _generalized(p: Dict[str, Any]) -> bool:
+        """是否已在相似与相关两个场景各至少验证成功一次。"""
+        scenes = p.get("verified_scenes") or {}
+        return (int(scenes.get(SCENE_SIMILAR, 0)) >= 1
+                and int(scenes.get(SCENE_RELATED, 0)) >= 1)
+
+    def scene_report(self, pid: str) -> Dict[str, Any]:
+        """提议的泛化验证进展（供决策日志 / TUI 展示）。"""
+        p = self._data["proposals"].get(pid)
+        if p is None:
+            return {}
+        scenes = p.get("verified_scenes") or {}
+        return {
+            "similar": int(scenes.get(SCENE_SIMILAR, 0)),
+            "related": int(scenes.get(SCENE_RELATED, 0)),
+            "distant": int(scenes.get(SCENE_DISTANT, 0)),
+            "generalized": self._generalized(p),
+        }
 
     # ---- 用户否决 / 手动晋升 ----
     def reject(self, pid: str) -> bool:
@@ -189,7 +275,7 @@ class ProposalStore:
 
     def summary(self) -> Dict[str, int]:
         counts = {s: 0 for s in (STATUS_PENDING, STATUS_PROMOTED,
-                                 STATUS_REJECTED)}
+                                 STATUS_REJECTED, STATUS_LOCAL)}
         for p in self._data["proposals"].values():
             s = p.get("status")
             if s in counts:
