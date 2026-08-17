@@ -30,7 +30,7 @@ config/
 └── aggressive.yaml     A/B 对比激进配置（17 项关键参数取反）
 scripts/analyze_decisions.py  决策日志分析：列出已生效/未生效配置项
 examples/quick_demo.py  脚本化 LLM 的端到端演示
-tests/                  新核心测试（111 项）
+tests/                  新核心测试（554 项，含故障注入/浸泡/混沌/基准集）
 loop.py, scheduler.py, ... 旧版七层原型（保留，作为对照参考）
 ```
 
@@ -190,8 +190,10 @@ steps:
 - `skills/workflows/` 内置真实工作流：`add-rest-endpoint`、`bug-fix`（复现→定位→修复→回归）、
   `db-migration`（分析→生成→执行→回滚方案）、`test-generation`（分析→写用例→运行→修复失败）、
   `python-refactor`；`skills/skill_manifest.json` 注册表补齐 requires/permissions/params/tags。
-- `tests/test_real_project_suite.py`（9 用例）：用 Express / Django+SQLAlchemy / pytest / Flask 迷你项目验证
-  陌生项目上的技能发现、优先级排序、无关任务零误触发，以及 `AgentLoop` 端到端激活顺序与 `skills_activated` 事件。
+- 基准集共 50 个可自动判定场景：`tests/test_benchmark_suite.py`（28 个黄金用例，L1-L4 分级，含规范解法与反例
+  harness）、`tests/test_real_project_suite.py`（18 个真实技术栈场景：Express / Django+SQLAlchemy / pytest /
+  Flask 迷你项目，验证技能发现、优先级排序、无关任务零误触发与 `AgentLoop` 端到端激活）、
+  `tests/test_long_task_suite.py`（4 个长任务端到端：todo-crud / print-to-logging / fix-todos / loop-to-listcomp）。
 - **技能执行进度可视化（阶段二 2.4）**：`task_start` 事件携带 `skill` / `skill_step` / `step_index` / `step_total`；
   TUI 任务树视图为技能步骤显示 `[技能 name::step i/N]` 徽标，底部状态栏与思维流同步显示当前技能进度
   （`skills_activated` 事件渲染为「技能工作流激活: ...（展开 N 个子任务）」）。
@@ -260,6 +262,22 @@ python -X utf8 -m pytest tests -q
 # 最小演示：脚本化 LLM 驱动一次完整 ReAct（terminal -> final_answer）
 python -X utf8 examples/quick_demo.py
 ```
+
+## 项目现状核对（2026-08 审计）
+
+对照全量复盘清单逐项核对后的更正（详见 `logs/FIX_REPORT.md` 与历次提交）：
+
+- **测试总量**：`tests/` 全量 554 passed / 0 failed；旧原型 `test_all.py` 13 passed / 0 failed（清单的「351+」
+  已过时）。
+- **基准集路径**：清单写的 `tests/benchmarks/` 不存在；实际在 `tests/test_benchmark_suite.py`（28 例）+
+  `tests/test_real_project_suite.py`（18 例）+ `tests/test_long_task_suite.py`（4 例），共 50 例。
+- **长时间浸泡测试**：已实现（`tests/test_soak.py`：24 会话顺序流 + 3×8 并发流，内存/句柄/事件列表有界），
+  不再属于未完成项。
+- **真实 LLM 端到端**：已用 litellm + DeepSeek（真实 `DEEPSEEK_API_KEY`）实测通过（`python -m agent run`），
+  不再是「未验证」；缺 Key 时 CLI 快速失败并给出清晰报错。
+- **技能数量**：`skills/skill_manifest.json` 注册 19 个技能定义（3 个 Markdown + 15 个工作流 YAML），
+  清单「内置 10 个技能」已过时。
+- **尚未验证（维持清单声明）**：真实 Docker 容器沙箱、多用户/团队共享、>8h 连续运行稳定性。
 
 ## MCP 生态打通（阶段六）
 
