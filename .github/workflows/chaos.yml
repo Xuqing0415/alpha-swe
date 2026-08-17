@@ -10,6 +10,7 @@ on:
       - "tests/test_benchmark_suite.py"
       - "tests/test_fault_injection.py"
       - "tests/test_chaos_smoke.py"
+      - "tests/test_real_project_e2e.py"
       - "tests/test_soak.py"
       - ".github/workflows/chaos.yml"
 
@@ -46,5 +47,6 @@ jobs:
             tests/test_benchmark_suite.py \
             tests/test_fault_injection.py \
             tests/test_chaos_smoke.py \
+            tests/test_real_project_e2e.py \
             tests/test_soak.py \
             -q -p no:cacheprovider --durations=10
