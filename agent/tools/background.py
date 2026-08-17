@@ -72,15 +72,22 @@ class BackgroundTaskManager:
     # ---- 生命周期 ----
     async def start(self, command: str, workspace: str) -> BackgroundHandle:
         """启动长驻进程；进程意外退出时记录退出码与最后输出。"""
-        argv = self._build_argv(command)
-        proc = await asyncio.create_subprocess_exec(
-            *argv,
+        kwargs = dict(
             cwd=workspace,
             env={**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"},
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+        if os.name == "nt":
+            # Windows：cmd /c 直跑，避免 PowerShell 5.1 对原生命令 stdout 的
+            # 缓冲延迟（后台长驻进程的输出会一直积压到进程退出才可见）。
+            # create_subprocess_shell 在 Windows 内部即 cmd /c <command>，
+            # 正确保留命令引号，不经过 CreateProcess 的二次转义。
+            proc = await asyncio.create_subprocess_shell(command, **kwargs)
+        else:
+            proc = await asyncio.create_subprocess_exec(
+                "/bin/sh", "-c", command, **kwargs)
         handle = BackgroundHandle(
             task_id=uuid.uuid4().hex[:8], command=command, proc=proc,
         )
@@ -142,19 +149,6 @@ class BackgroundTaskManager:
         combined = list(handle.stdout_buf) + list(handle.stderr_buf)
         body = "\n".join(combined[-max(1, int(lines)):])
         return body or "（暂无输出）"
-
-    # ---- 内部 ----
-    @staticmethod
-    def _build_argv(command: str) -> List[str]:
-        if os.name == "nt":
-            prefix = (
-                "$OutputEncoding=[System.Text.Encoding]::UTF8;"
-                "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;"
-                "chcp 65001 | Out-Null; "
-            )
-            return ["powershell", "-NoProfile", "-NonInteractive",
-                    "-Command", prefix + command + "; exit $LASTEXITCODE"]
-        return ["/bin/sh", "-c", command]
 
     async def _read(self, stream, buf: Deque[str]) -> None:
         while True:
