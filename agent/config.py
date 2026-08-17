@@ -182,6 +182,7 @@ class TeamConfig(BaseModel):
     """多 Agent 团队配置（可插拔角色）。"""
     roles: List[WorkerRoleConfig] = Field(default_factory=list)
     concurrency: int = 1
+    file_locks_enabled: bool = True  # 主线二 2.1A：黑板文件级写锁（并发写冲突防护）
     max_review_retries: int = 2
     message_timeout: float = 60.0  # 团队消息默认超时秒数（写进 Message.timeout）
 

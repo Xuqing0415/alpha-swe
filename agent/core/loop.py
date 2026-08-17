@@ -274,6 +274,7 @@ class AgentLoop:
         self._session_open = False
         self.project_state_tracker = None
         self.workspace_context = None
+        self._resume_tasks: List[Task] = []
         if self.config.agent.state_tracker_enabled:
             from agent.project_state import ProjectStateTracker
             self.project_state_tracker = ProjectStateTracker(
@@ -539,6 +540,8 @@ class AgentLoop:
             restored = False
         if not restored:
             # 快照恢复路径已直接把恢复的 DAG 挂到 scheduler，无需重复提交
+            # 主线一 1.2B：合并上次会话待办动作（去重后优先入队）
+            plan = self._merge_resume_tasks(plan)
             self.scheduler.submit_plan(plan)
         self._emit("plan_created", total=len(plan),
                    tasks=[t.instruction for t in plan])
@@ -1169,6 +1172,8 @@ class AgentLoop:
                 ),
                 timeout=self._tool_timeout(name, params),
             )
+            if result.success and name == "file_ops":
+                self._note_agent_file_write(params)
             if result.metadata.get("timed_out"):
                 self._track_timeout(name, params, task, result)
             # 进阶 3.1：代码写入后自动补齐测试（无测试覆盖时生成 test_*.py）
@@ -1972,8 +1977,70 @@ class AgentLoop:
                     self._emit("workspace_resume_hint", hint=hint)
             except Exception:
                 logger.exception("工作流上下文加载失败")
+        # 主线一 1.2B：把上次未完成的待办动作转成可入队的调度任务
+        self._resume_tasks = []
+        if self.workspace_context is not None:
+            try:
+                resume = self.workspace_context.resume_tasks()
+                if resume:
+                    self._resume_tasks = resume
+                    self._decision.record(
+                        "workspace.resume_tasks",
+                        "agent.workspace_context_enabled",
+                        self.config.agent.workspace_context_enabled,
+                        f"待办动作转调度任务 {len(resume)} 条: "
+                        + "; ".join(t.instruction[:40] for t in resume[:3]),
+                    )
+            except Exception:
+                logger.exception("待办动作转调度任务失败")
+        # 1.2C：无未完成工作流但 git 有未提交变更时，提示先分析变更
+        if self.workspace_context is not None and not self.workspace_context.is_active():
+            try:
+                if self.workspace_context.has_uncommitted_changes():
+                    parts.append("## 检测到未提交变更\n"
+                                 "项目中存在未提交的变更（git status 非空），"
+                                 "但未找到上次会话的工作流上下文。建议先分析这些变更"
+                                 "（git diff/status）再开始新任务。")
+                    self._decision.record(
+                        "workspace.uncommitted_hint",
+                        "agent.workspace_context_enabled",
+                        self.config.agent.workspace_context_enabled,
+                        "无上下文但存在未提交变更，已注入分析提示",
+                    )
+            except Exception:
+                logger.exception("未提交变更提示失败")
+
         if parts:
             self.prompt_builder.set_project_state("\n\n".join(parts))
+
+    def _merge_resume_tasks(self, plan: List[Task]) -> List[Task]:
+        """主线一 1.2B：待办任务与本次规划指令级去重后合并，待办优先。"""
+        if not self._resume_tasks:
+            return plan
+        planned = {t.instruction.strip().lower() for t in plan}
+        merged = list(plan)
+        for t in self._resume_tasks:
+            key = t.instruction.strip().lower()
+            if key and key not in planned:
+                merged.insert(0, t)
+                planned.add(key)
+        self._resume_tasks = []
+        return merged
+
+    def _note_agent_file_write(self, params: Dict[str, Any]) -> None:
+        """主线一 1.1A：Agent 写入成功后记录 intended 状态（三层快照对比）。"""
+        if self.project_state_tracker is None:
+            return
+        action = str(params.get("action", ""))
+        if action not in ("write", "append", "edit", "delete", "rm"):
+            return
+        path = str(params.get("path", ""))
+        if not path:
+            return
+        try:
+            self.project_state_tracker.note_agent_write(path)
+        except Exception as e:
+            logger.warning("记录 Agent 文件写入状态失败: %s", e)
 
     def _end_persistent_session(self, prompt: str,
                                 result: Optional[LoopResult]) -> None:
@@ -1984,6 +2051,19 @@ class AgentLoop:
         if self.project_state_tracker is not None:
             try:
                 changes = self.project_state_tracker.end_session()
+                conflicts = changes.get("conflicts") or []
+                if conflicts:
+                    self._decision.record(
+                        "project_state.conflicts",
+                        "agent.state_tracker_enabled",
+                        self.config.agent.state_tracker_enabled,
+                        f"三层快照冲突 {len(conflicts)} 处: "
+                        + "; ".join(f"{c['path']}({c['kind']})"
+                                        for c in conflicts[:5]),
+                    )
+                    self._emit("project_state_conflicts",
+                               conflicts=conflicts,
+                               text=changes.get("conflict_text", ""))
                 self._decision.record(
                     "project_state.session", "agent.state_tracker_enabled",
                     self.config.agent.state_tracker_enabled,

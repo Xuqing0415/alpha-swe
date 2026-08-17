@@ -22,6 +22,23 @@ logger = logging.getLogger("alpha-swe.workspace")
 
 _CONTEXT_FILE = ".swe-agent/context.json"
 
+# 主线一 1.2B：待办动作可操作化——由指令文本推断结构化动作类型。
+_ACTION_TYPE_HINTS = (
+    ("run_test", ("test", "pytest", "jest", "go test", "coverage", "测试", "跑")),
+    ("commit_changes", ("commit", "push", "提交", "推送")),
+    ("format_lint", ("format", "lint", "isort", "black", "prettier", "格式化")),
+    ("run_build", ("build", "compile", "npm run", "构建", "编译")),
+)
+_ACTION_FALLBACK = "generic"
+
+
+def _infer_action_type(instruction: str) -> str:
+    text = (instruction or "").lower()
+    for kind, hints in _ACTION_TYPE_HINTS:
+        if any(h in text for h in hints):
+            return kind
+    return _ACTION_FALLBACK
+
 
 def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
@@ -54,15 +71,50 @@ class WorkspaceContext:
 
     # ---- 加载 / 保存 ----
     def _load(self) -> Dict[str, Any]:
-        try:
-            data = json.loads(self.context_file.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                return data
-        except (OSError, ValueError):
-            pass
+        """加载上下文；主文件损坏时依次回退 .bak1 / .bak2（1.1B 自愈）。"""
+        for f in (self.context_file,
+                  self._backup_path(self.context_file, 1),
+                  self._backup_path(self.context_file, 2)):
+            try:
+                data = json.loads(f.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    return data
+            except (OSError, ValueError):
+                continue
         return {}
 
     def save(self) -> None:
+        """原子写入：先写临时文件再 rename，写入前轮换 .bak1/.bak2。"""
+        try:
+            self.context_file.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.context_file.with_name(self.context_file.name + ".tmp")
+            tmp.write_text(
+                json.dumps(self.data, ensure_ascii=False, indent=2),
+                encoding="utf-8")
+            if self.context_file.exists():
+                self._rotate_backups()
+            os.replace(tmp, self.context_file)
+        except OSError as e:
+            logger.warning("工作流上下文写入失败: %s", e)
+
+    @staticmethod
+    def _backup_path(base: Path, idx: int) -> Path:
+        return base.with_name(f"{base.name}.bak{idx}")
+
+    def _rotate_backups(self) -> None:
+        bak1 = self._backup_path(self.context_file, 1)
+        bak2 = self._backup_path(self.context_file, 2)
+        try:
+            if bak1.exists():
+                if bak2.exists():
+                    bak2.unlink()
+                os.replace(bak1, bak2)
+        except OSError:
+            pass
+        try:
+            os.replace(self.context_file, bak1)
+        except OSError:
+            pass
         try:
             self.context_file.parent.mkdir(parents=True, exist_ok=True)
             self.context_file.write_text(
@@ -107,14 +159,76 @@ class WorkspaceContext:
             lines.append(f"- 任务: {prompt[:200]}")
         if self.data.get("task_phase"):
             lines.append(f"- 进度阶段: {self.data['task_phase']}")
-        pending = self.data.get("pending_actions") or []
+        pending = self.pending_action_entries()
         if pending:
-            lines.append("- 待办: " + "; ".join(str(p)[:100]
-                                                for p in pending[:5]))
+            lines.append("- 待办:")
+            for p in pending[:5]:
+                if p.get("status") == "done":
+                    continue
+                mark = "必做" if p.get("blocking") else "可选"
+                text = str(p.get("instruction") or "")[:80]
+                lines.append(f"  - [{mark}][{p.get('type', 'generic')}] {text}")
         hint = str(self.data.get("next_session_hint") or "").strip()
         if hint:
             lines.append(f"- 上次提示: {hint[:200]}")
         return "\n".join(lines)
+
+    # ---- 主线一 1.2B：待办动作可操作化 ----
+    def pending_action_entries(self) -> List[Dict[str, Any]]:
+        """结构化待办列表；兼容旧版字符串格式（自动升级为结构化条目）。"""
+        entries: List[Dict[str, Any]] = []
+        for entry in self.data.get("pending_actions") or []:
+            if isinstance(entry, str):
+                entries.append({
+                    "type": _infer_action_type(entry),
+                    "instruction": entry,
+                    "target": "", "expected": "",
+                    "blocking": True, "status": "pending", "task_id": "",
+                })
+            elif isinstance(entry, dict):
+                entries.append(dict(entry))
+        return entries
+
+    def resume_tasks(self) -> List[Any]:
+        """把未完成的待办动作转成可直接入队的调度任务（优先执行）。
+
+        非阻塞动作降级为 optional，失败不阻断主任务；阻塞动作为 normal。
+        与新一轮规划任务做指令级去重，避免同一件事被重复执行。
+        """
+        if not self.is_active():
+            return []
+        from agent.core.task import Task
+        out: List[Task] = []
+        seen = set()
+        for entry in self.pending_action_entries():
+            if entry.get("status") == "done":
+                continue
+            instruction = str(entry.get("instruction") or "").strip()
+            if not instruction:
+                continue
+            key = instruction.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(Task(
+                id=f"resume-{len(out)}",
+                instruction=instruction,
+                priority=10,
+                criticality="normal" if entry.get("blocking", True)
+                else "optional",
+                metadata={
+                    "resume": True,
+                    "action_type": str(entry.get("type")
+                                       or _infer_action_type(instruction)),
+                    "target": str(entry.get("target") or ""),
+                    "expected": str(entry.get("expected") or ""),
+                },
+            ))
+        return out
+
+    def has_uncommitted_changes(self) -> bool:
+        """1.2C：git 工作区是否有未提交变更。"""
+        return bool(self._uncommitted())
 
     # ---- 会话生命周期 ----
     def begin(self, prompt: str) -> None:
@@ -146,13 +260,26 @@ class WorkspaceContext:
         else:
             phase = "completed" if getattr(result, "ok", False) else "failed"
         hint = self._build_hint(prompt, result, phase)
-        pending: List[str] = []
+        pending: List[Dict[str, Any]] = []
         tasks = getattr(result, "tasks", None) if result is not None else None
         if tasks:
             from agent.core.task import TaskStatus
             terminal = {TaskStatus.COMPLETED, TaskStatus.SKIPPED}
-            pending = [str(t.instruction) for t in tasks
-                       if getattr(t, "status", None) not in terminal]
+            for t in tasks:
+                if getattr(t, "status", None) in terminal:
+                    continue
+                instruction = str(t.instruction)
+                meta = getattr(t, "metadata", {}) or {}
+                pending.append({
+                    "type": _infer_action_type(instruction),
+                    "instruction": instruction,
+                    "target": str(meta.get("target", "") or ""),
+                    "expected": str(meta.get("expected", "") or ""),
+                    "blocking": True,
+                    "status": "pending",
+                    "task_id": str(getattr(t, "id", "")),
+                })
+            pending = pending[:10]
         self.data.update({
             "active_branch": self._detect_branch(),
             "task_phase": phase,

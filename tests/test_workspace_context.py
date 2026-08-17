@@ -89,7 +89,9 @@ def test_failed_generates_hint(ws_dir):
     ctx.finalize("修复空指针", result)
     assert ctx.data["status"] == "active"
     assert "IndexError" in ctx.data["next_session_hint"]
-    assert ctx.data["pending_actions"] == ["修复空指针"]
+    # 1.2B：待办已结构化（含动作类型/阻塞标记）
+    assert ctx.data["pending_actions"][0]["instruction"] == "修复空指针"
+    assert ctx.data["pending_actions"][0]["blocking"] is True
 
 
 def test_pending_actions_excludes_completed(ws_dir):
@@ -100,8 +102,9 @@ def test_pending_actions_excludes_completed(ws_dir):
     todo = Task(id="b", instruction="未完成任务", status=TaskStatus.READY)
     result = LoopResult(phase=AgentPhase.FAILED, tasks=[done, todo])
     ctx.finalize("双任务", result)
-    assert "未完成任务" in ctx.data["pending_actions"]
-    assert "已完成任务" not in ctx.data["pending_actions"]
+    instructions = [p["instruction"] for p in ctx.data["pending_actions"]]
+    assert "未完成任务" in instructions
+    assert "已完成任务" not in instructions
 
 
 @pytest.mark.asyncio

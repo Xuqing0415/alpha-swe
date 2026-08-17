@@ -69,8 +69,10 @@ def _isolate_agent_log_dirs():
         (ContextConfig, (("archive_dir", "archives"),)),
         (SkillConfig, (("usage_log", "skill_usage.jsonl"),)),
         # 主线一 1.3：三层记忆的全局经验目录也须隔离，避免测试晋升
-        # 污染真实 ~/.swe-agent/memory
-        (MemoryConfig, (("global_dir", "global_memory"),)),
+        # 污染真实 ~/.swe-agent/memory；db_path 默认 "memory.db" 相对路径
+        # 会污染仓库根目录（派生 memory.chroma），一并重定向到临时目录。
+        (MemoryConfig, (("global_dir", "global_memory"),
+                        ("db_path", "memory_store.db"))),
     )
     for model, fields in redirects:
         for field, sub in fields:

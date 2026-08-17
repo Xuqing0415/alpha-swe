@@ -61,13 +61,17 @@ class FileIOTool(Tool):
 
     def __init__(self, workspace: str = "", read_only: bool = False,
                  audit_store: Optional[FileAuditStore] = None, docker=None,
-                 call_graph=None, decision_logger=None):
+                 call_graph=None, decision_logger=None,
+                 lock_manager=None, lock_holder: str = ""):
         self.workspace = workspace
         self.read_only = read_only
         self.audit_store = audit_store
         self.docker = docker  # DockerSandbox；running 时文件操作路由进容器
         self.call_graph = call_graph  # 项目级调用图（读取时注入影响范围）
         self.decision_logger = decision_logger
+        # 主线二 2.1A：文件级写锁（多 Agent 协作时共享 Blackboard 实例）
+        self.lock_manager = lock_manager
+        self.lock_holder = lock_holder
 
     async def execute(self, params: Dict[str, Any], context: ExecutionContext) -> ToolResult:
         action = str(params.get("action", ""))
@@ -93,6 +97,20 @@ class FileIOTool(Tool):
         except PermissionError as e:
             return ToolResult(success=False, error=str(e), elapsed_ms=0.0,
                               error_category=ErrorCategory.PERMISSION)
+
+        # 主线二 2.1A：写入前申请文件写锁；被其他 Agent 持有时拒绝写入
+        if action in WRITE_ACTIONS and self.lock_manager is not None:
+            holder = self.lock_holder or "agent"
+            if not self.lock_manager.lock_file(str(target), holder):
+                who = self.lock_manager.lock_holder(str(target)) or "unknown"
+                return ToolResult(
+                    success=False,
+                    error=f"文件写锁冲突: {path} 正被 Agent({who}) 锁定，"
+                          "请等待其释放或协调后再写入",
+                    elapsed_ms=(time.time() - start) * 1000,
+                    error_category=ErrorCategory.PERMISSION,
+                    metadata={"file_lock_conflict": True, "holder": who},
+                )
 
         if self.docker is not None and getattr(self.docker, "running", False):
             rel = os.path.relpath(target, os.path.abspath(context.workspace))

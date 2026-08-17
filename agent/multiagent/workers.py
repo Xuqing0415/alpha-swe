@@ -73,6 +73,8 @@ class WorkerAgent:
         try:
             result = await loop.run(instruction)
         finally:
+            # 主线二 2.1A：任务结束（含失败）释放本 Agent 持有的全部文件写锁
+            self._release_locks()
             await loop.close()
 
         artifact = self._collect_artifact(loop, result)
@@ -135,8 +137,21 @@ class WorkerAgent:
             manager.register(FileIOTool(
                 read_only=read_only,
                 audit_store=FileAuditStore(self.config.sandbox.audit_dir),
+                lock_manager=self.blackboard if
+                self.config.team.file_locks_enabled else None,
+                lock_holder=self.role.name,
             ))
         return manager
+
+    def _release_locks(self) -> None:
+        """释放本 Worker 持有的全部文件写锁（防死锁兜底）。"""
+        try:
+            released = self.blackboard.release_all(self.role.name)
+            if released:
+                logger.info("[worker:%s] 释放文件写锁 %d 个", self.role.name,
+                            released)
+        except Exception:
+            logger.exception("释放文件写锁失败: %s", self.role.name)
 
     def _collect_artifact(self, loop: AgentLoop, result: LoopResult) -> Artifact:
         """扫描循环事件中的 file_ops 写入，记录最终文件内容。"""

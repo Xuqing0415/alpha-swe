@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import os
 import re
@@ -130,17 +131,41 @@ class ProjectStateTracker:
         self.decision_logger = decision_logger
         self._state: Dict[str, Any] = self._load()
         self._start_snapshot: Dict[str, Any] = {}
+        self._agent_intended: Dict[str, Any] = {}
         self._session_open = False
 
     # ---- 加载 / 保存 ----
     def _load(self) -> Dict[str, Any]:
-        try:
-            data = json.loads(self.state_file.read_text(encoding="utf-8"))
-            if isinstance(data, dict) and data.get("schema") == 1:
-                return data
-        except (OSError, ValueError):
-            pass
+        """加载状态快照；主文件损坏时依次回退 .bak1 / .bak2（1.1B 自愈）。"""
+        for f in (self.state_file,
+                  self._backup_path(self.state_file, 1),
+                  self._backup_path(self.state_file, 2)):
+            try:
+                data = json.loads(f.read_text(encoding="utf-8"))
+                if isinstance(data, dict) and data.get("schema") == 1:
+                    return data
+            except (OSError, ValueError):
+                continue
         return self._new_state()
+
+    @staticmethod
+    def _backup_path(base: Path, idx: int) -> Path:
+        return base.with_name(f"{base.name}.bak{idx}")
+
+    def _rotate_backups(self) -> None:
+        bak1 = self._backup_path(self.state_file, 1)
+        bak2 = self._backup_path(self.state_file, 2)
+        try:
+            if bak1.exists():
+                if bak2.exists():
+                    bak2.unlink()
+                os.replace(bak1, bak2)
+        except OSError:
+            pass
+        try:
+            os.replace(self.state_file, bak1)
+        except OSError:
+            pass
 
     @staticmethod
     def _new_state() -> Dict[str, Any]:
@@ -158,12 +183,17 @@ class ProjectStateTracker:
         }
 
     def save(self) -> None:
+        """原子写入：先写临时文件再 rename，写入前轮换 .bak1/.bak2。"""
         try:
             self.state_file.parent.mkdir(parents=True, exist_ok=True)
             self._state["updated_at"] = _now()
-            self.state_file.write_text(
+            tmp = self.state_file.with_name(self.state_file.name + ".tmp")
+            tmp.write_text(
                 json.dumps(self._state, ensure_ascii=False, indent=2),
                 encoding="utf-8")
+            if self.state_file.exists():
+                self._rotate_backups()
+            os.replace(tmp, self.state_file)
         except OSError as e:
             logger.warning("项目状态快照写入失败: %s", e)
 
@@ -196,6 +226,7 @@ class ProjectStateTracker:
         return {"structure": structure, "deps": deps,
                 "tech_stack": self._tech_stack(root, list(structure))}
 
+    # ---- 主线一 1.1A：三层快照对比（Last_known / Current_disk / Agent_intended） ----
     def _tech_stack(self, root: Path,
                     files: Optional[Iterable[str]] = None) -> List[str]:
         try:
@@ -206,6 +237,128 @@ class ProjectStateTracker:
             logger.warning("技术栈检测失败: %s", e)
             return []
 
+    def note_agent_write(self, path: str) -> None:
+        """记录 Agent 写入后的 intended 状态（内容 sha1 + mtime/size）。
+
+        由执行引擎在 file_ops 写成功后调用；用于会话结束时区分
+        Agent 正常修改 / 外部覆盖 / 回滚。
+        """
+        root = Path(self.workspace)
+        raw = Path(path)
+        if raw.is_absolute():
+            try:
+                rel = raw.relative_to(root).as_posix()
+            except ValueError:
+                return
+        else:
+            rel = raw.as_posix()
+        if _skip(tuple(rel.split("/"))):
+            return
+        target = root / rel
+        if not target.is_file():
+            self._agent_intended[rel] = {"deleted": True}
+            return
+        try:
+            st = target.stat()
+            digest = hashlib.sha1(
+                target.read_bytes()).hexdigest()
+        except OSError:
+            return
+        self._agent_intended[rel] = {
+            "mtime_ns": st.st_mtime_ns, "size": st.st_size, "sha1": digest,
+        }
+
+    @staticmethod
+    def _classify_conflicts(last_known: Dict[str, Any],
+                            current: Dict[str, Any],
+                            intended: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """三层对比：Last_known vs Current_disk vs Agent_intended。
+
+        分类规则（1.1A 表格）：
+        - Agent 正常修改：intended 存在且 == current；
+        - 文件被回滚：intended != current 且 current == last_known；
+        - 外部覆盖：intended != current 且 current != last_known；
+        - 外部修改：非 Agent 写入文件且 last_known != current。
+        """
+        conflicts: List[Dict[str, Any]] = []
+        paths = set(last_known) | set(current) | set(intended)
+        for p in sorted(paths):
+            last = last_known.get(p)
+            cur = current.get(p)
+            intent = intended.get(p)
+            if intent is not None:
+                if intent.get("deleted"):
+                    if cur is not None:
+                        conflicts.append({"path": p, "kind": "reverted",
+                                          "detail": "Agent 已删除该文件，但磁盘上仍存在"})
+                    continue
+                if cur is None:
+                    conflicts.append({"path": p, "kind": "external_delete",
+                                      "detail": "Agent 写入后文件被外部删除"})
+                    continue
+                if ProjectStateTracker._same_intent(intent, cur):
+                    continue  # Agent 正常修改
+                if last is not None and ProjectStateTracker._sig_eq(last, cur):
+                    conflicts.append({"path": p, "kind": "reverted",
+                                      "detail": "文件被回滚到 Agent 修改前状态（与上次快照一致）"})
+                else:
+                    conflicts.append({"path": p, "kind": "external_overwrite",
+                                      "detail": "Agent 写入后的内容与当前磁盘不一致，疑似被外部覆盖"})
+                continue
+            last_sig = ProjectStateTracker._sig(last)
+            cur_sig = ProjectStateTracker._sig(cur)
+            if last is None and cur is not None:
+                conflicts.append({"path": p, "kind": "external_added",
+                                  "detail": "外部新增文件"})
+            elif last is not None and cur is None:
+                conflicts.append({"path": p, "kind": "external_removed",
+                                  "detail": "外部删除文件"})
+            elif last_sig is not None and last_sig != cur_sig:
+                conflicts.append({"path": p, "kind": "external_modified",
+                                  "detail": "外部手动修改文件"})
+        return conflicts
+
+    @staticmethod
+    def _sig(entry: Optional[Dict[str, Any]]) -> Optional[tuple]:
+        if not entry:
+            return None
+        if entry.get("deleted"):
+            return None
+        return (entry.get("mtime_ns"), entry.get("size"))
+
+    @staticmethod
+    def _sig_eq(a: Dict[str, Any], b: Dict[str, Any]) -> bool:
+        sa, sb = ProjectStateTracker._sig(a), ProjectStateTracker._sig(b)
+        return sa is not None and sa == sb
+
+    @staticmethod
+    def _same_intent(intent: Dict[str, Any],
+                     current: Dict[str, Any]) -> bool:
+        """intended 与当前磁盘是否一致：优先内容 sha1，缺省回退 mtime/size。"""
+        if intent.get("sha1") and current.get("sha1"):
+            return intent["sha1"] == current["sha1"]
+        return ProjectStateTracker._sig_eq(intent, current)
+
+    def _conflict_text(self, conflicts: List[Dict[str, Any]]) -> str:
+        """三层快照冲突摘要（注入 Prompt / TUI 展示）。"""
+        if not conflicts:
+            return ""
+        lines = ["## 会话期间的文件变更冲突"]
+        kind_label = {
+            "external_overwrite": "外部覆盖",
+            "reverted": "回滚",
+            "external_delete": "外部删除",
+            "external_added": "外部新增",
+            "external_removed": "外部移除",
+            "external_modified": "外部修改",
+        }
+        for c in conflicts[:_MAX_DIFF_FILES]:
+            lines.append("- " + c["path"] + ": " +
+                         kind_label.get(c.get("kind", "unknown"),
+                                        c.get("kind")) + " （" +
+                         c.get("detail", "") + "）")
+        return "\n".join(lines)
+
     # ---- 会话生命周期 ----
     def begin_session(self) -> Dict[str, Any]:
         """会话开始：记录起始快照，对比上次状态生成差异。
@@ -214,6 +367,7 @@ class ProjectStateTracker:
         """
         current = self.scan()
         self._start_snapshot = current
+        self._agent_intended = {}
         self._session_open = True
         previous = self._state
         if not previous.get("structure") and not previous.get("deps"):
@@ -242,6 +396,17 @@ class ProjectStateTracker:
         del self._state["recent_changes"][_MAX_RECENT:]
         for d in changes.get("deps") or []:
             self._append_dep_history(d)
+        # 主线一 1.1A：三层快照对比（Last_known vs Current vs Intended）
+        last_known = self._state.get("structure", {}) or {}
+        cur_struct = current.get("structure", {}) or {}
+        conflicts = self._classify_conflicts(
+            last_known, cur_struct, self._agent_intended)
+        if conflicts:
+            history = self._state.setdefault("conflicts_history", [])
+            history.insert(0, {"at": _now(), "items": conflicts})
+            del history[50:]
+        changes["conflicts"] = conflicts
+        changes["conflict_text"] = self._conflict_text(conflicts)
         self._state["structure"] = current["structure"]
         self._state["deps"] = current["deps"]
         if current["tech_stack"]:
