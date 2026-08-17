@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import time
+from datetime import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -84,6 +85,11 @@ class LoopResult:
     @property
     def ok(self) -> bool:
         return self.phase == AgentPhase.COMPLETED
+
+
+def _snapshot_timestamp() -> str:
+    """快照文件名时间戳（亚秒精度，避免同秒多步互相覆盖）。"""
+    return datetime.now().strftime("%Y%m%d-%H%M%S%f")
 
 
 class AgentLoop:
@@ -573,7 +579,7 @@ class AgentLoop:
             snapshot_dir.mkdir(parents=True, exist_ok=True)
             data = dag.to_snapshot()
             data["prompt"] = getattr(self, "_current_prompt", "")
-            ts = time.strftime("%Y%m%d-%H%M%S")
+            ts = _snapshot_timestamp()
             step = sum(1 for t in dag.all()
                        if t.status in (TaskStatus.COMPLETED, TaskStatus.FAILED,
                                        TaskStatus.SKIPPED))

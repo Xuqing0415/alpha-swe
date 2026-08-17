@@ -34,6 +34,31 @@ tests/                  新核心测试（111 项）
 loop.py, scheduler.py, ... 旧版七层原型（保留，作为对照参考）
 ```
 
+## 两套架构（重要）
+
+仓库同时存在两套独立实现，入口与默认配置不同，请勿混用：
+
+| 架构 | 入口 | 配置 | 状态 |
+| --- | --- | --- | --- |
+| **新核心（推荐）** | `python -m agent run "任务"`、`python -m tui` | `config/agent.yaml`（Pydantic 校验） | 主干，功能齐全 |
+| 旧版七层原型 | `main.py`、`test_all.py` | `config.yaml`（根目录，无校验） | 仅作对照参考，不再演进 |
+
+两套默认值不一致（记忆后端、LLM provider 等）：新核心默认 `memory.backend: hybrid`
+（本地 SQLite + TF-IDF，离线持久），旧原型默认可能指向 Chroma/在线模型。任务级配置以
+各自入口加载的配置文件为准。
+
+### 首次运行引导（离线可用）
+
+- **默认即离线可跑**：`config/agent.yaml` 出厂为 `memory.backend: hybrid` +
+  `embedder: tfidf`，不依赖任何外部模型/API，长期记忆持久有效。
+- **完全离线演示**：`python -m agent run "任务" --config config/offline.yaml`，
+  使用内置 MockLLM + hybrid 记忆，零网络零 Key，适合本地自检与 CI。
+- **启用向量检索（可选）**：先运行 `scripts/download_embedding_model.py` 下载本地
+  sentence-transformers 模型，再把 `memory.backend` 改回 `chroma`、`embedder` 改回
+  `sentence-transformers`；否则嵌入器回退 TF-IDF 会因维度不匹配触发集合重建清空记忆。
+- **线上模型**：`config/agent.yaml` 默认 `llm.provider: litellm`（DeepSeek），
+  运行前设置 `DEEPSEEK_API_KEY`；离线/无 Key 环境请使用 `config/offline.yaml`。
+
 ## 设计与实现的对应关系
 
 | 设计章节 | 实现位置 | 状态 |

@@ -81,11 +81,11 @@ def test_save_snapshot_writes_and_prunes(ws_tmp, monkeypatch):
 
     counter = {"n": 0}
 
-    def fake_strftime(fmt):
+    def fake_timestamp():
         counter["n"] += 1
         return f"20260811-{counter['n']:06d}"
 
-    monkeypatch.setattr("agent.core.loop.time.strftime", fake_strftime)
+    monkeypatch.setattr("agent.core.loop._snapshot_timestamp", fake_timestamp)
     for _ in range(3):
         loop._save_snapshot()
 
@@ -96,6 +96,22 @@ def test_save_snapshot_writes_and_prunes(ws_tmp, monkeypatch):
     latest = json.loads(files[1].read_text(encoding="utf-8"))
     assert latest["prompt"] == "快照保存测试"
     assert any(t["id"] == "a" for t in latest["tasks"])
+
+
+def test_snapshot_filename_has_subsecond_precision(ws_tmp):
+    """快照文件名带亚秒精度：同秒连续保存不互相覆盖。"""
+    cfg = make_config(ws_tmp)
+    loop = AgentLoop(config=cfg, llm=ScriptedLLM(), planner=StubPlanner())
+    loop._current_prompt = "亚秒精度"
+    dag = TaskDAG()
+    dag.add(Task(id="a", instruction="a", status=TaskStatus.COMPLETED,
+                 result="ok"))
+    loop.scheduler.dag = dag
+    loop._save_snapshot()
+    loop._save_snapshot()
+    files = sorted((ws_tmp / "snapshots").glob("task_*.json"))
+    assert len(files) == 2
+    assert files[0].name != files[1].name, "同秒保存快照不应互相覆盖"
 
 
 @pytest.mark.asyncio

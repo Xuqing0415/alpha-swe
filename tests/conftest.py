@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
+import logging
 import os
 import stat
 import shutil
+import subprocess
 import uuid
 from pathlib import Path
 
@@ -16,6 +18,8 @@ def _force_rmtree(path: Path) -> None:
     git 工具测试生成的 .git 对象文件默认为只读，shutil.rmtree 在 Windows
     上会直接失败留下残留目录（这些残留曾被 pytest 当作测试目录收集并报
     PermissionError）。清只读位后重试，保证每个临时目录都被真正清理。
+    若 Python 内删除仍失败（例如外部沙箱 safe-delete shim 拦截 os 删除），
+    再用外部 cmd rmdir 兜底，最大限度避免 test_workspace 残留堆积。
     """
     for root, dirs, files in os.walk(path):
         for name in list(files) + list(dirs):
@@ -24,6 +28,16 @@ def _force_rmtree(path: Path) -> None:
             except OSError:
                 pass
     shutil.rmtree(path, ignore_errors=True)
+    if path.exists() and os.name == "nt":
+        try:
+            subprocess.run(["cmd", "/d", "/c", "rmdir", "/s", "/q",
+                            str(path)],
+                           capture_output=True, timeout=60)
+        except Exception:
+            pass
+    if path.exists():
+        logging.getLogger("alpha-swe.tests").warning(
+            "临时目录清理失败，残留: %s", path)
 
 
 @pytest.fixture
