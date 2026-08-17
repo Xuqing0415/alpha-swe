@@ -932,6 +932,14 @@ class AlphaSWEApp(App[None]):
         if alerts:
             lines.append("")
             lines.extend(a for a in alerts)
+        # 3.1C：能力画像置信区间摘要（样本不足的维度不展示）
+        cap = getattr(runner.loop, "capability", None)
+        if cap is not None:
+            report = cap.confidence_report()
+            if report:
+                lines.append("")
+                lines.append("[能力画像 95% 区间]")
+                lines.extend(f"  {t}" for t in report[:8])
         mon.update("\n".join(lines))
         if self._main_view == "timeline":
             self._update_timeline()

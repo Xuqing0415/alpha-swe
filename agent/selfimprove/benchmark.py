@@ -23,6 +23,7 @@ _STATUS_REJECTED = "rejected"
 
 _WRITE_ACTIONS = ("write", "edit", "append")
 _DECLINE_GAP = 0.15  # 当前分数低于基线超过该差距视为下降
+_CATEGORY_LIMIT = 0.4  # 3.3B：某类别占比超过该阈值视为「过载」，提取时降权
 
 
 def _hash(prompt: str) -> str:
@@ -140,8 +141,12 @@ class BenchmarkExtractor:
         if not ok:
             score += 0.2
             parts.append("暴露失败模式")
+        adj, bal_reason = self._category_balance(prompt)
+        score += adj
+        if bal_reason:
+            parts.append(bal_reason)
         reason = " + ".join(parts) if parts else "代表性不足"
-        return min(score, 1.0), reason
+        return min(max(score, 0.0), 1.0), reason
 
     @staticmethod
     def _difficulty(subtask_count: int) -> str:
@@ -155,6 +160,41 @@ class BenchmarkExtractor:
         from agent.selfimprove.capability import _dimensions_for
 
         return _dimensions_for(prompt)
+
+    # ---- 3.3B 类别平衡 ----
+    def category_distribution(self) -> Dict[str, float]:
+        """已确认条目的类别分布（按主能力维度），值域 0~1。"""
+        confirmed = [e for e in self._data["entries"]
+                     if e.get("status") == _STATUS_CONFIRMED]
+        if not confirmed:
+            return {}
+        counts: Dict[str, int] = {}
+        for e in confirmed:
+            dims = e.get("dimensions") or []
+            dim = dims[0] if dims else "general"
+            counts[dim] = counts.get(dim, 0) + 1
+        total = len(confirmed)
+        return {d: round(c / total, 3) for d, c in counts.items()}
+
+    def _category_balance(self, prompt: str) -> tuple[float, str]:
+        """类别分布平衡调整：任务落在过载类别（>40%）时降权，
+        覆盖低占比类别时加分，优先补充占比低的类别。"""
+        dist = self.category_distribution()
+        dims = self._dimensions(prompt)
+        if not dist or not dims:
+            return 0.0, ""
+        overloaded = [d for d in dims
+                      if dist.get(d, 0.0) > _CATEGORY_LIMIT]
+        underrepresented = [d for d in dims if d not in dist]
+        adj = 0.0
+        parts: List[str] = []
+        if overloaded:
+            adj -= 0.1
+            parts.append(f"类别过载({','.join(overloaded)})")
+        if underrepresented:
+            adj += 0.15
+            parts.append(f"补充低占比类别({','.join(underrepresented)})")
+        return adj, " + ".join(parts)
 
     # ---- 用户确认 / 否决 ----
     def confirm(self, entry_id: str) -> bool:

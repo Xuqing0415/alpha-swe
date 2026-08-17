@@ -101,6 +101,7 @@ _HTML_PAGE = """<!doctype html>
   <button data-tab="decisions">决策</button>
   <button data-tab="events">事件</button>
   <button data-tab="sessions">会话</button>
+  <button data-tab="selfimprove">自我改进</button>
 </nav>
 <main>
   <section id="overview" class="active">
@@ -118,6 +119,16 @@ _HTML_PAGE = """<!doctype html>
   </section>
   <section id="events"><h3>事件流</h3><div id="events-full" class="log"></div></section>
   <section id="sessions"><h3>会话档案</h3><div id="session-table"></div></section>
+  <section id="selfimprove">
+    <h3>能力画像（95% 置信区间）</h3>
+    <table id="cap-table"></table>
+    <h3>改进提议（待验证）</h3>
+    <div id="proposal-summary" class="muted"></div>
+    <table id="proposal-table"></table>
+    <h3>基准集类别分布（已确认）</h3>
+    <div id="bench-categories"></div>
+  </section>
+
 </main>
 <script>
 "use strict";
@@ -222,6 +233,59 @@ function renderDecisions(dec){
     : '<div class="muted">暂无决策记录</div>';
 }
 
+function renderSelfimprove(si){
+  if(!si) return;
+  var cap = si.capability || {};
+  var dims = cap.dims || {};
+  var keys = Object.keys(dims);
+  $("cap-table").innerHTML = keys.length
+    ? "<tr><th>能力维度</th><th>分数（95% 区间）</th><th>样本</th><th>可信度</th></tr>" +
+      keys.map(function(d){
+        var v = dims[d];
+        var note = "";
+        if(v.samples < 5){ note = '<span class="ev-warn">数据不足</span>'; }
+        else if(v.samples < 10){
+          note = '<span class="ev-warn">样本较少，可信度低</span>';
+          var m = v.margin!=null ? " ± " + Math.round(v.margin*100) + "%" : "";
+          return "<tr><td>" + esc(v.label||d) + "</td><td>" +
+                 Math.round(v.score*100) + "%" + m + "</td><td>" + v.samples +
+                 "</td><td>" + note + "</td></tr>";
+        }
+        var m2 = v.margin!=null ? " ± " + Math.round(v.margin*100) + "%" : " -";
+        return "<tr><td>" + esc(v.label||d) + "</td><td>" +
+               Math.round(v.score*100) + "%" + m2 + "</td><td>" + v.samples +
+               "</td><td>可信</td></tr>";
+      }).join("")
+    : '<div class="muted">暂无能力画像数据</div>';
+  var prop = si.proposals || {};
+  var counts = prop.counts || {};
+  $("proposal-summary").textContent = "pending " + (counts.pending||0) +
+    " · promoted " + (counts.promoted||0) + " · local " + (counts.local||0) +
+    " · rejected " + (counts.rejected||0);
+  var plist = prop.pending || [];
+  $("proposal-table").innerHTML = plist.length
+    ? "<tr><th>类别</th><th>措施</th><th>成功/应用</th><th>相似/相关场景</th><th>冲突</th></tr>" +
+      plist.map(function(p){
+        var sc = p.scenes || {};
+        var cf = (p.conflicts && p.conflicts.conflicts) || [];
+        var cfTxt = cf.length ? '<span class="ev-warn">与 ' + cf.length + ' 条策略冲突</span>' : "-";
+        return "<tr><td>" + esc(p.category) + "</td><td>" + esc(p.action) +
+               "</td><td>" + p.successes + "/" + p.applied + "</td><td>" +
+               (sc.similar||0) + "/" + (sc.related||0) + "</td><td>" + cfTxt + "</td></tr>";
+      }).join("")
+    : '<div class="muted">暂无待验证提议</div>';
+  var bench = si.benchmark || {};
+  var dist = bench.categories || {};
+  var bkeys = Object.keys(dist);
+  $("bench-categories").innerHTML = bkeys.length
+    ? bkeys.map(function(k){
+        var pct = Math.round((dist[k]||0)*100);
+        var flag = pct > 40 ? ' <span class="ev-warn">(过载)</span>' : "";
+        return '<div class="kv"><div class="k">' + esc(k) + flag + "</div><div>" + pct + "%</div></div>";
+      }).join("")
+    : '<div class="muted">暂无已确认基准条目</div>';
+}
+
 function renderSessions(sessions){
   var rows = sessions || [];
   $("session-table").innerHTML = rows.length
@@ -258,6 +322,7 @@ async function refresh(){
     renderTree(d.spans && d.spans.roots);
     renderDecisions(d.decisions);
     renderSessions(d.sessions);
+    renderSelfimprove(d.selfimprove);
     renderEvents(d.events, $("events"));
     renderEvents(d.events, $("events-full"));
     $("updated").textContent = "更新 " + new Date().toLocaleTimeString();
@@ -442,6 +507,56 @@ class ObservabilityHub:
         except (OSError, ValueError) as e:
             return {"error": str(e)}
 
+    def selfimprove(self) -> Dict[str, Any]:
+        """自我改进状态：能力画像（含置信区间）+ 提议队列 + 基准集类别。"""
+        loop = self._loop()
+        if loop is None:
+            return {"capability": {}, "proposals": {}, "benchmark": {}}
+        capability: Dict[str, Any] = {}
+        cap = getattr(loop, "capability", None)
+        if cap is not None:
+            try:
+                capability = {
+                    "report": cap.confidence_report(),
+                    "dims": cap.summary(),
+                }
+            except Exception:
+                capability = {}
+        proposals: Dict[str, Any] = {}
+        store = getattr(loop, "proposals", None)
+        if store is not None:
+            try:
+                proposals = {
+                    "counts": store.summary(),
+                    "pending": [{
+                        "id": p["id"],
+                        "category": p.get("category", ""),
+                        "action": str(p.get("action", ""))[:60],
+                        "applied": int(p.get("applied_count", 0)),
+                        "successes": int(p.get("verified_successes", 0)),
+                        "scenes": store.scene_report(p["id"]),
+                        "conflicts": store.conflict_report(p["id"]),
+                    } for p in store.list(status="pending")[:20]],
+                }
+            except Exception:
+                proposals = {}
+        benchmark: Dict[str, Any] = {}
+        bex = getattr(loop, "benchmark", None)
+        if bex is not None:
+            try:
+                benchmark = {
+                    "categories": bex.category_distribution(),
+                    "entries": {
+                        "confirmed": len(bex.entries(status="confirmed")),
+                        "pending": len(bex.entries(status="pending")),
+                        "rejected": len(bex.entries(status="rejected")),
+                    },
+                }
+            except Exception:
+                benchmark = {}
+        return {"capability": capability, "proposals": proposals,
+                "benchmark": benchmark}
+
     def full(self) -> Dict[str, Any]:
         return {
             "status": self.status(),
@@ -451,6 +566,7 @@ class ObservabilityHub:
             "decisions": self.decisions(),
             "events": self.events(),
             "sessions": self.sessions(),
+            "selfimprove": self.selfimprove(),
         }
 
 
@@ -527,6 +643,8 @@ def _make_handler(hub: ObservabilityHub) -> type:
                     except ValueError:
                         limit = 100
                     return self._send_json({"events": self.hub.events(limit)})
+                if path == "/api/selfimprove":
+                    return self._send_json(self.hub.selfimprove())
                 if path == "/api/sessions":
                     return self._send_json({"sessions": self.hub.sessions()})
                 if path.startswith("/api/sessions/"):

@@ -78,21 +78,32 @@ def test_capability_confidence_insufficient_data(ws_tmp):
     for _ in range(4):
         prof.record("修复登录空指针崩溃", ok=True)
     assert prof.reliable("debug") is False
+    assert "数据不足" in prof.confidence_text("debug")
+    assert prof.confidence_report() == [], "样本不足不参与可视化展示"
+    prof.close()
+
+
+def test_capability_confidence_low_samples_band(ws_tmp):
+    """5~9 样本：给出分数但标注“样本较少，评估可信度低”。"""
+    prof = CapabilityProfile(path=str(ws_tmp / "capability.json"))
+    for _ in range(8):
+        prof.record("修复登录空指针崩溃", ok=True)
+    assert prof.reliable("debug") is True
     assert "样本较少" in prof.confidence_text("debug")
-    assert all("±" not in t for t in prof.confidence_report())
+    assert prof.confidence_report()
     prof.close()
 
 
 def test_capability_confidence_margin_after_enough_samples(ws_tmp):
-    """样本充足后给出 95% 置信区间（±半宽）。"""
+    """样本 >= 10 后展示 95% 置信区间（±半宽）。"""
     prof = CapabilityProfile(path=str(ws_tmp / "capability.json"))
-    for _ in range(8):
+    for _ in range(12):
         prof.record("修复登录空指针崩溃", ok=True)
     assert prof.reliable("debug") is True
     assert prof.margin("debug") > 0.0
     assert "±" in prof.confidence_text("debug")
     info = prof.score_with_confidence("debug")
-    assert info["samples"] == 8 and info["reliable"] is True
+    assert info["samples"] == 12 and info["reliable"] is True
     assert info["margin"] == prof.margin("debug")
     prof.close()
 
@@ -182,7 +193,92 @@ def test_proposal_user_reject(ws_tmp):
     store.close()
 
 
+# ---- 3.2B 提议冲突检测 ----
+
+def test_proposal_conflict_requires_higher_threshold(ws_tmp):
+    """与已晋升策略冲突时需更高层级验证（默认 5 次）才能覆盖。"""
+    store = ProposalStore(path=str(ws_tmp / "proposals.json"),
+                          conflict_threshold=5, reject_after=6)
+    old = store.create_or_bump("tool", "部署任务超时", "增强超时管控")
+    store.promote(old)
+    pid = store.create_or_bump("tool", "任务超时重试", "升级超时熔断")
+    assert store.conflicts_with(pid) == [old]
+    # 相似 + 相关各成功一次（达到泛化要求）
+    store.verify(pid, ok=True, instruction="重试任务超时处理")
+    store.verify(pid, ok=True, instruction="超时重试并记录日志")
+    # 第 3 次成功达到常规阈值，但被冲突拦截
+    assert store.verify(pid, ok=True,
+                        instruction="重试任务超时处理") == "pending"
+    report = store.conflict_report(pid)
+    assert report["conflicts"] == [old]
+    assert report["threshold"] == 5
+    # 达到冲突阈值 -> 晋升覆盖旧策略
+    assert store.verify(pid, ok=True,
+                        instruction="超时重试并记录日志") == "pending"
+    assert store.verify(pid, ok=True,
+                        instruction="重试任务超时处理") == STATUS_PROMOTED
+    assert store.list(status=STATUS_PROMOTED)
+    store.close()
+
+
+def test_proposal_conflict_detector_callback(ws_tmp):
+    """自定义冲突检测器（LLM 判定）优先于确定性规则。"""
+    def detector(pending, promoted):
+        return [q["id"] for q in promoted if q.get("action") == "禁止缓存"]
+    store = ProposalStore(path=str(ws_tmp / "proposals.json"),
+                          conflict_detector=detector)
+    old = store.create_or_bump("tool", "缓存性能下降", "禁止缓存")
+    store.promote(old)
+    pid = store.create_or_bump("tool", "缓存性能下降", "清理缓存")
+    assert store.conflicts_with(pid) == [old]
+    store.close()
+
+
+def test_proposal_no_conflict_when_action_same(ws_tmp):
+    """同类别同措施不视为冲突（只是重复登记）。"""
+    store = ProposalStore(path=str(ws_tmp / "proposals.json"))
+    old = store.create_or_bump("tool", "部署任务超时", "增强超时管控")
+    store.promote(old)
+    pid = store.create_or_bump("tool", "任务超时重试", "增强超时管控")
+    assert store.conflicts_with(pid) == [], "同措施不应判为冲突"
+    store.close()
+
+
+# ---- 3.3B 基准集类别平衡 ----
+
+def test_benchmark_category_balance(ws_tmp):
+    """确认条目形成过载类别后，同类任务降权、低占比类别加分。"""
+    store = BenchmarkExtractor(path=str(ws_tmp / "bench.json"))
+    ev = [{"type": "tool_call", "data": {"success": True, "tool": "file_ops",
+          "params": {"action": "edit", "path": "a.py"}}}]
+    tasks = [SimpleNamespace(id="s0"), SimpleNamespace(id="s1")]
+    # 3 条同类别（修复类）任务确认后该类别过载
+    for prompt in ("修复登录模块空指针崩溃",
+                   "修复订单支付失败",
+                   "修复数据同步报错"):
+        e = store.evaluate(prompt, _result(ev, tasks))
+        assert e and not e.get("duplicate"), "应登记新条目"
+        store.confirm(e["id"])
+    dist = store.category_distribution()
+    assert dist, "已确认条目应产出类别分布"
+    assert any(v > 0.4 for v in dist.values()), "单一类别应过载"
+    # 过载类别的新任务被降权
+    adj, reason = store._category_balance("新增用户接口")
+    assert adj < 0 and "过载" in reason
+    # 覆盖低占比类别的新任务被加分
+    adj2, reason2 = store._category_balance("为登录模块编写文档")
+    assert adj2 > 0 and "低占比" in reason2
+    # 端到端：过载任务代表性分数低于未过载基线
+    fresh = BenchmarkExtractor(path=str(ws_tmp / "b2.json"))
+    s0, _ = fresh._representative_score("新增用户接口", ev, tasks, ok=True)
+    s1, _ = store._representative_score("新增用户接口", ev, tasks, ok=True)
+    assert s1 < s0, "过载类别应拉低代表性分数"
+    fresh.close()
+    store.close()
+
+
 # ---- 3.3 基准集提取 ----
+
 
 def _result(events, tasks, phase="completed"):
     return SimpleNamespace(events=events, tasks=tasks, phase=phase,

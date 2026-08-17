@@ -16,7 +16,7 @@ import logging
 import re
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger("alpha-swe.selfimprove.proposals")
 
@@ -96,12 +96,17 @@ class ProposalStore:
 
     def __init__(self, path: Optional[str] = None, enabled: bool = True,
                  promote_threshold: int = 3, reject_after: int = 5,
-                 require_generalization: bool = True) -> None:
+                 require_generalization: bool = True,
+                 conflict_threshold: int = 5,
+                 conflict_detector: Optional[Callable] = None) -> None:
         self.enabled = enabled
         self.path = Path(path).expanduser() if path else None
         self.promote_threshold = max(1, int(promote_threshold))
         self.reject_after = max(1, int(reject_after))
         self.require_generalization = bool(require_generalization)
+        # 3.2B：与已晋升策略冲突时需更高层级验证（默认 5 次成功）才能覆盖
+        self.conflict_threshold = max(1, int(conflict_threshold))
+        self.conflict_detector = conflict_detector
         self._data: Dict[str, Any] = self._load()
 
     def _load(self) -> Dict[str, Any]:
@@ -179,6 +184,52 @@ class ProposalStore:
                 ids.append(pid)
         return ids
 
+    # ---- 3.2B 冲突检测 ----
+    def conflicts_with(self, pid: str) -> List[str]:
+        """返回与待晋升提议冲突的已晋升策略 id。
+
+        默认确定性规则：同类别 + 共享触发关键词 + 措施不同即视为冲突；
+        传入 conflict_detector 时优先使用（LLM 判定，失败回退确定性规则）。
+        """
+        p = self._data["proposals"].get(pid)
+        if p is None:
+            return []
+        promoted = [q for q in self._data["proposals"].values()
+                    if q.get("status") == STATUS_PROMOTED]
+        if self.conflict_detector is not None:
+            try:
+                result = self.conflict_detector(p, promoted)
+                if isinstance(result, (list, tuple, set)):
+                    return [str(x) for x in result]
+                if result:
+                    return [q["id"] for q in promoted]
+                return []
+            except Exception as e:
+                logger.warning("LLM 冲突检测失败，回退确定性规则: %s", e)
+        out: List[str] = []
+        for q in promoted:
+            if q["id"] == pid:
+                continue
+            same_cat = (q.get("category") == p.get("category"))
+            share_kw = bool((set(q.get("trigger_keywords") or [])
+                             & set(p.get("trigger_keywords") or [])))
+            same_action = ((q.get("action") or "") == (p.get("action") or ""))
+            if same_cat and share_kw and not same_action:
+                out.append(q["id"])
+        return out
+
+    def conflict_report(self, pid: str) -> Dict[str, Any]:
+        """提议冲突状态（供决策日志 / TUI / Web 面板展示）。"""
+        p = self._data["proposals"].get(pid)
+        if p is None:
+            return {}
+        return {
+            "conflicts": self.conflicts_with(pid),
+            "threshold": self.conflict_threshold,
+            "promotable": (int(p.get("verified_successes", 0))
+                           >= self.conflict_threshold),
+        }
+
     # ---- 验证 ----
     def verify(self, pid: str, ok: bool, instruction: str = "",
                require_generalization: Optional[bool] = None) -> str:
@@ -209,6 +260,13 @@ class ProposalStore:
             p["verified_successes"] = int(p.get("verified_successes", 0)) + 1
             if (p["verified_successes"] >= self.promote_threshold
                     and (not need_general or self._generalized(p))):
+                conflicts = self.conflicts_with(pid)
+                if conflicts:
+                    # 3.2B：与已晋升策略冲突，需更高层级验证才能覆盖旧策略
+                    p["conflict_with"] = conflicts
+                    if p["verified_successes"] < self.conflict_threshold:
+                        self._save()
+                        return STATUS_PENDING
                 p["status"] = STATUS_PROMOTED
                 p["promoted_at"] = time.time()
                 self._save()

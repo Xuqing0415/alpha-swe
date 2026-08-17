@@ -2159,6 +2159,8 @@ class AgentLoop:
                     reject_after=self.config.agent.proposal_reject_after,
                     require_generalization=
                     self.config.agent.proposal_require_generalization,
+                    conflict_threshold=
+                    self.config.agent.proposal_conflict_threshold,
                 )
             if self.config.agent.benchmark_extraction_enabled:
                 self.benchmark = BenchmarkExtractor(
@@ -2237,6 +2239,17 @@ class AgentLoop:
                         )
                         self._emit("selflearn_demoted_local",
                                    proposal_id=pid)
+                    elif status == "pending" and ok:
+                        conflict = self.proposals.conflict_report(pid)
+                        if conflict.get("conflicts"):
+                            self._decision.record(
+                                "selflearn.conflict",
+                                "agent.proposals_enabled", True,
+                                f"提议 {pid} 与已晋升策略冲突，需"
+                                f"{conflict['threshold']} 次成功才能覆盖",
+                            )
+                            self._emit("selflearn_conflict",
+                                       proposal_id=pid)
                 self._active_proposals = []
                 if not ok:
                     self._register_proposal(prompt, result)

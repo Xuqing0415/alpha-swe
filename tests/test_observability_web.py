@@ -144,3 +144,38 @@ def test_web_session_path_traversal_blocked(ws_tmp):
         assert "error" in json.loads(body)
     finally:
         srv.stop()
+
+
+def test_web_api_selfimprove(ws_tmp):
+    """3.1C：能力画像置信区间 / 提议冲突 / 基准类别经 API 可视化。"""
+    from agent.selfimprove import (BenchmarkExtractor, CapabilityProfile,
+                                   ProposalStore)
+    loop = FakeLoop()
+    base = ws_tmp / "improve"
+    loop.capability = CapabilityProfile(path=str(base / "cap.json"))
+    for _ in range(5):
+        loop.capability.record("修复登录模块空指针崩溃", ok=True)
+    loop.proposals = ProposalStore(path=str(base / "proposals.json"))
+    loop.proposals.create_or_bump("tool", "部署任务超时", "增强超时管控")
+    loop.benchmark = BenchmarkExtractor(path=str(base / "bench.json"))
+    srv, hub, url = _start_server(loop, ws_tmp)
+    try:
+        code, _, body = _get(url + "/api/selfimprove")
+        assert code == 200
+        data = json.loads(body)
+        assert "debug" in data["capability"]["dims"]
+        assert data["capability"]["report"], "样本充足维度应进入可视化报告"
+        assert data["capability"]["dims"]["debug"]["margin"] > 0
+        assert data["proposals"]["counts"]["pending"] == 1
+        # /api/full 也应携带 selfimprove
+        code, _, body = _get(url + "/api/full")
+        assert "selfimprove" in json.loads(body)
+        # HTML 面板包含自我改进 tab
+        code, _, body = _get(url + "/")
+        html = body.decode("utf-8")
+        assert "自我改进" in html and "cap-table" in html
+    finally:
+        srv.stop()
+        loop.capability.close()
+        loop.proposals.close()
+        loop.benchmark.close()

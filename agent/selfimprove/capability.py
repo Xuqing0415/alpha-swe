@@ -232,21 +232,24 @@ class CapabilityProfile:
         }
 
     def confidence_text(self, dim: str) -> str:
-        """形如「调试定位 72% ± 12%（基于 8 次尝试，样本较少，评估可信度低）」。"""
+        """置信度文案：<5 样本「数据不足」；5~9 样本「样本较少，可信度低」；
+        10+ 样本给出 95% 区间。"""
         label = CAPABILITY_DIMENSIONS.get(dim, dim)
         n = self.samples(dim)
-        if n == 0:
-            return f"{label} 数据不足"
-        base = f"{label} {self.score(dim):.0%}（基于 {n} 次尝试"
-        if not self.reliable(dim):
-            return base + "，样本较少，评估可信度低）"
+        if n < _MIN_CONFIDENCE_SAMPLES:
+            return f"{label} 数据不足（{n} 次尝试）"
+        if n < _LOW_CONFIDENCE_SAMPLES:
+            return (f"{label} {self.score(dim):.0%}"
+                    f"（基于 {n} 次尝试，样本较少，评估可信度低）")
         return (f"{label} {self.score(dim):.0%}"
                 f" ± {self.margin(dim):.0%}（基于 {n} 次尝试）")
 
     def confidence_report(self) -> List[str]:
-        """已记录维度的置信度摘要（供 TUI / 报告展示，跳过无数据项）。"""
+        """已记录维度的置信度摘要（供 TUI / 报告展示）。
+        样本 < 5 的维度标记「数据不足」，不参与可视化展示。"""
         return [self.confidence_text(dim)
-                for dim in sorted(self._data) if self.samples(dim) > 0]
+                for dim in sorted(self._data)
+                if self.samples(dim) >= _MIN_CONFIDENCE_SAMPLES]
 
     def profile_text(self, top: int = 3) -> str:
         """生成注入 Prompt 的画像摘要：突出弱项与改进建议。"""

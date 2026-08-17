@@ -321,6 +321,7 @@ class AgentConfig(BaseModel):
     proposal_promote_threshold: int = 3        # 提议连续验证成功 N 次晋升自学策略
     proposal_reject_after: int = 5             # 应用 N 次未达标则丢弃
     proposal_require_generalization: bool = True  # 3.2A 晋升需相似+相关两个场景验证有效
+    proposal_conflict_threshold: int = 5        # 3.2B 与已晋升策略冲突时需 N 次成功覆盖
     benchmark_extraction_enabled: bool = True  # 3.3 基准集自动提取（代表性任务）
     self_improve_dir: str = "~/.swe-agent"     # 画像/提议/基准台账目录（跨会话）
 
