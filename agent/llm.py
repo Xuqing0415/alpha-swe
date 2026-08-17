@@ -83,7 +83,14 @@ class LiteLLMClient(BaseLLM):
         if api_base:
             kwargs["api_base"] = api_base
         if self.config.api_key_env:
-            kwargs["api_key"] = __import__("os").environ.get(self.config.api_key_env, "")
+            api_key = __import__("os").environ.get(self.config.api_key_env, "")
+            if not api_key:
+                # 缺 API Key 时快速失败：避免空 key 触发网络调用长时间挂起
+                # （离线/无 Key 环境应改用 config/offline.yaml 的 MockLLM）
+                raise LLMServiceError(
+                    f"未配置环境变量 {self.config.api_key_env}：使用线上模型前"
+                    f"请先设置 API Key，或改用 config/offline.yaml（MockLLM）")
+            kwargs["api_key"] = api_key
 
         last_error: Optional[BaseException] = None
         for attempt in range(self.max_retries + 1):
