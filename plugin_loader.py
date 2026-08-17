@@ -21,6 +21,7 @@ class PluginLoader:
         self.skills_dir = skills_dir
         self.loaded_skills: Dict[str, dict] = {}
         self.manifest: Dict[str, dict] = {}
+        self.global_config: Dict[str, dict] = {}
         self._last_load_time: Dict[str, float] = {}
         self._load_manifest()
         self._refresh()
@@ -33,6 +34,8 @@ class PluginLoader:
                 with open(manifest_path, "r", encoding="utf-8-sig") as f:
                     data = json.load(f)
                     self.manifest = data.get("skills", {})
+                    # global 配置在 JSON 顶层（skills 之外），单独保存供匹配限流
+                    self.global_config = data.get("global", {}) or {}
                     logger.info(f"Manifest 加载完成: {len(self.manifest)} 个技能定义")
             except Exception as e:
                 logger.error(f"Manifest 加载失败: {e}")
@@ -145,17 +148,20 @@ class PluginLoader:
         prompt_lower = user_prompt.lower()
         matched_scores = []
 
-        # 使用 manifest 中的 triggers 做匹配
+        # 使用 manifest 的 triggers/tags 与技能名做匹配：旧版 manifest 只
+        # 定义 tags，仅按 triggers 匹配会导致任何技能都无法被激活。
         for name, skill in self.loaded_skills.items():
-            triggers = skill.get("triggers", [])
-            if not triggers:
+            keywords = [str(t).lower()
+                        for t in (skill.get("triggers", []) or [])]
+            keywords += [str(t).lower()
+                         for t in (skill.get("tags", []) or [])]
+            keywords.append(name.lower())
+            keywords = [k for k in keywords if k]
+            if not keywords:
                 continue
 
             # 计算匹配分数
-            score = 0
-            for trigger in triggers:
-                if trigger in prompt_lower:
-                    score += 1
+            score = sum(1 for kw in keywords if kw in prompt_lower)
 
             # 检查 exclude_triggers
             excludes = skill.get("exclude_triggers", [])
@@ -168,8 +174,8 @@ class PluginLoader:
         # 按优先级降序、匹配分数降序排列
         matched_scores.sort(key=lambda x: (x[1], x[2]), reverse=True)
 
-        # 限制数量
-        max_skills = self.manifest.get("global", {}).get("max_skills_per_request", 3)
+        # 限制数量（global 配置在 manifest JSON 顶层，不在 skills 内）
+        max_skills = self.global_config.get("max_skills_per_request", 3)
         matched = [name for name, _, _ in matched_scores[:max_skills]]
 
         # 依赖解析
