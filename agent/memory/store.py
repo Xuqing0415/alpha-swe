@@ -265,7 +265,9 @@ class SqliteMemoryStore(MemoryStore):
             score = sum(1 for t in terms if t in rtext.lower())
             if terms and score == 0:
                 continue
-            scored.append((score, rid, _hit(kind, rtext, metadata, created, score)))
+            # 归一化为 0..1（匹配词占比），与 hybrid/向量后端的阈值语义一致
+            norm = score / len(terms) if terms else 0.0
+            scored.append((norm, rid, _hit(kind, rtext, metadata, created, norm)))
         scored.sort(key=lambda x: -x[0])
         return [dict(h, id=rid) for _, rid, h in scored[:top_k]]
 

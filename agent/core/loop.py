@@ -222,6 +222,7 @@ class AgentLoop:
                 self.memory = SharedMemoryStore(
                     self.memory, creator=self.memory_creator,
                     lock_key=self.config.memory.db_path,
+                    dedup_threshold=self.config.memory.dedup_threshold,
                 )
             except Exception as e:
                 logger.warning("共享记忆包装失败（继续使用原始记忆）: %s", e)

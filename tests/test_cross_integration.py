@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """交叉集成：项目记忆 x 多 Agent 共享、能力画像 x 角色分配。"""
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -87,12 +88,78 @@ async def test_agent_loop_memory_creator_wires_shared_store(ws_tmp):
     try:
         assert isinstance(loop.memory, SharedMemoryStore)
         assert loop.memory.creator == "reviewer"
+        assert loop.memory.dedup_threshold == cfg.memory.dedup_threshold
         loop.memory.remember("note", "评审发现边界问题")
         hits = loop.memory.search("边界")
         assert hits
         assert (hits[0].get("metadata") or {}).get("creator") == "reviewer"
     finally:
         await loop.close()
+
+
+def test_shared_memory_cross_agent_collision_arbitrated(ws_tmp):
+    """跨 Agent 写入相同知识点：仲裁 bump 已有条目，不产生重复行。"""
+    key = str(ws_tmp / "arb.db")
+    inner = SqliteMemoryStore(db_path=key)
+    alice = SharedMemoryStore(inner, creator="alice", lock_key=key,
+                              dedup_threshold=0.6)
+    bob = SharedMemoryStore(inner, creator="bob", lock_key=key,
+                            dedup_threshold=0.6)
+    alice.remember("note", "AuthService 存在 N+1 查询问题", {"level": "high"})
+    bob.remember("note", "AuthService 存在 N+1 查询问题")
+    hits = inner.find_similar("AuthService N+1", top_k=5, kinds=["note"])
+    assert len(hits) == 1, "跨 Agent 相似写入不应产生重复条目"
+    assert (hits[0].get("metadata") or {}).get("creator") == "alice"
+    assert bob.arbitration_count == 1
+    record = bob.arbitrations[0]
+    assert record["existing_creator"] == "alice"
+    assert record["incoming_creator"] == "bob"
+    assert record["action"] == "bump_existing"
+    alice.close(); bob.close()
+
+
+def test_shared_memory_same_creator_dedup_without_arbitration(ws_tmp):
+    """同创建者重复写入：只去重（bump），不构成跨 Agent 仲裁。"""
+    key = str(ws_tmp / "dedup.db")
+    inner = SqliteMemoryStore(db_path=key)
+    w = SharedMemoryStore(inner, creator="coder", lock_key=key,
+                          dedup_threshold=0.6)
+    w.remember("note", "AuthService 存在 N+1 查询问题")
+    w.remember("note", "AuthService 存在 N+1 查询问题")
+    hits = inner.find_similar("AuthService N+1", top_k=5, kinds=["note"])
+    assert len(hits) == 1
+    assert w.arbitration_count == 0
+    w.close()
+
+
+def test_shared_memory_close_refcount_keeps_inner_alive(ws_tmp):
+    """引用计数：同 inner 被多 wrapper 包装时，先关的不提前关闭底层。"""
+    key = str(ws_tmp / "rc.db")
+    inner = SqliteMemoryStore(db_path=key)
+    a = SharedMemoryStore(inner, creator="a", lock_key=key)
+    b = SharedMemoryStore(inner, creator="b", lock_key=key)
+    a.close()
+    b.remember("note", "b 在 a 关闭后继续写入")
+    assert inner.search("继续写入", kinds=["note"])
+    a.close()  # 幂等
+    b.close()
+    with pytest.raises(sqlite3.ProgrammingError):
+        inner._conn.execute("SELECT 1 FROM memories LIMIT 1")
+
+
+def test_shared_memory_close_different_inners_same_lock(ws_tmp):
+    """不同 inner 同 lock_key：各自 close 各自底层，互不干扰。"""
+    key = str(ws_tmp / "multi.db")
+    i1 = SqliteMemoryStore(db_path=key)
+    i2 = SqliteMemoryStore(db_path=key)
+    a = SharedMemoryStore(i1, creator="a", lock_key=key)
+    b = SharedMemoryStore(i2, creator="b", lock_key=key)
+    a.close()
+    with pytest.raises(sqlite3.ProgrammingError):
+        i1._conn.execute("SELECT 1 LIMIT 1")
+    b.remember("note", "b 独立后端仍可写")
+    assert i2.search("独立后端", kinds=["note"])
+    b.close()
 
 
 # ============ 交叉集成二：能力画像 x 角色分配 ============
