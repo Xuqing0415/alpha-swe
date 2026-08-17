@@ -485,7 +485,7 @@ class AgentLoop:
             file_tool.call_graph = self._project_ctx.call_graph
             file_tool.decision_logger = self._decision
         # 主线一 1.1/1.2：项目状态感知 + 会话连续性（差异注入 / 续接提示）
-        self._begin_persistent_session(prompt)
+        self._begin_persistent_session(prompt, resume)
         skill = self._build_injected_context(prompt)
         if skill:
             self.prompt_builder.set_skill(skill)
@@ -540,8 +540,9 @@ class AgentLoop:
             restored = False
         if not restored:
             # 快照恢复路径已直接把恢复的 DAG 挂到 scheduler，无需重复提交
-            # 主线一 1.2B：合并上次会话待办动作（去重后优先入队）
-            plan = self._merge_resume_tasks(plan)
+            # 主线一 1.2B：仅显式续接（resume=True）时合并上次会话待办动作
+            if resume:
+                plan = self._merge_resume_tasks(plan)
             self.scheduler.submit_plan(plan)
         self._emit("plan_created", total=len(plan),
                    tasks=[t.instruction for t in plan])
@@ -1939,7 +1940,8 @@ class AgentLoop:
         self._config_fallbacks_recorded = seen
 
     # ---- 主线一 1.1/1.2：项目状态感知与会话连续性 ----
-    def _begin_persistent_session(self, prompt: str) -> None:
+    def _begin_persistent_session(self, prompt: str,
+                                  resume: bool = False) -> None:
         """会话开始：对比上次快照，注入项目变化与未完成任务上下文。"""
         self._session_open = True
         parts: List[str] = []
@@ -1977,19 +1979,22 @@ class AgentLoop:
                     self._emit("workspace_resume_hint", hint=hint)
             except Exception:
                 logger.exception("工作流上下文加载失败")
-        # 主线一 1.2B：把上次未完成的待办动作转成可入队的调度任务
+        # 主线一 1.2B：仅显式续接（resume=True）时把上次未完成的
+        # 待办动作转成可入队的调度任务；新任务不自动继承，避免
+        # 无关的遗留待办混入本次规划（跨会话污染）。
         self._resume_tasks = []
-        if self.workspace_context is not None:
+        if resume and self.workspace_context is not None:
             try:
-                resume = self.workspace_context.resume_tasks()
-                if resume:
-                    self._resume_tasks = resume
+                resume_tasks = self.workspace_context.resume_tasks()
+                if resume_tasks:
+                    self._resume_tasks = resume_tasks
                     self._decision.record(
                         "workspace.resume_tasks",
                         "agent.workspace_context_enabled",
                         self.config.agent.workspace_context_enabled,
-                        f"待办动作转调度任务 {len(resume)} 条: "
-                        + "; ".join(t.instruction[:40] for t in resume[:3]),
+                        f"待办动作转调度任务 {len(resume_tasks)} 条: "
+                        + "; ".join(t.instruction[:40]
+                                    for t in resume_tasks[:3]),
                     )
             except Exception:
                 logger.exception("待办动作转调度任务失败")

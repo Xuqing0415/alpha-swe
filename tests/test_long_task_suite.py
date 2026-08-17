@@ -404,6 +404,9 @@ def make_config(ws: Path, max_tokens: int = 8000,
         agent=AgentConfig(
             max_rounds=15, max_retries=2, max_concurrency=1,
             keep_recent_rounds=3,
+            # 预算留足余量：本套件验证长任务压缩/完成行为，
+            # 默认 10000 在长提示下贴近边界，易受路径/提示长度噪声影响
+            default_token_budget=50000,
             session_archive_dir=str(ws / "sessions"),
             archive_enabled=True,
             trace_dir=str(ws / "traces"), trace_enabled=True,

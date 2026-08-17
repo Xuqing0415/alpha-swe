@@ -150,7 +150,7 @@ async def test_resume_task_merged_into_plan(ws_dir):
     loop = AgentLoop(config=make_config(ws_dir.parent), llm=llm,
                      planner=StubPlanner())
     try:
-        r = await loop.run("继续")
+        r = await loop.run("继续", resume=True)
         assert r.ok
         dag_tasks = loop.scheduler.dag.all()
         assert any(t.metadata.get("resume") for t in dag_tasks), \

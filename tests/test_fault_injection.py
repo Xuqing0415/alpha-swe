@@ -251,6 +251,10 @@ async def probe_llm_empty_response(ws_tmp: Path):
 
 
 async def probe_llm_litellm_timeout(ws_tmp: Path):
+    try:
+        import litellm  # noqa: F401   # 可选 provider 依赖
+    except ImportError:
+        return None, "litellm 未安装（可选依赖），跳过"
     cfg_llm = LLMConfig(provider=LLMProvider.LITELLM, model="gpt-test",
                         timeout=0.05, max_retries=1)
     client = LiteLLMClient(cfg_llm)
@@ -272,6 +276,10 @@ async def probe_llm_litellm_timeout(ws_tmp: Path):
 
 
 async def probe_llm_litellm_retry_recovers(ws_tmp: Path):
+    try:
+        import litellm  # noqa: F401   # 可选 provider 依赖
+    except ImportError:
+        return None, "litellm 未安装（可选依赖），跳过"
     cfg_llm = LLMConfig(provider=LLMProvider.LITELLM, model="gpt-test",
                         timeout=5.0, max_retries=1)
     client = LiteLLMClient(cfg_llm)
@@ -588,6 +596,9 @@ async def test_fault_injection_degradation_rate(ws_tmp):
             ok, detail = await probe.fn(ws_tmp)
         except Exception as e:  # 探针自身异常也计为降级失败
             ok, detail = False, f"探针异常 {type(e).__name__}: {e}"
+        if ok is None:  # 探针显式跳过（如可选依赖未安装）
+            print(f"  [SKIP] {probe.point}.{probe.name}: {detail}")
+            continue
         results.append((probe.point, probe.name, ok, detail))
 
     passed = sum(1 for _, _, ok, _ in results if ok)
