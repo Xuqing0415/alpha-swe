@@ -56,6 +56,7 @@ class PromptBuilder:
         self.skill_context = ""
         self.resources_context = ""
         self.project_profile = ""
+        self.project_state = ""
         self.exec_env = ""
 
     def _resolve_system_template(self) -> str:
@@ -100,6 +101,10 @@ class PromptBuilder:
         """注入项目约定与技术栈摘要（阶段一 1.3）。"""
         self.project_profile = context
 
+    def set_project_state(self, context: str) -> None:
+        """注入上次会话以来的项目变化与未完成任务（主线一 1.1/1.2）。"""
+        self.project_state = context
+
     def build(self, task: Task, upstream: List[Task] = None) -> List[Dict[str, str]]:
         # 决策点：temperature 决定解析器宽松度
         if self.llm_config is not None and self.decision_logger is not None:
@@ -115,6 +120,7 @@ class PromptBuilder:
             skill=self.skill_context,
             mcp_resources=self.resources_context,
             project_profile=self.project_profile,
+            project_state=self.project_state,
             exec_env=self.exec_env,
         )
         upstream_text = ""

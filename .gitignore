@@ -15,6 +15,7 @@ test_memory.db
 dist/
 build/
 workspace/
+.swe-agent/
 .pytest_cache/
 pytest-cache-files-*
 decision_log*.jsonl

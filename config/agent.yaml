@@ -11,6 +11,9 @@ agent:
   session_archive_dir: "./logs/sessions"  # 会话档案（回放用）
   archive_enabled: true
   metrics_enabled: true
+  # 主线一 1.1/1.2：项目状态感知与会话间工作流连续性（.swe-agent/）
+  state_tracker_enabled: true
+  workspace_context_enabled: true
 
 tools:
   terminal_execute:

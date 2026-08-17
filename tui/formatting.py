@@ -37,6 +37,9 @@ _LOG_TYPES: Dict[str, Tuple[str, str]] = {
     "regression_clean": ("OK", "green"),
     "regression_detected": ("REG", "red"),
     "regression_skip": ("INFO", "bright_black"),
+    "project_state_diff": ("INFO", "bright_black"),
+    "workspace_resume_hint": ("WARN", "yellow"),
+    "workspace_context_updated": ("INFO", "bright_black"),
     "mutation_analyzed": ("MUT", "yellow"),
     "counterfactual_stored": ("MEM", "bright_black"),
     # 预留：记忆操作 / 观察结果
@@ -81,6 +84,14 @@ def _timestamp(record: Dict[str, Any]) -> str:
 
 
 def _format_body(etype: str, data: Dict[str, Any]) -> str:
+    if etype == "project_state_diff":
+        text = str(data.get("text", "") or "").replace("\n", " ")
+        return text or "项目状态无变化"
+    if etype == "workspace_resume_hint":
+        return f"上次未完成任务: {data.get('hint', '')}"
+    if etype == "workspace_context_updated":
+        hint = data.get("hint") or "（任务已完成，无待续工作）"
+        return f"续接提示: {hint}"
     if etype == "run_start":
         return f"会话开始: {data.get('prompt', '')}"
     if etype == "plan_created":

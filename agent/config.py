@@ -303,6 +303,9 @@ class AgentConfig(BaseModel):
     otel_endpoint: str = ""                 # OTLP/HTTP 基址，如 http://127.0.0.1:4318
     otel_service_name: str = "alpha-swe"
     structured_log_dir: str = ""            # 空 = 关闭 JSONL 结构化日志
+    # 主线一 1.1/1.2：项目状态感知与会话间工作流连续性（.swe-agent/）
+    state_tracker_enabled: bool = True       # 项目状态快照与跨会话差异注入
+    workspace_context_enabled: bool = True   # 会话间工作流续接（next_session_hint）
 
 
 class MCPClientConfig(BaseModel):

@@ -30,6 +30,10 @@ SYSTEM_TEMPLATE = """你是 Alpha-SWE，一个运行在安全沙箱中的软件�
 ## 项目约定与技术栈
 {{ project_profile }}
 {% endif %}
+{% if project_state %}
+## 上次会话以来的项目变化
+{{ project_state }}
+{% endif %}
 {% if mcp_resources %}
 ## MCP 资源（外部知识库/文件/DB Schema）
 {{ mcp_resources }}
@@ -62,6 +66,9 @@ SYSTEM_TEMPLATE_ANTHROPIC = """<system-role>你是 Alpha-SWE，一个运行在�
 {% endif %}
 {% if project_profile %}
 <project-profile>{{ project_profile }}</project-profile>
+{% endif %}
+{% if project_state %}
+<project-state>{{ project_state }}</project-state>
 {% endif %}
 {% if mcp_resources %}
 <mcp-resources>{{ mcp_resources }}</mcp-resources>

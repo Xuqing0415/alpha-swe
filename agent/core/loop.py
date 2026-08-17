@@ -262,6 +262,32 @@ class AgentLoop:
 
         # 沙箱工作目录
         os.makedirs(self.config.sandbox.workspace, exist_ok=True)
+        # 主线一 1.1/1.2：项目状态感知 + 会话间工作流连续性
+        self._current_prompt = ""
+        self._last_result: Optional[LoopResult] = None
+        self._session_open = False
+        self.project_state_tracker = None
+        self.workspace_context = None
+        if self.config.agent.state_tracker_enabled:
+            from agent.project_state import ProjectStateTracker
+            self.project_state_tracker = ProjectStateTracker(
+                self.config.sandbox.workspace,
+                decision_logger=self._decision,
+            )
+            self._decision.record(
+                "state_tracker", "agent.state_tracker_enabled", True,
+                f"项目状态感知开启（快照 "
+                f"{self.project_state_tracker.state_file}）",
+            )
+        if self.config.agent.workspace_context_enabled:
+            from agent.workspace_context import WorkspaceContext
+            self.workspace_context = WorkspaceContext(
+                self.config.sandbox.workspace)
+            self._decision.record(
+                "workspace_context", "agent.workspace_context_enabled", True,
+                f"会话间工作流连续性开启（"
+                f"{self.workspace_context.context_file}）",
+            )
     # ---- 默认工具集 ----
     def _default_tools(self) -> ToolManager:
         manager = ToolManager(
@@ -451,6 +477,8 @@ class AgentLoop:
         if file_tool is not None:
             file_tool.call_graph = self._project_ctx.call_graph
             file_tool.decision_logger = self._decision
+        # 主线一 1.1/1.2：项目状态感知 + 会话连续性（差异注入 / 续接提示）
+        self._begin_persistent_session(prompt)
         skill = self._build_injected_context(prompt)
         if skill:
             self.prompt_builder.set_skill(skill)
@@ -528,6 +556,8 @@ class AgentLoop:
                 self._decision.records(), self.metrics.snapshot(), result,
             )
             self._maybe_counterfactual(prompt, result)
+            self._last_result = result
+            self._end_persistent_session(prompt, result)
             return result
 
         all_tasks = self.scheduler.dag.all()
@@ -564,6 +594,8 @@ class AgentLoop:
             self._decision.records(), self.metrics.snapshot(), result,
         )
         self._maybe_counterfactual(prompt, result)
+        self._last_result = result
+        self._end_persistent_session(prompt, result)
         return result
 
     # ---- 断点续跑（方案 1.3）：任务快照落盘 / 读取 / 恢复 ----
@@ -1823,6 +1855,11 @@ class AgentLoop:
                 await bg.manager.shutdown_all(graceful=False)
             except Exception:
                 logger.exception("后台任务清理失败")
+        if self._session_open:
+            self._end_persistent_session(
+                getattr(self, "_current_prompt", ""),
+                getattr(self, "_last_result", None),
+            )
         closer = getattr(self.memory, "close", None)
         if closer is not None:
             try:
@@ -1870,6 +1907,81 @@ class AgentLoop:
                 f"配置降级为默认值: {note.get('reason', '')}",
             )
         self._config_fallbacks_recorded = seen
+
+    # ---- 主线一 1.1/1.2：项目状态感知与会话连续性 ----
+    def _begin_persistent_session(self, prompt: str) -> None:
+        """会话开始：对比上次快照，注入项目变化与未完成任务上下文。"""
+        self._session_open = True
+        parts: List[str] = []
+        # 1.1 项目状态感知：上次会话以来的变化
+        if self.project_state_tracker is not None:
+            try:
+                diff = self.project_state_tracker.begin_session()
+                text = self.project_state_tracker.diff_text(diff)
+                if text:
+                    parts.append(text)
+                files = diff.get("files", {})
+                self._decision.record(
+                    "project_state.diff", "agent.state_tracker_enabled",
+                    self.config.agent.state_tracker_enabled,
+                    f"项目状态对比: {len(diff.get('deps', []))} 项依赖变化，"
+                    f"新增 {len(files.get('added', []))} / "
+                    f"修改 {len(files.get('modified', []))} / "
+                    f"删除 {len(files.get('removed', []))} 个文件",
+                )
+                self._emit("project_state_diff", diff=diff, text=text)
+            except Exception:
+                logger.exception("项目状态感知初始化失败")
+        # 1.2 会话间工作流连续性：上次未完成任务提示
+        if self.workspace_context is not None:
+            try:
+                self.workspace_context.begin(prompt)
+                if self.workspace_context.is_active():
+                    hint = self.workspace_context.summarize()
+                    parts.append(self.workspace_context.prompt_text())
+                    self._decision.record(
+                        "workspace.resume", "agent.workspace_context_enabled",
+                        self.config.agent.workspace_context_enabled,
+                        f"发现未完成的工作流: {hint[:120]}",
+                    )
+                    self._emit("workspace_resume_hint", hint=hint)
+            except Exception:
+                logger.exception("工作流上下文加载失败")
+        if parts:
+            self.prompt_builder.set_project_state("\n\n".join(parts))
+
+    def _end_persistent_session(self, prompt: str,
+                                result: Optional[LoopResult]) -> None:
+        """会话结束：更新项目基线、生成续接提示并落盘。"""
+        if not self._session_open:
+            return
+        self._session_open = False
+        if self.project_state_tracker is not None:
+            try:
+                changes = self.project_state_tracker.end_session()
+                self._decision.record(
+                    "project_state.session", "agent.state_tracker_enabled",
+                    self.config.agent.state_tracker_enabled,
+                    f"会话内变更: {len(changes.get('files', []))} 个文件，"
+                    f"{len(changes.get('deps', []))} 项依赖",
+                )
+            except Exception:
+                logger.exception("项目状态快照更新失败")
+        if self.workspace_context is not None:
+            try:
+                self.workspace_context.finalize(prompt, result)
+                hint = self.workspace_context.summarize()
+                self._decision.record(
+                    "workspace.next_hint", "agent.workspace_context_enabled",
+                    self.config.agent.workspace_context_enabled,
+                    f"续接提示: {hint[:120] or '（任务已完成，无待续工作）'}",
+                )
+                self._emit("workspace_context_updated",
+                           hint=hint,
+                           phase=self.workspace_context.data.get(
+                               "task_phase", ""))
+            except Exception:
+                logger.exception("工作流上下文落盘失败")
 
     # ---- 进阶 1.2：反事实分析（失败后归因 + 写长期记忆） ----
     def _maybe_counterfactual(self, prompt: str, result: LoopResult) -> None:

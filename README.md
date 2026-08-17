@@ -30,7 +30,7 @@ config/
 └── aggressive.yaml     A/B 对比激进配置（17 项关键参数取反）
 scripts/analyze_decisions.py  决策日志分析：列出已生效/未生效配置项
 examples/quick_demo.py  脚本化 LLM 的端到端演示
-tests/                  新核心测试（554 项，含故障注入/浸泡/混沌/基准集）
+tests/                  新核心测试（569 项，含故障注入/浸泡/混沌/基准集）
 loop.py, scheduler.py, ... 旧版七层原型（保留，作为对照参考）
 ```
 
@@ -267,7 +267,7 @@ python -X utf8 examples/quick_demo.py
 
 对照全量复盘清单逐项核对后的更正（详见 `logs/FIX_REPORT.md` 与历次提交）：
 
-- **测试总量**：`tests/` 全量 554 passed / 0 failed；旧原型 `test_all.py` 13 passed / 0 failed（清单的「351+」
+- **测试总量**：`tests/` 全量 569 passed / 0 failed；旧原型 `test_all.py` 13 passed / 0 failed（清单的「351+」
   已过时）。
 - **基准集路径**：清单写的 `tests/benchmarks/` 不存在；实际在 `tests/test_benchmark_suite.py`（28 例）+
   `tests/test_real_project_suite.py`（18 例）+ `tests/test_long_task_suite.py`（4 例），共 50 例。
@@ -278,6 +278,18 @@ python -X utf8 examples/quick_demo.py
 - **技能数量**：`skills/skill_manifest.json` 注册 19 个技能定义（3 个 Markdown + 15 个工作流 YAML），
   清单「内置 10 个技能」已过时。
 - **尚未验证（维持清单声明）**：真实 Docker 容器沙箱、多用户/团队共享、>8h 连续运行稳定性。
+
+## 真实项目持续工作（主线一 1.1/1.2）
+
+- **项目状态感知**（`agent/project_state.py`）：`.swe-agent/state.json` 持久化项目结构快照、
+  依赖清单与技术栈、依赖变更历史、最近修改记录、测试健康与技术债标记；会话启动对比上次快照，
+  把「上次会话以来的项目变化」（含依赖升级 breaking changes 提示）注入 Prompt。
+- **会话间工作流连续性**（`agent/workspace_context.py`）：`.swe-agent/context.json` 记录
+  active_branch / current_task_id / task_phase / pending_actions / uncommitted_changes /
+  next_session_hint；会话结束自动生成续接提示，新会话检测到未完成任务时在 TUI 显示
+  「上次你在做 X，处于 Y 阶段，建议继续 Z」并注入初始 Prompt。
+- 配置开关：`agent.state_tracker_enabled` / `agent.workspace_context_enabled`（默认开启）；
+  `.swe-agent/` 已加入 `.gitignore`。
 
 ## MCP 生态打通（阶段六）
 

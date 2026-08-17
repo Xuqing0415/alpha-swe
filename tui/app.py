@@ -601,6 +601,11 @@ class AlphaSWEApp(App[None]):
         if record.get("type") in ("regression_clean", "regression_detected",
                                   "regression_skip"):
             self._track_regression(record)
+        if record.get("type") == "workspace_resume_hint":
+            line = Text()
+            line.append("上次会话未完成: ", style="bold yellow")
+            line.append(str(record["data"].get("hint", "")), style="yellow")
+            self._append_terminal(line)
         self.refresh_status()
 
     def on_terminal_output_message(self, msg: TerminalOutputMessage) -> None:
