@@ -103,6 +103,8 @@ class AgentLoop:
         prompt_builder: Optional[PromptBuilder] = None,
         context_manager: Optional[ContextManager] = None,
         memory: Optional[MemoryStore] = None,
+        memory_creator: str = "",
+        # 交叉集成：项目记忆 x 多 Agent——Agent 身份，写记忆时自动标记 creator
         sandbox: Optional[SandboxPolicy] = None,
         scheduler: Optional[Scheduler] = None,
         summarizer: Optional[ExperienceSummarizer] = None,
@@ -213,6 +215,16 @@ class AgentLoop:
             heavy_threshold=self.config.context.heavy_threshold,
         )
         self.memory = memory or (build_layered_memory(self.config.memory, project_key=self.config.sandbox.workspace) if self.config.memory.layered else build_memory(self.config.memory))
+        self.memory_creator = memory_creator or ""
+        if self.memory_creator:
+            try:
+                from agent.memory.shared import SharedMemoryStore
+                self.memory = SharedMemoryStore(
+                    self.memory, creator=self.memory_creator,
+                    lock_key=self.config.memory.db_path,
+                )
+            except Exception as e:
+                logger.warning("共享记忆包装失败（继续使用原始记忆）: %s", e)
         self.summarizer = summarizer or ExperienceSummarizer(
             llm=self.llm, enabled=self.config.memory.auto_experience
         )

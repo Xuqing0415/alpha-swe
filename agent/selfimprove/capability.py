@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -47,6 +48,11 @@ _DIMENSION_KEYWORDS: Dict[str, List[str]] = {
 
 # 每次更新应用一次衰减：尝试权重收敛到 1/(1-DECAY)，旧事件指数级淡出
 _DECAY = 0.9
+
+
+def _safe_identity(identity: str) -> str:
+    """角色/Agent 身份安全文件名（仅保留字母数字与下划线）。"""
+    return re.sub(r"[^a-zA-Z0-9_]+", "_", str(identity or "").strip()).strip("_") or "default"
 _HISTORY_LIMIT = 20  # 保留最近 N 次结果，用于趋势告警
 _WEAK_THRESHOLD = 0.6   # 成功率低于该值视为弱项
 _TREND_WINDOW = 5       # 近 N 次成功率 vs 整体
@@ -70,8 +76,15 @@ class CapabilityProfile:
     """能力画像：EWMA 分数 + 近况历史 + 落盘持久化。"""
 
     def __init__(self, path: Optional[str] = None,
-                 enabled: bool = True) -> None:
+                 enabled: bool = True, identity: str = "") -> None:
         self.enabled = enabled
+        self.identity = identity or ""
+        if path is None:
+            # 角色身份持久化：默认按身份分文件存放，互不干扰
+            base = Path("~/.swe-agent").expanduser()
+            name = _safe_identity(self.identity)
+            path = str(base / ("capability.json" if name == "default"
+                              else f"capability/{name}.json"))
         self.path = Path(path).expanduser() if path else None
         self._data: Dict[str, Dict[str, Any]] = self._load()
 
@@ -97,6 +110,43 @@ class CapabilityProfile:
             logger.warning("能力画像落盘失败: %s", e)
 
     # ---- 更新 ----
+    @classmethod
+    def for_role(cls, role: str,
+                 base_dir: Optional[str] = None) -> "CapabilityProfile":
+        """按角色创建独立持久化的能力画像（角色身份持久化）。
+
+        每个角色一个文件（<base_dir>/capability/<role>.json），
+        跨会话累积；供 Planner 分配角色时参考强项/弱项。
+        """
+        base = Path(base_dir or "~/.swe-agent").expanduser()
+        return cls(path=str(base / "capability" /
+                            f"{_safe_identity(role)}.json"),
+                   identity=role)
+
+    def role_hint_text(self, max_dims: int = 4) -> str:
+        """紧凑角色画像：按分数排序的能力维度摘要（供 Planner 注入）。"""
+        if not self.enabled or not self._data:
+            return ""
+        scored = sorted(
+            ((dim, float(cur.get("score", 0.0) or 0.0),
+              int(cur.get("samples", 0) or 0))
+             for dim, cur in self._data.items()),
+            key=lambda x: -x[1],
+        )
+        parts = [
+            f"{CAPABILITY_DIMENSIONS.get(dim, dim)} {score:.0%}"
+            f"（{samples} 样本）"
+            for dim, score, samples in scored[:max_dims]
+        ]
+        return "；".join(parts)
+
+    def score_for_instruction(self, instruction: str) -> float:
+        """按指令推导相关能力维度，返回平均分（角色分配 tiebreak）。"""
+        dims = _dimensions_for(instruction)
+        if not dims:
+            return 0.0
+        return sum(self.score(d) for d in dims) / len(dims)
+
     def record(self, instruction: str, ok: bool) -> List[str]:
         """记录一次任务结果，返回受影响的能力维度。"""
         if not self.enabled:

@@ -20,6 +20,7 @@ from agent.llm import BaseLLM
 from agent.multiagent.blackboard import Blackboard
 from agent.multiagent.messages import Message, MsgType
 from agent.multiagent.workers import WorkerAgent
+from agent.selfimprove.capability import CapabilityProfile
 
 logger = logging.getLogger("alpha-swe.multiagent.orchestrator")
 
@@ -48,6 +49,9 @@ _DEFAULT_ROLE_KEYWORDS = {
 
 TEAM_PLAN_PROMPT = """你是多 Agent 团队规划器。可用的 Worker 角色（含职责）：
 {roles}
+
+可用角色能力画像（按历史表现，仅作参考）：
+{capability}
 
 把用户指令拆解为 1-8 个带角色的子任务，注意：
 - 从上述角色库中为每个子任务选择最合适的 role，不限于 coder/reviewer/tester；
@@ -91,11 +95,15 @@ class TeamPlanner:
     """LLM 生成带角色的子任务列表；失败回退为单个 coder 任务。"""
 
     def __init__(self, llm: BaseLLM, roles: List[str], max_tasks: int = 8,
-                 role_descriptions: Optional[Dict[str, str]] = None):
+                 role_descriptions: Optional[Dict[str, str]] = None,
+                 capability_profiles: Optional[Dict[str, CapabilityProfile]] = None):
         self.llm = llm
         self.roles = roles
         self.max_tasks = max_tasks
         self.role_descriptions = role_descriptions or {}
+        # 交叉集成：能力画像 x 角色分配——供提示注入与回退路由参考
+        self.capability_profiles: Dict[str, CapabilityProfile] = \
+            capability_profiles or {}
 
     @classmethod
     def roles_from_config(cls) -> List[str]:
@@ -112,11 +120,15 @@ class TeamPlanner:
                 f"- {name}: {self.role_descriptions.get(name, '')}" for name in self.roles)
         else:
             roles_text = " / ".join(self.roles)
+        cap_hint = self._capability_hint()
+        user_content = (TEAM_PLAN_PROMPT
+            .replace("{roles}", roles_text)
+            .replace("{capability}", cap_hint or "（暂无历史能力数据）")
+            .replace("{prompt}", prompt))
         try:
             raw = await self.llm.complete([
                 {"role": "system", "content": "你是多 Agent 团队规划器，只输出 JSON。"},
-                {"role": "user", "content": TEAM_PLAN_PROMPT
-                 .replace("{roles}", roles_text).replace("{prompt}", prompt)},
+                {"role": "user", "content": user_content},
             ])
             tasks = self._parse(raw)
             if tasks:
@@ -125,6 +137,20 @@ class TeamPlanner:
             logger.warning("团队规划失败，回退单任务: %s", e)
         # 回退：按指令分类路由（编码类 -> coder，审查类 -> reviewer，测试类 -> tester）
         return [Task(id="s0", instruction=prompt, role=self._classify_role(prompt))]
+
+    def _capability_hint(self) -> str:
+        """按角色历史能力画像生成紧凑提示（供 Planner 参考）。"""
+        if not self.capability_profiles:
+            return ""
+        parts = []
+        for role in self.roles:
+            prof = self.capability_profiles.get(role)
+            if prof is None:
+                continue
+            hint = prof.role_hint_text()
+            if hint:
+                parts.append(f"- {role}: {hint}")
+        return "\n".join(parts)
 
     @classmethod
     def _role_keywords(cls) -> Dict[str, List[str]]:
@@ -141,19 +167,29 @@ class TeamPlanner:
 
     @classmethod
     def _classify_role(cls, instruction: str,
-                       role_keywords: Optional[Dict[str, List[str]]] = None) -> str:
+                       role_keywords: Optional[Dict[str, List[str]]] = None,
+                       capability_scores: Optional[Dict[str, float]] = None) -> str:
         """基于关键词的规则路由：LLM 未给出角色/规划失败时的自动派发回退。
 
         按 _ROLE_PRIORITY 顺序匹配（reviewer > tester > security > ... > coder），
-        避免"编写测试"被 coder 的"编写"关键词抢先。
+        避免"编写测试"被 coder 的"编写"关键词抢先；
+        多个角色命中时若提供 capability_scores，则优先选能力分更高的角色
+        （交叉集成：能力画像驱动角色分配）。
         """
         text = (instruction or "").lower()
         kws = role_keywords if role_keywords is not None else cls._role_keywords()
-        for role in _ROLE_PRIORITY:
-            words = kws.get(role) or _DEFAULT_ROLE_KEYWORDS.get(role, [])
-            if any(k in text for k in words):
-                return role
-        return "coder"
+        matched = [
+            role for role in _ROLE_PRIORITY
+            if any(k in text for k in (kws.get(role)
+                                       or _DEFAULT_ROLE_KEYWORDS.get(role, [])))
+        ]
+        if not matched:
+            return "coder"
+        if capability_scores:
+            best = max(matched, key=lambda r: capability_scores.get(r, 0.0))
+            if capability_scores.get(best, 0.0) > 0:
+                return best
+        return matched[0]
 
     def _parse(self, raw: str) -> List[Task]:
         m = re.search(r"```(?:json)?\s*(\[[\s\S]*?\])\s*```", raw)
@@ -235,11 +271,22 @@ class OrchestratorAgent:
         )
         # 规划器默认使用完整角色库（而非仅已实例化 Worker），
         # 让 Planner 可以挑选 debugger/documenter/architect 等角色
+        # 交叉集成：能力画像 x 角色分配——每个角色独立持久化画像
+        self._role_profiles: Dict[str, CapabilityProfile] = {}
+        try:
+            self._role_profiles = {
+                name: CapabilityProfile.for_role(
+                    name, base_dir=self.config.agent.self_improve_dir)
+                for name in self._role_map
+            }
+        except Exception as e:
+            logger.warning("角色能力画像装配失败: %s", e)
         self.planner = planner or TeamPlanner(
             llm=llm,
             roles=list(self._role_map.keys()),
             role_descriptions={name: r.description
                                for name, r in self._role_map.items()},
+            capability_profiles=self._role_profiles,
         )
         self._dag: Optional[TaskDAG] = None
         self._retries: Dict[str, int] = {}
@@ -267,7 +314,22 @@ class OrchestratorAgent:
 
     # ---- 派发 ----
     async def _dispatch(self, task: Task) -> None:
-        role = task.role or TeamPlanner._classify_role(task.instruction)
+        if task.role is not None:
+            role = task.role
+        else:
+            # 能力感知路由：多个关键词角色命中时优先高能力分角色
+            cap_scores = {
+                name: prof.score_for_instruction(task.instruction)
+                for name, prof in self._role_profiles.items()
+            }
+            role = TeamPlanner._classify_role(
+                task.instruction, capability_scores=cap_scores)
+            if cap_scores:
+                self.decision_logger.record(
+                    "role.capability", "team.roles", role,
+                    f"关键词路由命中多角色，按能力分选 {role}"
+                    f"（{cap_scores.get(role, 0.0):.2f}）",
+                )
         worker = self.workers.get(role)
         if worker is None:
             role_cfg = self._role_map.get(role)

@@ -20,6 +20,7 @@ from agent.multiagent.blackboard import Artifact, Blackboard
 from agent.sandbox.audit import FileAuditStore
 from agent.prompt.builder import PromptBuilder
 from agent.prompt import templates
+from agent.selfimprove.capability import CapabilityProfile
 from agent.tools.fileio import FileIOTool
 from agent.tools.manager import ToolManager
 from agent.tools.terminal import TerminalTool
@@ -63,6 +64,15 @@ class WorkerAgent:
         self.blackboard = blackboard or Blackboard()
         self.decision_logger = decision_logger
         self.history: List[WorkerResult] = []
+        # 交叉集成：能力画像 x 角色分配——每个角色独立持久化画像
+        self.capability: Optional[CapabilityProfile] = None
+        try:
+            self.capability = CapabilityProfile.for_role(
+                self.role.name,
+                base_dir=self.config.agent.self_improve_dir,
+            )
+        except Exception as e:
+            logger.warning("角色能力画像初始化失败: %s", e)
 
     # ---- 执行 ----
     async def execute_task(self, task: Task, extra_context: str = "") -> WorkerResult:
@@ -88,6 +98,19 @@ class WorkerAgent:
             task_id=task.id,
         )
         self.history.append(wr)
+        if self.capability is not None:
+            try:
+                dims = self.capability.record(task.instruction, result.ok)
+                if self.decision_logger is not None and dims:
+                    outcome = "成功" if result.ok else "失败"
+                    self.decision_logger.record(
+                        "capability.role_record", "team.roles",
+                        self.role.name,
+                        f"角色 {self.role.name} 画像更新: {outcome}，"
+                        f"维度={",".join(dims)}",
+                    )
+            except Exception as e:
+                logger.warning("角色画像记录失败: %s", e)
         logger.info("[worker:%s] task=%s ok=%s", self.role.name, task.id, result.ok)
         return wr
 
@@ -115,6 +138,7 @@ class WorkerAgent:
             config=config,
             llm=self.llm,
             planner=_SingleTaskPlanner(),
+            memory_creator=self.role.name,
             prompt_builder=prompt_builder,
             tools=tools,
             mcp_manager=MCPManager(servers=[]),  # Worker 不直连 MCP
