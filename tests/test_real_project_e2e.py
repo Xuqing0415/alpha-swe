@@ -13,6 +13,8 @@
 运行：python -X utf8 -m pytest tests/test_real_project_e2e.py -q
 """
 import json
+import os
+import random
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List
@@ -24,8 +26,33 @@ from agent.config import (AgentConfig, AppConfig, MCPOptions, MemoryConfig,
 from agent.core.loop import AgentLoop
 from agent.core.task import Task
 from agent.llm import MockLLM
+from agent.tools.fileio import FileIOTool
+from agent.tools.manager import ToolManager
 
 from test_benchmark_suite import run_pytest  # 复用 pytest 运行器
+
+
+
+# ---- 混沌随机化（纳入 CI 混沌阶段的 CHAOS_SEED 驱动） ----
+CHAOS_SEED = int(os.environ.get("CHAOS_SEED", "20260817"))
+CHAOS_ITERATIONS = int(os.environ.get("CHAOS_ITERATIONS", "4"))
+CHAOS_INJECT_RATE = float(os.environ.get("CHAOS_INJECT_RATE", "0.5"))
+CHAOS_TARGET_GRACEFUL = float(os.environ.get("CHAOS_TARGET_GRACEFUL", "0.9"))
+
+
+class FlakyWriteTool(FileIOTool):
+    """首次写入抛瞬态异常的混沌工具（之后恢复正常）。"""
+
+    def __init__(self, fail_once: bool):
+        super().__init__()
+        self._fail_once = fail_once
+
+    async def _write(self, target, content, start, task_id=""):
+        if self._fail_once:
+            self._fail_once = False
+            raise RuntimeError("混沌注入：真实项目首次写入瞬态故障")
+        return await super()._write(target, content, start, task_id=task_id)
+
 
 
 @dataclass
@@ -276,14 +303,28 @@ def _final(text):
     return json.dumps({"final_answer": text}, ensure_ascii=False)
 
 
-def _script_for(case: RealProjectCase) -> List[str]:
+def _script_for(case: RealProjectCase,
+                duplicate_writes: bool = False) -> List[str]:
+    """脚本化 LLM 响应流；混沌模式下重复写动作以便瞬态故障后恢复。"""
     responses = [_think("定位问题后先读相关模块，再写入修复与回归测试")]
     for rel in case.read_first:
         responses.append(_read(rel))
     for rel, body in case.golden.items():
         responses.append(_write(rel, body))
+        if duplicate_writes:
+            responses.append(_write(rel, body))
     responses.append(_final("已完成修复并补充回归测试"))
     return responses
+
+
+def _summary_for(case: RealProjectCase) -> str:
+    return json.dumps({
+        "problem": case.task,
+        "solution": "修复缺陷并补充回归测试",
+        "steps": ["读模块", "写入修复", "补回归测试"],
+        "key_files": list(case.golden),
+        "outcome": "success",
+    }, ensure_ascii=False)
 
 
 @pytest.mark.parametrize("case", REAL_PROJECT_CASES,
@@ -302,13 +343,7 @@ async def test_real_project_end_to_end(ws_tmp, case):
     """ScriptedLLM 驱动 AgentLoop 完成跨模块修复 + 补回归测试。"""
     write_files(ws_tmp, case.files)
     responses = _script_for(case)
-    responses.append(json.dumps({
-        "problem": case.task,
-        "solution": "修复缺陷并补充回归测试",
-        "steps": ["读模块", "写入修复", "补回归测试"],
-        "key_files": list(case.golden),
-        "outcome": "success",
-    }, ensure_ascii=False))
+    responses.append(_summary_for(case))
     llm = ScriptedLLM(*responses)
     loop = AgentLoop(config=_make_loop_config(ws_tmp), llm=llm,
                      planner=StubPlanner())
@@ -322,3 +357,67 @@ async def test_real_project_end_to_end(ws_tmp, case):
         assert llm.calls, "应至少有一次 LLM 调用"
     finally:
         await loop.close()
+
+
+# ---- 混沌随机化：CHAOS_SEED 驱动场景选择 + 写入瞬态故障 ----
+
+async def _run_e2e_chaos_iteration(ws_tmp: Path, case: RealProjectCase,
+                                   inject_write: bool,
+                                   idx: int) -> Dict[str, Any]:
+    """单次混沌迭代：返回 {ok, graceful, detail}。"""
+    root = ws_tmp / ("e2e_%s_%d" % (case.name.replace("-", "_"), idx))
+    write_files(root, case.files)
+    responses = _script_for(case, duplicate_writes=inject_write)
+    responses.append(_summary_for(case))
+    tools = None
+    if inject_write:
+        tm = ToolManager(default_timeout=30.0)
+        tm.register(FlakyWriteTool(fail_once=True))
+        tools = tm
+    llm = ScriptedLLM(*responses)
+    loop = AgentLoop(config=_make_loop_config(root), llm=llm,
+                     planner=StubPlanner(), tools=tools)
+    try:
+        result = await loop.run(case.task)
+    except Exception as e:  # 混沌迭代自身异常：视为不优雅
+        return {"ok": False, "graceful": False,
+                "detail": "迭代异常 %s: %s" % (type(e).__name__, e)}
+    finally:
+        await loop.close()
+    if result.ok:
+        try:
+            passed = run_pytest(root, "tests")
+        except Exception:
+            passed = False
+        graceful = passed  # 恢复后必须真正通过完成标准
+        return {"ok": True, "graceful": graceful,
+                "detail": "完成 verify=%s" % passed}
+    # 显式失败：final_answer 应包含失败原因（不崩溃/不挂起）
+    graceful = bool(result.final_answer and len(result.final_answer) > 0)
+    return {"ok": False, "graceful": graceful,
+            "detail": "显式失败 phase=%s answer=%r" % (
+                result.phase.name, result.final_answer[:80])}
+
+
+@pytest.mark.chaos
+@pytest.mark.asyncio
+async def test_real_project_e2e_randomized_stream(ws_tmp):
+    """随机故障流：CHAOS_SEED 驱动场景选择与写入故障注入，验证优雅率。"""
+    rng = random.Random(CHAOS_SEED)
+    outcomes = []
+    for i in range(CHAOS_ITERATIONS):
+        case = rng.choice(REAL_PROJECT_CASES)
+        inject_write = rng.random() < CHAOS_INJECT_RATE
+        out = await _run_e2e_chaos_iteration(ws_tmp, case, inject_write, i)
+        outcomes.append((case.name, inject_write, out))
+    graceful = sum(1 for _, _, o in outcomes if o["graceful"])
+    rate = graceful / len(outcomes)
+    print("\n[混沌E2E] 随机故障流优雅率: %d/%d = %.1f%%"
+          % (graceful, len(outcomes), rate * 100))
+    for name, inj, o in outcomes:
+        print("  [%s] %s inject_write=%s ok=%s: %s"
+              % ("OK" if o["graceful"] else "BAD",
+                 name, inj, o["ok"], o["detail"]))
+    assert rate >= CHAOS_TARGET_GRACEFUL, (
+        "混沌E2E 优雅率 %.1f%% 低于目标 %.0f%%"
+        % (rate * 100, CHAOS_TARGET_GRACEFUL * 100))
