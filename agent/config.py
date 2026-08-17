@@ -124,6 +124,10 @@ class MemoryConfig(BaseModel):
     counter_example_penalty: float = 0.3  # 反例（negative）检索时的分数惩罚
     top_k_retrieval: Optional[int] = None  # 别名 -> top_k
     collection_name: Optional[str] = None  # 别名 -> collection
+    # 主线一 1.3：项目级记忆分层（会话状态 > 项目知识 > 全局经验）
+    layered: bool = True                  # 三层记忆开关
+    global_dir: str = "~/.swe-agent/memory"  # 全局经验目录（跨项目）
+    promotion_threshold: int = 3          # 项目经验在 N 个不同项目被应用后晋升全局
 
     @model_validator(mode="before")
     @classmethod

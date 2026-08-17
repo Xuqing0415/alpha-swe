@@ -57,7 +57,7 @@ def _isolate_agent_log_dirs():
     该 autouse fixture 在每个测试前改默认值、测试后清理，保证测试完全隔离。
     """
     from agent.config import (AgentConfig, AppConfig, ContextConfig,
-                              SandboxConfig, SkillConfig)
+                              MemoryConfig, SandboxConfig, SkillConfig)
 
     d = WS_ROOT / ("_logs_" + uuid.uuid4().hex[:8])
     redirects = (
@@ -67,6 +67,9 @@ def _isolate_agent_log_dirs():
         (SandboxConfig, (("audit_dir", "audit"),)),
         (ContextConfig, (("archive_dir", "archives"),)),
         (SkillConfig, (("usage_log", "skill_usage.jsonl"),)),
+        # 主线一 1.3：三层记忆的全局经验目录也须隔离，避免测试晋升
+        # 污染真实 ~/.swe-agent/memory
+        (MemoryConfig, (("global_dir", "global_memory"),)),
     )
     for model, fields in redirects:
         for field, sub in fields:

@@ -4,7 +4,9 @@ auto: chromadb > qdrant-client > 本地 Hybrid（TF-IDF + 关键词）。
 """
 from __future__ import annotations
 
+import hashlib
 import logging
+from pathlib import Path
 from typing import Optional
 
 from agent.config import MemoryConfig
@@ -106,3 +108,53 @@ def build_memory(config: Optional[MemoryConfig] = None) -> MemoryStore:
     except Exception as e:
         logger.error("记忆后端全部不可用，降级到无记忆模式: %s", e)
         return NoopMemoryStore()
+
+
+def _derive_project_key(source: str) -> str:
+    """从工作区路径推导项目标识（目录名 + 路径哈希），保持跨会话稳定。"""
+    try:
+        p = Path(source or ".").expanduser().resolve()
+        name = p.name or "root"
+        digest = hashlib.sha1(str(p).encode("utf-8")).hexdigest()[:8]
+        return f"{name}-{digest}"
+    except Exception:
+        return "unknown-project"
+
+
+def build_layered_memory(config: Optional[MemoryConfig] = None,
+                         project_key: str = "") -> MemoryStore:
+    """构造三层记忆（会话 > 项目 > 全局，带跨项目晋升）。
+
+    项目层使用项目内 db_path；全局层使用 ~/.swe-agent/memory/memory.db。
+    backend=none 时整体降级为 NoopMemoryStore（保持既有禁用语义）。
+    """
+    from agent.memory.layered import LayeredMemoryStore
+
+    config = config or MemoryConfig()
+    if config.backend in ("none", "off"):
+        logger.info("长期记忆已禁用（backend=%s），三层记忆一并关闭", config.backend)
+        return NoopMemoryStore()
+
+    try:
+        Path(config.db_path).expanduser().parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    project_store = build_memory(config)
+    global_dir = Path(config.global_dir).expanduser()
+    try:
+        global_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    global_cfg = config.model_copy(update={
+        "db_path": str(global_dir / "memory.db"),
+    })
+    global_store = build_memory(global_cfg)
+    if not project_key:
+        project_key = _derive_project_key(config.db_path)
+    return LayeredMemoryStore(
+        project_store=project_store,
+        global_store=global_store,
+        project_key=project_key,
+        global_meta_dir=str(global_dir),
+        promotion_threshold=config.promotion_threshold,
+    )

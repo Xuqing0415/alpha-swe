@@ -30,7 +30,7 @@ from agent.core.task import Task, TaskDAG, TaskStatus
 from agent.llm import BaseLLM, build_llm
 from agent.mcp.manager import MCPManager
 from agent.observability import MetricsRegistry, SessionArchive, Tracer
-from agent.memory.factory import build_memory
+from agent.memory.factory import build_layered_memory, build_memory
 from agent.memory.store import (MemoryStore, NoopMemoryStore,
                                  classify_task_type, format_experience_text)
 from agent.memory.summarizer import ExperienceSummarizer
@@ -212,7 +212,7 @@ class AgentLoop:
             medium_threshold=self.config.context.medium_threshold,
             heavy_threshold=self.config.context.heavy_threshold,
         )
-        self.memory = memory or build_memory(self.config.memory)
+        self.memory = memory or (build_layered_memory(self.config.memory, project_key=self.config.sandbox.workspace) if self.config.memory.layered else build_memory(self.config.memory))
         self.summarizer = summarizer or ExperienceSummarizer(
             llm=self.llm, enabled=self.config.memory.auto_experience
         )
