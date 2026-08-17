@@ -1,22 +1,58 @@
-﻿# 多 Agent 团队配置（对应设计第 8 节：可插拔智能体团队）
+﻿# 多 Agent 团队配置（对应设计第 8 节：可插拔智能体团队；主线二 2.1：动态角色分配）
 # system_prompt 会拼在 Agent 系统 Prompt 最前，限定角色职责。
+# routing_keywords 用于 LLM 规划失败/未给角色时的关键词路由回退（按优先级 reviewer > tester > security > debugger > architect > documenter > ops > coder）。
 roles:
   - name: "coder"
     description: "负责实现与修改代码"
     system_prompt: "你是团队中的 Coder。专注实现，输出可运行代码；完成后把修改的文件与关键输出发布到黑板。"
-    tools: ["terminal_execute", "file_ops"]
+    tools: ["terminal_execute", "file_ops", "file_search"]
     max_rounds: 10
+    routing_keywords: ["实现", "编写", "修改", "implement", "write code"]
   - name: "reviewer"
     description: "负责代码审查与仲裁"
     system_prompt: "你是团队中的 Reviewer。审查 Coder 的产出，检查正确性、边界与风格；输出 verdict JSON：{\"verdict\": \"pass|retry\", \"suggestion\": \"修正建议\"}。"
     tools: ["file_ops", "file_search", "terminal_execute"]
     max_rounds: 8
     read_only: true              # 只读角色：仅文件读取/搜索与只读命令白名单
+    routing_keywords: ["审查", "评审", "review", "check", "检查", "审阅", "代码规范"]
   - name: "tester"
     description: "负责编写并运行测试"
     system_prompt: "你是团队中的 Tester。为 Coder 的产出编写并运行测试，输出测试报告（通过数/失败数/错误输出）。"
+    tools: ["terminal_execute", "file_ops", "file_search"]
+    max_rounds: 10
+    routing_keywords: ["测试", "test", "pytest", "jest", "coverage", "跑通"]
+  - name: "debugger"
+    description: "负责定位与修复 bug"
+    system_prompt: "你是团队中的 Debugger。专注问题诊断：先复现、再定位根因、最后做最小化修复；输出根因分析与修改说明。"
+    tools: ["terminal_execute", "file_ops", "file_search"]
+    max_rounds: 10
+    routing_keywords: ["调试", "定位", "bug", "崩溃", "异常", "debug", "根因", "复现"]
+  - name: "architect"
+    description: "负责系统结构与 API 设计"
+    system_prompt: "你是团队中的 Architect。专注系统结构、模块边界与 API 设计；输出设计说明与改动清单，不直接写实现细节。"
+    tools: ["file_ops", "file_search", "terminal_execute"]
+    max_rounds: 8
+    read_only: true
+    routing_keywords: ["架构", "设计", "api", "接口设计", "重构方案", "architect"]
+  - name: "documenter"
+    description: "负责文档与 README"
+    system_prompt: "你是团队中的 Documenter。负责更新 README、注释与使用文档；输出文档变更说明。"
+    tools: ["file_ops", "file_search"]
+    max_rounds: 8
+    routing_keywords: ["文档", "readme", "注释", "使用说明", "document"]
+  - name: "ops"
+    description: "负责 CI/CD、部署与环境配置"
+    system_prompt: "你是团队中的 Ops。负责构建、CI/CD、部署与环境配置；输出构建/部署结果与日志要点。"
     tools: ["terminal_execute", "file_ops"]
     max_rounds: 10
+    routing_keywords: ["部署", "ci", "构建", "环境配置", "docker", "deploy", "build"]
+  - name: "security"
+    description: "负责安全审计与漏洞修复"
+    system_prompt: "你是团队中的 Security。负责安全审计：检查注入、越权、密钥泄露等风险；输出风险清单与修复建议。"
+    tools: ["terminal_execute", "file_ops", "file_search"]
+    max_rounds: 8
+    read_only: true
+    routing_keywords: ["安全", "漏洞", "注入", "越权", "密钥", "security", "vuln"]
 
 concurrency: 1
 max_review_retries: 2

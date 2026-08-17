@@ -174,6 +174,8 @@ class WorkerRoleConfig(BaseModel):
     tools: List[str] = Field(default_factory=lambda: ["terminal_execute", "file_ops"])
     max_rounds: int = 10
     read_only: bool = False  # 只读角色：file 只读 + terminal 白名单（如 reviewer）
+    # 主线二 2.1：动态角色分配——LLM 规划失败/未给角色时的关键词路由回退
+    routing_keywords: List[str] = Field(default_factory=list)
 
 
 class TeamConfig(BaseModel):

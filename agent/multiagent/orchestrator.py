@@ -12,7 +12,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from agent.config import AppConfig
+from agent.config import AppConfig, WorkerRoleConfig, load_team_config
 from agent.core.decision_logger import DecisionLogger
 from agent.core.scheduler import Scheduler
 from agent.core.task import Task, TaskDAG, TaskStatus
@@ -23,14 +23,41 @@ from agent.multiagent.workers import WorkerAgent
 
 logger = logging.getLogger("alpha-swe.multiagent.orchestrator")
 
-TEAM_PLAN_PROMPT = """你是多 Agent 团队规划器。可用的 Worker 角色：{roles}。
+def _load_role_configs() -> List[WorkerRoleConfig]:
+    """从 config/team.yaml 加载角色库配置（动态角色分配的懒创建来源）。"""
+    try:
+        return list(load_team_config().roles)
+    except Exception as e:
+        logger.warning("角色库配置加载失败: %s", e)
+        return []
+
+
+# 主线二 2.1：动态角色分配——关键词路由优先级（LLM 规划失败/未给角色时的回退）
+_ROLE_PRIORITY = ["reviewer", "tester", "security", "debugger",
+                  "architect", "documenter", "ops", "coder"]
+_DEFAULT_ROLE_KEYWORDS = {
+    "reviewer": ["审查", "评审", "review", "check", "检查", "审阅", "代码规范"],
+    "tester": ["测试", "test", "pytest", "jest", "coverage", "跑通"],
+    "security": ["安全", "漏洞", "注入", "越权", "密钥", "security", "vuln"],
+    "debugger": ["调试", "定位", "bug", "崩溃", "异常", "debug", "根因", "复现"],
+    "architect": ["架构", "设计", "api", "接口设计", "重构方案", "architect"],
+    "documenter": ["文档", "readme", "注释", "使用说明", "document"],
+    "ops": ["部署", "ci", "构建", "环境配置", "docker", "deploy", "build"],
+    "coder": ["实现", "编写", "修改", "implement", "write code"],
+}
+
+TEAM_PLAN_PROMPT = """你是多 Agent 团队规划器。可用的 Worker 角色（含职责）：
+{roles}
+
 把用户指令拆解为 1-8 个带角色的子任务，注意：
-- coder 负责实现，reviewer 负责审查（必须依赖对应 coder 任务），tester 负责测试；
+- 从上述角色库中为每个子任务选择最合适的 role，不限于 coder/reviewer/tester；
+- reviewer 审查必须依赖对应的产出任务，tester 依赖被测任务；
+- 每个子任务给出 role_rationale，说明为什么选该角色（角色需求显式化）；
 - 有依赖关系的子任务用前驱任务索引（0 起）声明依赖。
 
 只输出 JSON 数组，不要输出其他内容：
 [
-  {{"instruction": "任务描述", "role": "coder|reviewer|tester", "dependencies": [0], "priority": 0}}
+  {{"instruction": "任务描述", "role": "角色名", "role_rationale": "选择理由", "dependencies": [0], "priority": 0}}
 ]
 
 用户指令: {prompt}
@@ -63,13 +90,28 @@ class TeamResult:
 class TeamPlanner:
     """LLM 生成带角色的子任务列表；失败回退为单个 coder 任务。"""
 
-    def __init__(self, llm: BaseLLM, roles: List[str], max_tasks: int = 8):
+    def __init__(self, llm: BaseLLM, roles: List[str], max_tasks: int = 8,
+                 role_descriptions: Optional[Dict[str, str]] = None):
         self.llm = llm
         self.roles = roles
         self.max_tasks = max_tasks
+        self.role_descriptions = role_descriptions or {}
+
+    @classmethod
+    def roles_from_config(cls) -> List[str]:
+        """从 config/team.yaml 加载全部角色名（动态角色分配的角色库）。"""
+        try:
+            return [r.name for r in load_team_config().roles]
+        except Exception as e:
+            logger.warning("角色库加载失败，使用默认三角色: %s", e)
+            return ["coder", "reviewer", "tester"]
 
     async def plan(self, prompt: str) -> List[Task]:
-        roles_text = " / ".join(self.roles)
+        if self.role_descriptions:
+            roles_text = "\n".join(
+                f"- {name}: {self.role_descriptions.get(name, '')}" for name in self.roles)
+        else:
+            roles_text = " / ".join(self.roles)
         try:
             raw = await self.llm.complete([
                 {"role": "system", "content": "你是多 Agent 团队规划器，只输出 JSON。"},
@@ -84,16 +126,33 @@ class TeamPlanner:
         # 回退：按指令分类路由（编码类 -> coder，审查类 -> reviewer，测试类 -> tester）
         return [Task(id="s0", instruction=prompt, role=self._classify_role(prompt))]
 
-    @staticmethod
-    def _classify_role(instruction: str) -> str:
-        """基于关键词的规则路由：LLM 未给出角色/规划失败时的自动派发回退。"""
+    @classmethod
+    def _role_keywords(cls) -> Dict[str, List[str]]:
+        """角色关键词表：优先用 config/team.yaml 的 routing_keywords，缺省用内置默认。"""
+        try:
+            cfg_roles = {r.name: list(r.routing_keywords or [])
+                         for r in load_team_config().roles}
+        except Exception:
+            cfg_roles = {}
+        merged: Dict[str, List[str]] = {}
+        for name, defaults in _DEFAULT_ROLE_KEYWORDS.items():
+            merged[name] = list(cfg_roles.get(name) or defaults)
+        return merged
+
+    @classmethod
+    def _classify_role(cls, instruction: str,
+                       role_keywords: Optional[Dict[str, List[str]]] = None) -> str:
+        """基于关键词的规则路由：LLM 未给出角色/规划失败时的自动派发回退。
+
+        按 _ROLE_PRIORITY 顺序匹配（reviewer > tester > security > ... > coder），
+        避免"编写测试"被 coder 的"编写"关键词抢先。
+        """
         text = (instruction or "").lower()
-        review_kw = ("审查", "评审", "review", "check", "检查", "审阅", "代码规范", "安全隐患")
-        test_kw = ("测试", "test", "pytest", "jest", "coverage", "跑通")
-        if any(k in text for k in review_kw):
-            return "reviewer"
-        if any(k in text for k in test_kw):
-            return "tester"
+        kws = role_keywords if role_keywords is not None else cls._role_keywords()
+        for role in _ROLE_PRIORITY:
+            words = kws.get(role) or _DEFAULT_ROLE_KEYWORDS.get(role, [])
+            if any(k in text for k in words):
+                return role
         return "coder"
 
     def _parse(self, raw: str) -> List[Task]:
@@ -122,12 +181,14 @@ class TeamPlanner:
                         deps.append(f"s{idx}")
                 except (TypeError, ValueError):
                     pass
+            rationale = str(item.get("role_rationale", "")).strip()
             tasks.append(Task(
                 id=f"s{i}",
                 instruction=instruction,
                 role=role,
                 dependencies=list(dict.fromkeys(deps)),
                 priority=int(item.get("priority", 0)),
+                metadata={"role_rationale": rationale} if rationale else {},
             ))
         return tasks
 
@@ -142,14 +203,27 @@ class OrchestratorAgent:
         llm: Optional[BaseLLM] = None,
         blackboard: Optional[Blackboard] = None,
         workers: Optional[Dict[str, WorkerAgent]] = None,
+        roles_config: Optional[List[WorkerRoleConfig]] = None,
         planner: Optional[TeamPlanner] = None,
         max_review_retries: Optional[int] = None,
         concurrency: Optional[int] = None,
         decision_logger: Optional[DecisionLogger] = None,
     ) -> None:
         self.config = config or AppConfig()
+        self.llm = llm
         self.blackboard = blackboard or Blackboard()
         self.workers = workers or {}
+        # 主线二 2.1：角色库（全部可用角色，含未实例化 Worker 的懒创建来源）
+        self._role_map: Dict[str, WorkerRoleConfig] = {}
+        for r in (roles_config
+                  or self.config.team.roles
+                  or _load_role_configs()):
+            self._role_map[r.name] = r
+        if not self._role_map:
+            self._role_map["coder"] = WorkerRoleConfig(
+                name="coder", tools=["terminal_execute", "file_ops"])
+            self._role_map["reviewer"] = WorkerRoleConfig(
+                name="reviewer", tools=["file_ops"], read_only=True)
         self.max_review_retries = (
             max_review_retries
             if max_review_retries is not None
@@ -159,8 +233,13 @@ class OrchestratorAgent:
         self.decision_logger = decision_logger or DecisionLogger(
             log_path=self.config.decision_log_path or None,
         )
+        # 规划器默认使用完整角色库（而非仅已实例化 Worker），
+        # 让 Planner 可以挑选 debugger/documenter/architect 等角色
         self.planner = planner or TeamPlanner(
-            llm=llm, roles=list(self.workers.keys())
+            llm=llm,
+            roles=list(self._role_map.keys()),
+            role_descriptions={name: r.description
+                               for name, r in self._role_map.items()},
         )
         self._dag: Optional[TaskDAG] = None
         self._retries: Dict[str, int] = {}
@@ -191,17 +270,29 @@ class OrchestratorAgent:
         role = task.role or TeamPlanner._classify_role(task.instruction)
         worker = self.workers.get(role)
         if worker is None:
-            # 自动路由回退：角色未配置时按指令分类重定向，仍无 Worker 则失败
-            fallback_role = TeamPlanner._classify_role(task.instruction)
-            worker = self.workers.get(fallback_role)
-            if worker is None:
-                task.mark(TaskStatus.FAILED, error=f"未配置角色: {role}")
-                return
-            self.decision_logger.record(
-                "role.routing", "team.roles", role,
-                f"角色 {role} 未配置，按指令分类回退到 {fallback_role}",
-            )
-            role = fallback_role
+            role_cfg = self._role_map.get(role)
+            if role_cfg is not None:
+                # 动态角色分配：角色在库中但未预实例化 -> 按角色配置懒创建 Worker
+                worker = WorkerAgent(
+                    role_cfg, config=self.config, llm=self.llm,
+                    blackboard=self.blackboard)
+                self.workers[role] = worker
+                self.decision_logger.record(
+                    "role.routing", "team.roles", role,
+                    f"角色 {role} 未预配置，已按角色库自动实例化 Worker",
+                )
+            else:
+                # 自动路由回退：角色不在库中时按指令分类重定向
+                fallback_role = TeamPlanner._classify_role(task.instruction)
+                worker = self.workers.get(fallback_role)
+                if worker is None:
+                    task.mark(TaskStatus.FAILED, error=f"未配置角色: {role}")
+                    return
+                self.decision_logger.record(
+                    "role.routing", "team.roles", role,
+                    f"角色 {role} 未配置，按指令分类回退到 {fallback_role}",
+                )
+                role = fallback_role
         if worker.decision_logger is None:
             worker.decision_logger = self.decision_logger
         self.blackboard.post(Message(

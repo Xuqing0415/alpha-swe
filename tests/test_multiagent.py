@@ -145,7 +145,8 @@ async def test_team_planner_fallback_on_garbage():
     planner = TeamPlanner(llm=llm, roles=["coder", "reviewer"])
     tasks = await planner.plan("修复 bug")
     assert len(tasks) == 1
-    assert tasks[0].role == "coder"
+    # 2.1 动态角色分配：修复 bug 按关键词路由到 debugger（原为 coder 兜底）
+    assert tasks[0].role == "debugger"
     assert tasks[0].instruction == "修复 bug"
 
 
