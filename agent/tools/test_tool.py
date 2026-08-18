@@ -5,7 +5,7 @@
 """
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 from agent.code.test_runner import run_tests
 from agent.tools.base import ExecutionContext, Tool, ToolResult
@@ -39,14 +39,24 @@ class TestRunnerTool(Tool):
         "required": [],
     }
 
-    def __init__(self, default_timeout: float = 300.0, decision_logger=None):
+    def __init__(self, default_timeout: float = 300.0, decision_logger=None,
+                 related_targets: Optional[List[str]] = None):
         self.default_timeout = max(10.0, default_timeout)
         self.decision_logger = decision_logger
+        # 方向一 3.4：自动测试选择（run_tests 无目标时优先跑相关测试）
+        self.related_targets: List[str] = list(related_targets or [])
 
     async def execute(self, params: Dict[str, Any],
                       context: ExecutionContext) -> ToolResult:
         framework = str(params.get("framework") or "auto")
         target = str(params.get("target") or "").strip()
+        if not target and self.related_targets:
+            target = " ".join(self.related_targets)
+            if self.decision_logger is not None:
+                self.decision_logger.record(
+                    "test.auto_select", "agent.auto_test_select", True,
+                    f"自动选择相关测试: {target}",
+                )
         timeout = float(params.get("timeout") or self.default_timeout)
         coverage = bool(params.get("coverage", False))
         result = await run_tests(

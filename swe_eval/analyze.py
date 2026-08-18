@@ -13,9 +13,10 @@
 """
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("swe_eval.analyze")
 
@@ -32,7 +33,8 @@ def _category_of(result: Dict[str, Any]) -> str:
         return "budget"
     adapter = result.get("adapter", {}) or {}
     payload = adapter.get("payload") or {}
-    cat = payload.get("attribution", {}).get("category", "") or ""
+    cat = str(adapter.get("attribution") or
+               (payload.get("attribution") or {}).get("category", "") or "")
     if cat and cat != "unknown":
         return cat
     if status == "unresolved":
@@ -119,3 +121,73 @@ def save_markdown_report(report: Dict[str, Any], results: List[Dict[str, Any]],
     path = Path(results_dir) / "report.md"
     path.write_text(render_markdown_report(report, results), encoding="utf-8")
     return path
+
+
+# ---- 方向一 2.1：轨迹信号与失败案例库 ----
+def trajectory_signals(result: Dict[str, Any]) -> Dict[str, Any]:
+    """从结果记录中提取轨迹信号，辅助失败归因与案例库检索。"""
+    adapter = result.get("adapter", {}) or {}
+    return {
+        "llm_calls": int(adapter.get("llm_calls", 0) or 0),
+        "rounds": int(adapter.get("rounds", 0) or 0),
+        "tokens": int(adapter.get("tokens", 0) or 0),
+        "files_modified": list(adapter.get("files_modified") or []),
+        "attribution": str(adapter.get("attribution") or ""),
+        "has_error": bool(adapter.get("error")),
+    }
+
+
+def refine_category(result: Dict[str, Any]) -> str:
+    """在 status 启发式之外用轨迹信号修正归因类别。"""
+    base = _category_of(result)
+    adapter = result.get("adapter", {}) or {}
+    files = adapter.get("files_modified") or []
+    if base in ("unknown", "modification") and not files:
+        # 有轮次但始终没改到文件 -> 检索/定位失败
+        if int(adapter.get("rounds", 0) or 0) > 0:
+            return "retrieval"
+    if base == "modification" and files:
+        eval_info = result.get("eval", {}) or {}
+        if eval_info.get("resolved") is False and eval_info.get("error"):
+            return "test"
+    return base
+
+
+def export_case_library(results: List[Dict[str, Any]],
+                        results_dir: Path | str,
+                        top: Optional[int] = None) -> Path:
+    """导出失败案例库（JSON + Markdown），供人工复盘与瓶颈分析。"""
+    results_dir = Path(results_dir)
+    cases: List[Dict[str, Any]] = []
+    for r in results:
+        if r.get("status") == "resolved":
+            continue
+        adapter = r.get("adapter", {}) or {}
+        cases.append({
+            "instance_id": r.get("instance_id"),
+            "repo": r.get("repo", ""),
+            "status": r.get("status"),
+            "category": refine_category(r),
+            "signals": trajectory_signals(r),
+            "error": (r.get("error") or adapter.get("error") or "")[:500],
+            "eval_error": ((r.get("eval") or {}).get("error") or "")[:500],
+            "patch_path": str(
+                results_dir / str(r.get("instance_id")) / "patch.diff"),
+        })
+    if top:
+        cases = cases[:top]
+    json_path = results_dir / "case_library.json"
+    json_path.write_text(
+        json.dumps(cases, ensure_ascii=False, indent=2), encoding="utf-8")
+    md = ["# 失败案例库", "", f"- 案例数: {len(cases)}", ""]
+    for c in cases:
+        sig = c["signals"]
+        md.append(f"## {c['instance_id']} ({c['category']})")
+        md.append(f"- 状态: {c['status']}  错误: {(c['error'] or '-')[:120]}")
+        md.append(f"- 信号: llm_calls={sig['llm_calls']} rounds={sig['rounds']} "
+                  f"files={sig['files_modified']}")
+        md.append(f"- patch: `{c['patch_path']}`")
+        md.append("")
+    md_path = results_dir / "case_library.md"
+    md_path.write_text("\n".join(md), encoding="utf-8")
+    return json_path

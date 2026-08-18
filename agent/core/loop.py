@@ -292,6 +292,9 @@ class AgentLoop:
         self.project_state_tracker = None
         self.workspace_context = None
         self._resume_tasks: List[Task] = []
+        # 方向一 3.1：issue→文件推荐（规划注入 + 相关测试选择）
+        self._recommended_files: List[str] = []
+        self._recommended_files_text = ""
         if self.config.agent.state_tracker_enabled:
             from agent.project_state import ProjectStateTracker
             self.project_state_tracker = ProjectStateTracker(
@@ -520,6 +523,8 @@ class AgentLoop:
         if file_tool is not None:
             file_tool.call_graph = self._project_ctx.call_graph
             file_tool.decision_logger = self._decision
+        # 方向一 3.1/3.4：issue→文件推荐 + 相关测试自动选择（配置门控）
+        self._init_issue_recommendations(prompt)
         # 主线一 1.1/1.2：项目状态感知 + 会话连续性（差异注入 / 续接提示）
         self._begin_persistent_session(prompt, resume)
         skill = self._build_injected_context(prompt)
@@ -1829,6 +1834,46 @@ class AgentLoop:
             logger.warning("插件激活失败: %s", e)
         return "\n\n".join(x for x in parts if x)
 
+    # ---- 方向一 3.1/3.4：issue→文件推荐与相关测试选择 ----
+    def _init_issue_recommendations(self, prompt: str) -> None:
+        """根据 issue 关键词推荐候选文件，注入规划提示并选择相关测试目标。"""
+        self._recommended_files = []
+        self._recommended_files_text = ""
+        if not self.config.agent.recommend_files_enabled:
+            return
+        try:
+            from agent.code.recommend import (
+                format_recommendations, recommend_files)
+            scored = recommend_files(
+                prompt, self.config.sandbox.workspace,
+                call_graph=self._project_ctx.call_graph,
+                top_k=self.config.agent.recommend_top_k)
+            self._recommended_files = [str(r["path"]) for r in scored]
+            self._recommended_files_text = format_recommendations(scored)
+            self._decision.record(
+                "recommend_files", "agent.recommend_files_enabled", True,
+                f"推荐 {len(self._recommended_files)} 个候选文件: "
+                f"{', '.join(self._recommended_files[:8])}",
+            )
+        except Exception as e:
+            logger.warning("issue→文件推荐失败: %s", e)
+        if self.config.agent.auto_test_select and self._recommended_files:
+            try:
+                from agent.code.test_select import select_related_tests
+                tool = self.tools.get("run_tests")
+                if tool is not None:
+                    tool.related_targets = select_related_tests(
+                        self._recommended_files,
+                        self.config.sandbox.workspace,
+                        call_graph=self._project_ctx.call_graph)
+                    self._decision.record(
+                        "auto_test_select", "agent.auto_test_select", True,
+                        "相关测试目标: %s" % (tool.related_targets or "(无)"),
+                    )
+            except Exception as e:
+                logger.warning("相关测试选择失败: %s", e)
+
+
     async def _plan_with_context(self, prompt: str) -> List[Task]:
         """带项目上下文的规划调用：仅向支持新参数的 Planner 传入注入内容。"""
         import inspect
@@ -1843,6 +1888,8 @@ class AgentLoop:
             kwargs["project_context"] = self._project_ctx.profile_text
         if "capability_profile" in params:
             kwargs["capability_profile"] = self._capability_hint()
+        if "recommended_files" in params:
+            kwargs["recommended_files"] = self._recommended_files_text
         # 主线三 3.2：匹配待验证改进提议，作为本轮应用目标
         self._active_proposals = []
         if self.proposals is not None:

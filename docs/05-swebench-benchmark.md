@@ -93,3 +93,60 @@ python -X utf8 -c "import json, pathlib; from swe_eval.analyze import *; ..."
 - `git worktree` 在本仓库 Windows/沙箱环境不可靠，`evaluate.py` 改用
   `git archive` 快照，已覆盖绝大多数场景；
 - SWE-bench 全量 Lite（300 例）需要较多时间与 token，建议先跑 20-30 例子集。
+
+
+## 8. 优化迭代基础设施（方向一）
+
+### 8.1 固定评估子集（可复现基线）
+
+- 生成脚本：`scripts/prepare_swebench_subset.py`，从本地 JSONL 或 HuggingFace 拉取
+  `SWE-bench_Lite`，用固定随机种子（默认 42）选出 50 个实例，保存到
+  `data/swebench/swebench_subset_50.json`。
+- 之后所有 A/B 优化都在同一子集上运行，避免抽样误差干扰判断；最终确认最优配置后再跑全量 Lite。
+- 示例：
+  ```powershell
+  python -X utf8 scripts/prepare_swebench_subset.py `
+      --instances data/swebench_lite.jsonl --count 50 --seed 42 `
+      --save data/swebench/swebench_subset_50.json
+  ```
+
+### 8.2 实验日志与配置覆盖（`swe_eval/experiments.py`）
+
+- `--experiment-log <path>`：每次运行追加一条 JSONL 实验记录，包含时间戳、实验标签、
+  配置哈希、配置覆盖、子集路径、解决率、平均 token/轮次/耗时、失败归因摘要。
+- `--experiment-tag <name>`：实验标签（如 `baseline`、`retrieval-v2`），用于横向 A/B 对比。
+- `--config-override a.b.c=value`：无需手改 YAML 即可做单变量实验
+  （如 `context.max_tokens=12000`、`agent.recommend_files_enabled=true`）；
+  覆盖后的配置会落盘到 `results_dir/agent_config_override.yaml` 并写入记录，保证可复现。
+- 示例：
+  ```powershell
+  python -X utf8 scripts/run_swebench.py `
+      --instances data/swebench/swebench_subset_50.json `
+      --results-dir logs/swebench/run2 --max-parallel 1 `
+      --config config/swebench.yaml `
+      --experiment-log logs/swebench/experiments.jsonl --experiment-tag retr-v1 `
+      --config-override agent.recommend_files_enabled=true `
+      --config-override context.max_tokens=12000
+  ```
+
+### 8.3 Agent 侧优化（方向一 3.1/3.4）
+
+- `agent/code/recommend.py`：issue → 文件推荐。按关键词重叠打分
+  （内容命中 + 路径命中 + 调用图影响面提升），支持中英文混合 issue（CJK 二元组分词）；
+  结果注入规划提示，减少盲目搜索。
+- `agent/code/test_select.py`：相关测试选择。按 `tests/test_<base>.py` 同名匹配 +
+  调用图双向影响面，生成 pytest 目标，`run_tests` 无目标时自动使用。
+- 开关（`config/swebench.yaml` 已开启，默认关闭避免影响普通任务）：
+  `agent.recommend_files_enabled`、`agent.recommend_top_k`、`agent.auto_test_select`。
+- `agent/code/call_graph.py` 新增 `CallGraph.impact_files(rel)`：返回与某文件符号有
+  直接调用关系的文件（调用方 + 被调方），路径统一为正斜杠，兼容 Windows。
+
+### 8.4 失败归因与案例库（`swe_eval/analyze.py`）
+
+- `AdapterResult.to_dict()` 现在保留顶层 `attribution` / `attribution_reason` /
+  `final_answer`，归因信息不再丢失。
+- `swe_eval/runner.py` 在实例结束后把 `<repo>/logs/sessions/` 复制到
+  `<instance_id>/session/`，配合案例库做深度失败复盘。
+- `trajectory_signals()` / `refine_category()`：用轨迹信号（轮次、改动文件、错误）修正
+  失败类别；`export_case_library()` 导出 `case_library.json` + `case_library.md`，
+  便于人工归因与瓶颈分析。

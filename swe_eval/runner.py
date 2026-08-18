@@ -126,6 +126,14 @@ class SweBenchRunner:
         self._write_instance_files(inst_dir, instance, result,
                                    adapter_result, eval_result)
         self._append_result(result)
+        # 方向一 2.1：保留会话轨迹（logs/sessions/）供深度失败归因
+        session_src = repo_dir / "logs" / "sessions"
+        if session_src.is_dir():
+            try:
+                shutil.copytree(session_src, inst_dir / "session",
+                                dirs_exist_ok=True)
+            except OSError as e:
+                logger.warning("会话轨迹保存失败: %s", e)
         if not self.keep_repos:
             # 每个实例只保留结果文件，避免克隆仓库堆积磁盘
             shutil.rmtree(repo_dir, ignore_errors=True)

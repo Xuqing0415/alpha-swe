@@ -15,7 +15,10 @@ agent:
   auto_testgen: false
   mutation_check_enabled: false
   counterfactual_enabled: true
-  workspace_context_enabled: true   # 注入仓库结构摘要，帮助快速定位
+  workspace_context_enabled: true
+  recommend_files_enabled: true     # 方向一 3.1：issue→文件推荐并注入规划
+  recommend_top_k: 8
+  auto_test_select: true            # 方向一 3.4：run_tests 无目标时自动选相关测试   # 注入仓库结构摘要，帮助快速定位
 
 tools:
   terminal_execute:

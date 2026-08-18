@@ -43,6 +43,21 @@ class CallGraph:
     def files_of(self, name: str) -> List[str]:
         return sorted({f for f, _ in self.defs.get(name, [])})
 
+    def impact_files(self, rel: str) -> List[str]:
+        """与 rel 文件内符号有直接调用关系的其他文件（调用方/被调方）。"""
+        syms = [s for s, locs in self.defs.items()
+                if any(f == rel for f, _ in locs)]
+        out: set = set()
+        for s in syms:
+            for _caller, f in self.callers_of(s):
+                if f and f != rel:
+                    out.add(f)
+            for callee in self.calls.get(s, set()):
+                for f in self.files_of(callee):
+                    if f and f != rel:
+                        out.add(f)
+        return sorted(out)
+
     def _file_of(self, symbol: str) -> str:
         for f, _ in self.defs.get(symbol, []):
             return f
@@ -79,7 +94,8 @@ def build_call_graph(root: str, files: Optional[Iterable[str]] = None,
     cg = CallGraph()
     if not root_p.is_dir():
         return cg
-    rel_files = list(files) if files is not None else _discover(root_p, max_files)
+    rel_files = ([str(f).replace("\\", "/") for f in files]
+                 if files is not None else _discover(root_p, max_files))
     for rel in rel_files[:max_files]:
         _index_file(root_p, str(rel), cg)
     return cg
@@ -93,10 +109,11 @@ def _discover(root: Path, max_files: int) -> List[str]:
                 break
             if not p.is_file() or p.suffix.lower() not in CODE_EXTS:
                 continue
-            rel = p.relative_to(root)
-            if any(seg.startswith(".") or seg in _SKIP_DIRS for seg in rel.parts):
+            rel = p.relative_to(root).as_posix()
+            if any(seg.startswith(".") or seg in _SKIP_DIRS
+                   for seg in rel.split("/")):
                 continue
-            out.append(str(rel))
+            out.append(rel)
     except OSError:
         pass
     return out

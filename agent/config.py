@@ -338,6 +338,10 @@ class AgentConfig(BaseModel):
     proposal_conflict_threshold: int = 5        # 3.2B 与已晋升策略冲突时需 N 次成功覆盖
     benchmark_extraction_enabled: bool = True  # 3.3 基准集自动提取（代表性任务）
     self_improve_dir: str = "~/.swe-agent"     # 画像/提议/基准台账目录（跨会话）
+    # SWE-bench 优化（方向一 3.1/3.4）：issue→文件推荐 + 相关测试自动选择
+    recommend_files_enabled: bool = False   # 从 issue 关键词推荐候选文件并注入规划
+    recommend_top_k: int = 8                # 推荐文件数上限
+    auto_test_select: bool = False          # run_tests 无目标时自动选择相关测试
 
 
 class MCPClientConfig(BaseModel):

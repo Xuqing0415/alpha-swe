@@ -68,6 +68,13 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="评估前执行的依赖安装命令（如 'pip install -e .'）")
     p.add_argument("--keep-repos", action="store_true",
                    help="保留克隆的仓库（默认运行后清理）")
+    p.add_argument("--experiment-log", default=None,
+                   help="实验日志路径（JSONL：配置哈希/子集/解决率/失败归因）")
+    p.add_argument("--experiment-tag", default="default",
+                   help="实验标签（用于 A/B 对比）")
+    p.add_argument("--config-override", action="append", default=None,
+                   metavar="KEY=VALUE",
+                   help="配置覆盖（如 context.max_tokens=12000），可重复指定")
     p.add_argument("--verbose", action="store_true")
     return p.parse_args(argv)
 
@@ -80,6 +87,20 @@ def main(argv=None) -> int:
         stream=sys.stdout,
     )
     results_dir = Path(args.results_dir)
+    config_path = Path(args.config)
+    config_overrides = {}
+    for kv in (args.config_override or []):
+        if "=" in kv:
+            k, v = kv.split("=", 1)
+            config_overrides[k.strip()] = v.strip()
+    if config_overrides:
+        from swe_eval.experiments import apply_config_overrides
+        results_dir.mkdir(parents=True, exist_ok=True)
+        merged = apply_config_overrides(
+            config_path.read_text(encoding="utf-8"), config_overrides)
+        config_path = results_dir / "agent_config_override.yaml"
+        config_path.write_text(merged, encoding="utf-8")
+        print(f"配置覆盖已应用: {config_overrides} -> {config_path}")
 
     # 1) 加载并固定子集
     if args.instances:
@@ -100,7 +121,7 @@ def main(argv=None) -> int:
 
     # 2) 运行
     adapter = SweAgentAdapter(
-        config_path=args.config, timeout=args.timeout,
+        config_path=config_path, timeout=args.timeout,
         max_cost=args.max_cost, max_tokens=args.max_tokens,
         docker=args.docker,
     )
@@ -115,6 +136,18 @@ def main(argv=None) -> int:
     # 3) 报告
     report = save_report(results_dir, instances, results)
     md_path = save_markdown_report(report, results, results_dir)
+    if args.experiment_log:
+        from swe_eval.experiments import append_experiment_log
+        rec = append_experiment_log(
+            args.experiment_log, tag=args.experiment_tag,
+            config_path=str(config_path),
+            config_overrides=config_overrides,
+            subset_path=args.save_subset or args.instances or "",
+            results=results,
+            notes=f"results_dir={results_dir}",
+        )
+        print(f"实验记录已写入: {args.experiment_log} "
+              f"（解决率 {rec['summary']['resolve_rate']:.1%}）")
     print(json.dumps(report["summary"], ensure_ascii=False, indent=2))
     print(f"Markdown 报告: {md_path}")
     return 0

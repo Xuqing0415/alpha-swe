@@ -46,6 +46,7 @@ class AdapterResult:
     payload: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
+        attribution = ((self.payload or {}).get("attribution") or {})
         return {
             "instance_id": self.instance_id,
             "ok": self.ok,
@@ -58,6 +59,9 @@ class AdapterResult:
             "files_modified": self.files_modified,
             "patch": self.patch,
             "error": self.error,
+            "attribution": str(attribution.get("category") or ""),
+            "attribution_reason": str(attribution.get("reason") or "")[:500],
+            "final_answer": str((self.payload or {}).get("final_answer") or "")[:1000],
         }
 
 

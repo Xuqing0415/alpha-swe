@@ -26,12 +26,19 @@ PLAN_PROMPT = """你是一个任务规划器。请把下面的用户指令拆解
 用户指令: {prompt}
 项目上下文: {context}
 {call_graph_block}
+{recommended_files_block}
 """
 
 CALL_GRAPH_HINT = """
 ### 影响范围提示（来自项目调用图）
 下列符号被多处调用或依赖其他符号，修改它们时请在子任务拆分中考虑连带影响：
 {call_graph_text}
+"""
+
+
+RECOMMENDED_FILES_HINT = """
+### 候选文件（依据 issue 关键词与调用图影响面推断，建议优先查看）
+{recommended_files}
 """
 
 
@@ -54,7 +61,8 @@ class Planner:
 
     async def plan(self, prompt: str, context: str = "",
                    call_graph=None, project_context: str = "",
-                   capability_profile: str = "") -> List[Task]:
+                   capability_profile: str = "",
+                   recommended_files: str = "") -> List[Task]:
         """返回规划出的任务列表（由调用方提交给 Scheduler）。
 
         call_graph: 项目级 CallGraph，命中时把高频符号/影响面注入拆分提示；
@@ -84,13 +92,24 @@ class Planner:
                         f"拆分提示注入调用图: {call_graph.symbol_count()} 个符号，"
                         f"{call_graph.edge_count()} 条调用边",
                     )
+            recommended_files_block = ""
+            if recommended_files:
+                recommended_files_block = RECOMMENDED_FILES_HINT.replace(
+                    "{recommended_files}", recommended_files)
+                if self.decision_logger is not None:
+                    self.decision_logger.record(
+                        "planner.recommended_files.injected",
+                        "agent.recommend_files_enabled", True,
+                        "规划提示注入候选文件",
+                    )
             raw = await self.llm.complete([
                 {"role": "system", "content": "你是任务规划器，只输出 JSON。"},
                 {"role": "user",
                  "content": _render_plan_prompt(prompt, context,
                                                 project_context,
                                                 call_graph_text,
-                                                capability_profile)},
+                                                capability_profile,
+                                                recommended_files_block)},
             ])
             tasks = self._parse_plan(raw, prompt)
             if tasks:
@@ -212,7 +231,8 @@ class Planner:
 def _render_plan_prompt(prompt: str, context: str,
                           project_context: str = "",
                           call_graph_text: str = "",
-                          capability_profile: str = "") -> str:
+                          capability_profile: str = "",
+                          recommended_files_block: str = "") -> str:
     """渲染规划提示，避免用户指令中的花括号触发 format() 错误。"""
     ctx = context
     if project_context:
@@ -225,4 +245,5 @@ def _render_plan_prompt(prompt: str, context: str,
     return (PLAN_PROMPT
             .replace("{prompt}", prompt)
             .replace("{context}", ctx)
-            .replace("{call_graph_block}", block))
+            .replace("{call_graph_block}", block)
+            .replace("{recommended_files_block}", recommended_files_block))
