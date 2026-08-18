@@ -26,9 +26,9 @@ _SKIP_DIRS = frozenset({
 })
 _CODE_SUFFIXES = {
     ".py", ".pyw", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs",
-    ".go", ".rs", ".java", ".c", ".h", ".cpp", ".hpp", ".cs", ".rb",
-    ".php", ".swift", ".kt", ".sh", ".toml", ".yaml", ".yml", ".json",
-    ".md", ".txt", ".html", ".css",
+    ".go", ".rs", ".java", ".c", ".h", ".cpp", ".cc", ".cxx", ".hpp",
+    ".hh", ".cs", ".rb", ".php", ".swift", ".kt", ".sh", ".toml",
+    ".yaml", ".yml", ".json", ".md", ".txt", ".html", ".css",
 }
 _IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _CJK_RUN_RE = re.compile(r"[\u4e00-\u9fff]+")

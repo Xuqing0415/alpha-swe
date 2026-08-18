@@ -12,7 +12,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
 
-CODE_EXTS = {".py", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}
+from agent.code.language_parser import ALL_CODE_EXTS
+
+CODE_EXTS = set(ALL_CODE_EXTS)
+# 由 language_parser（正则回退 + tree-sitter 可选）处理的语言
+_GENERIC_LANGS = {"java", "go", "rust", "c", "cpp", "csharp",
+                 "ruby", "php"}
 
 _JS_FUNC = re.compile(r"\b(?:async\s+)?function\s+([A-Za-z_$][\w$]*)")
 _JS_ARROW = re.compile(
@@ -87,7 +92,20 @@ def summarize_file(path: str, text: str) -> FileAstSummary:
             return _summarize_python(path, text)
         except SyntaxError:
             return FileAstSummary(path, "python")
+    if lang in _GENERIC_LANGS:
+        return _summarize_generic(path, text, lang)
     return _summarize_js_ts(path, text, lang)
+
+
+def _summarize_generic(path: str, text: str, lang: str) -> FileAstSummary:
+    """多语言摘要：复用 language_parser 的统一符号/导入提取。"""
+    from agent.code.language_parser import parse_file
+    pf = parse_file(path, text, lang)
+    symbols = [Symbol(s.name, s.kind, s.line, s.args) for s in pf.symbols]
+    exports = [s.name for s in pf.symbols if s.kind in (
+        "class", "function", "type", "module", "trait", "interface",
+        "enum", "struct") and not s.name.startswith("_")]
+    return FileAstSummary(path, lang, symbols, exports, list(pf.imports))
 
 
 def _summarize_python(path: str, text: str) -> FileAstSummary:

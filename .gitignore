@@ -38,3 +38,8 @@ memory.db-wal
 # 产品化服务运行时目录/数据库
 server_workspaces/
 server.db
+
+# VS Code 扩展
+vscode-extension/node_modules/
+vscode-extension/out/
+vscode-extension/*.vsix

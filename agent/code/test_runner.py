@@ -94,21 +94,53 @@ def parse_test_output(framework: str, output: str) -> List[TestCaseFailure]:
         return failures
 
     # jest / go / 通用：按行抓失败用例名
-    for line in output.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if any(marker in stripped for marker in FAILED_TEST_MARKERS) and (
-                "✕" in stripped or "✗" in stripped or "×" in stripped
-                or "FAILED" in stripped or stripped.startswith("---")
-                or ":" in stripped[:60]):
-            name = re.split(r"\s+[-–]+\s+", stripped, maxsplit=1)
+    if framework in ("maven", "gradle"):
+        # [ERROR]   com.example.FooTest.testBar:12 expected:<1> but was:<2>
+        for m in re.finditer(
+                r"\[ERROR\]\s+([\w.$]+)\.([\w$]+):(\d+)\s+(.*)", output):
             failures.append(TestCaseFailure(
-                name=name[0][:120],
-                reason=name[1][:160] if len(name) > 1 else "",
-            ))
-        if len(failures) >= 15:
-            break
+                name=f"{m.group(1)}.{m.group(2)}", reason=m.group(4)[:160]))
+            if len(failures) >= 15:
+                return failures
+    elif framework == "cargo":
+        for m in re.finditer(r"----\s+(\S+)\s+stdout\s+----", output):
+            failures.append(TestCaseFailure(name=m.group(1)))
+            if len(failures) >= 15:
+                break
+    elif framework == "ctest":
+        for m in re.finditer(
+                r"^\s*(\d+)\s+-\s+([\w./-]+)\s*\(([^)]*)\)",
+                output, re.M):
+            failures.append(TestCaseFailure(
+                name=m.group(2), reason=(m.group(3) or "")[:160]))
+            if len(failures) >= 15:
+                break
+    elif framework == "go":
+        for m in re.finditer(r"---\s+FAIL:\s+([\w./-]+)", output):
+            failures.append(TestCaseFailure(name=m.group(1)))
+            if len(failures) >= 15:
+                break
+
+    if not failures:
+        for line in output.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if any(marker in stripped
+                   for marker in FAILED_TEST_MARKERS) and (
+                    "\u2713" in stripped or "\u2717" in stripped
+                    or "\u00d7" in stripped or "\u2715" in stripped
+                    or "FAILED" in stripped
+                    or stripped.startswith("---")
+                    or ":" in stripped[:60]):
+                name = re.split(r"\s+[-\u2192+]\s+", stripped,
+                                maxsplit=1)
+                failures.append(TestCaseFailure(
+                    name=name[0][:120],
+                    reason=name[1][:160] if len(name) > 1 else "",
+                ))
+            if len(failures) >= 15:
+                break
     return failures
 
 
@@ -122,7 +154,7 @@ async def run_tests(framework: str, target: str, workspace: str,
     if framework in ("auto", ""):
         framework = "pytest"  # 无检测时的保守默认；有 pyproject 时由调用方指定
     target = (target or "").strip()
-    argv = _build_argv(framework, target, collect_coverage)
+    argv = _build_argv(framework, target, collect_coverage, workspace)
     if argv is None:
         return TestResult(success=False, framework=framework,
                           output=f"不支持的测试框架: {framework}",
@@ -166,7 +198,8 @@ async def run_tests(framework: str, target: str, workspace: str,
 
 
 def _build_argv(framework: str, target: str,
-                collect_coverage: bool) -> Optional[List[str]]:
+                collect_coverage: bool,
+                workspace: str = "") -> Optional[List[str]]:
     t = target if target else "."
     if framework == "pytest":
         argv = [sys.executable, "-m", "pytest", t, "-q", "--tb=short",
@@ -185,6 +218,23 @@ def _build_argv(framework: str, target: str,
         return ["go", "test", t]
     if framework == "npm":
         return ["npm", "test"]
+    if framework == "maven":
+        # 目标可为 pom.xml 或具体测试类名
+        if target and target.endswith("pom.xml"):
+            return ["mvn", "-f", target, "-q", "test"]
+        if target:
+            return ["mvn", "-q", "test", "-Dtest=" + target]
+        return ["mvn", "-q", "test"]
+    if framework == "gradle":
+        exe = "gradlew" if Path(workspace, "gradlew").exists() else "gradle"
+        return [exe, "test"]
+    if framework == "cargo":
+        return ["cargo", "test"]
+    if framework == "ctest":
+        argv = ["ctest", "--output-on-failure"]
+        if target:
+            argv += ["-R", target]
+        return argv
     return None
 
 

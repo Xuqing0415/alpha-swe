@@ -1,4 +1,4 @@
-﻿name: quality-gate
+name: quality-gate
 
 on:
   workflow_dispatch:
@@ -35,3 +35,33 @@ jobs:
       - name: flake8 gate
         run: |
           flake8 agent/ swe_eval/ server/ scripts/ tests/ --jobs=1
+
+  test:
+    name: pytest unit/integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: lint
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyyaml pydantic jinja2 pytest pytest-asyncio \
+            pytest-cov litellm psutil numpy httpx fastapi uvicorn
+
+      - name: Run tests (fast stage; chaos/soak run in chaos.yml)
+        run: |
+          python -X utf8 -m pytest -q -p no:cacheprovider --durations=10 \
+            --ignore=tests/test_chaos_smoke.py \
+            --ignore=tests/test_fault_injection.py \
+            --ignore=tests/test_benchmark_suite.py \
+            --ignore=tests/test_real_project_e2e.py \
+            --ignore=tests/test_soak.py

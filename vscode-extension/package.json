@@ -1,0 +1,54 @@
+{
+  "name": "alpha-swe-vscode",
+  "displayName": "Alpha-SWE",
+  "description": "在 VS Code 中选中代码，用自然语言指令驱动 Alpha-SWE Agent 服务（/api/v1 HTTP API）",
+  "version": "0.1.0",
+  "publisher": "alpha-swe",
+  "license": "MIT",
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["Other"],
+  "keywords": ["agent", "swe", "ai", "refactor", "code"],
+  "activationEvents": ["onCommand:alphaSwe.runOnSelection"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "alphaSwe.runOnSelection",
+        "title": "Alpha-SWE: 对选中代码执行自然语言指令"
+      }
+    ],
+    "keybindings": [
+      { "command": "alphaSwe.runOnSelection", "key": "ctrl+alt+s", "mac": "cmd+alt+s" }
+    ],
+    "configuration": {
+      "title": "Alpha-SWE",
+      "properties": {
+        "alphaSwe.baseUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8000",
+          "description": "Alpha-SWE 服务地址（server/main.py，API 前缀 /api/v1）"
+        },
+        "alphaSwe.apiKey": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "访问令牌。先由管理员调用 `POST /api/v1/api-keys` 创建 API Key，再通过 `POST /api/v1/auth/token` 换取 Bearer Token。留空则不携带 Authorization 头。"
+        },
+        "alphaSwe.timeout": {
+          "type": "number",
+          "default": 1800,
+          "description": "任务超时（秒），提交任务时透传给服务端。"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.4.0"
+  }
+}

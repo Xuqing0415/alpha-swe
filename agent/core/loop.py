@@ -49,6 +49,9 @@ from agent.tools.git_tool import GitTool
 from agent.tools.manager import ToolManager
 from agent.tools.terminal import TerminalTool
 from agent.tools.test_tool import TestRunnerTool
+from agent.tools.database_tool import DatabaseTool
+from agent.tools.dependency_tool import DependencyTool
+from agent.tools.cloud_tool import CloudTool
 
 logger = logging.getLogger("alpha-swe.loop")
 
@@ -343,6 +346,16 @@ class AgentLoop:
         manager.register(self._background_tasks)
         # 方案 3.4：Git 版本管理（写操作走确认策略）
         manager.register(GitTool(decision_logger=self._decision))
+        # Direction 2 Phase 3: database / dependency tools (safe defaults)
+        # and cloud CLI (disabled unless tools.cloud.enabled).
+        manager.register(DatabaseTool(
+            decision_logger=self._decision,
+            allow_write=bool((self.config.tools.database.extra or {}).get(
+                "allow_write", False)),
+        ))
+        manager.register(DependencyTool(decision_logger=self._decision))
+        if self.config.tools.cloud.enabled:
+            manager.register(CloudTool(decision_logger=self._decision))
         raw = self.config.tools.model_dump()
         self._tool_enabled = {name: cfg["enabled"] for name, cfg in raw.items()}
         return manager

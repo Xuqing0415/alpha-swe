@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 from agent.code.ast_summary import CODE_EXTS
+from agent.code.language_parser import detect_language
 
 logger = logging.getLogger("alpha-swe.code")
 
@@ -127,8 +128,28 @@ def _index_file(root: Path, rel: str, cg: CallGraph) -> None:
         return
     if rel.endswith(".py"):
         _index_python(rel, text, cg)
-    elif Path(rel).suffix.lower() in (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"):
+    elif Path(rel).suffix.lower() in (".js", ".jsx", ".ts", ".tsx",
+                                      ".mjs", ".cjs"):
         _index_js(rel, text, cg)
+    else:
+        # 方向二阶段二 2.3：Java/Go/Rust/C/C++ 等经 language_parser 索引
+        lang = detect_language(rel)
+        if lang:
+            _index_generic(rel, text, lang, cg)
+
+
+def _index_generic(rel: str, text: str, language: str,
+                  cg: CallGraph) -> None:
+    """把 language_parser 的统一符号/调用边喂进 CallGraph。"""
+    from agent.code.language_parser import parse_file
+    pf = parse_file(rel, text, language)
+    for s in pf.symbols:
+        _add_def(cg, rel, s.name, s.line)
+    for owner, callee in pf.calls:
+        if not owner or not callee:
+            continue
+        cg.calls.setdefault(owner, set()).add(callee)
+        cg.reverse.setdefault(callee, set()).add(owner)
 
 
 def _index_python(rel: str, text: str, cg: CallGraph) -> None:

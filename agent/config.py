@@ -34,6 +34,10 @@ class ToolsConfig(BaseModel):
     terminal_execute: ToolEntry = Field(default_factory=ToolEntry)
     file_ops: ToolEntry = Field(default_factory=ToolEntry)
     file_search: ToolEntry = Field(default_factory=ToolEntry)
+    # 方向二阶段三：扩展工具（默认关闭，避免影响普通任务）
+    database: ToolEntry = Field(default_factory=ToolEntry)      # 数据库查询（默认只读）
+    dependency: ToolEntry = Field(default_factory=ToolEntry)    # 依赖清单/审计建议
+    cloud: ToolEntry = Field(default_factory=ToolEntry)         # 云 CLI（默认关闭）
 
 
 class SandboxConfig(BaseModel):
