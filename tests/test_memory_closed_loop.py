@@ -203,7 +203,7 @@ async def test_error_memory_marked_negative(ws_tmp):
                          planner=StubPlanner(), memory=store)
         result = await loop.run("会失败的任务")
         assert result.ok is False
-        hits = store.search("输出解析失败", kinds=["error"])
+        hits = store.search("输出解析失败 超过最大轮数", kinds=["error"])
         assert hits and hits[0]["metadata"].get("negative") is True
         assert any(d["name"] == "memory.write" and "反例" in d["decision"]
                    for d in loop._decision.records())

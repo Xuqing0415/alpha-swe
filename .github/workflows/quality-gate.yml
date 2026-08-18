@@ -54,8 +54,9 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pyyaml pydantic jinja2 pytest pytest-asyncio \
-            pytest-cov litellm psutil numpy httpx fastapi uvicorn
+          pip install -r requirements-server.txt
+          pip install pytest pytest-asyncio pytest-cov rich textual numpy \
+            scikit-learn mcp jinja2
 
       - name: Run tests (fast stage; chaos/soak run in chaos.yml)
         run: |

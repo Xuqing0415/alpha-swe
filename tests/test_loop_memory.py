@@ -70,7 +70,7 @@ async def test_error_memory_written_on_failure(ws_tmp):
     loop = AgentLoop(config=cfg, llm=llm, planner=StubPlanner())
     result = await loop.run("会失败的任务")
     assert result.ok is False
-    hits = loop.memory.search("输出解析失败", kinds=["error"])
+    hits = loop.memory.search("调用次数超出脚本", kinds=["error"])
     assert hits and hits[0]["kind"] == "error"
 
 
