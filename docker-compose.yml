@@ -1,0 +1,51 @@
+# Alpha-SWE 产品化服务编排（方向三）
+# 用法:
+#   docker compose up -d --build server          # 只启动服务（SQLite + 进程内队列）
+#   docker compose --profile infra up -d         # 启动服务 + Redis + Qdrant
+#
+# 说明:
+#   - MVP 默认使用 SQLite + 进程内 asyncio 队列，零外部依赖；
+#   - redis/qdrant 为可选基础设施（profile: infra），供后续
+#     队列外置 / 向量记忆共享使用。
+services:
+  server:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.server
+    image: alphaswe/server:latest
+    container_name: alphaswe-server
+    ports:
+      - "8000:8000"
+    environment:
+      ASWE_DB_PATH: /data/server.db
+      ASWE_WORKSPACE_ROOT: /data/workspaces
+      ASWE_ADMIN_API_KEY: "${ASWE_ADMIN_API_KEY:-}"
+      ASWE_MAX_CONCURRENCY: "${ASWE_MAX_CONCURRENCY:-2}"
+      DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY:-}"
+    volumes:
+      - alphaswe-data:/data
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    profiles: ["infra"]
+    container_name: alphaswe-redis
+    restart: unless-stopped
+    volumes:
+      - alphaswe-redis:/data
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    profiles: ["infra"]
+    container_name: alphaswe-qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    restart: unless-stopped
+    volumes:
+      - alphaswe-qdrant:/qdrant/storage
+
+volumes:
+  alphaswe-data:
+  alphaswe-redis:
+  alphaswe-qdrant:

@@ -1,0 +1,33 @@
+# Alpha-SWE 产品化服务镜像（方向三）
+# 构建: docker build -t alphaswe/server:latest -f docker/Dockerfile.server .
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git curl ca-certificates \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# 先装依赖层（利用构建缓存）
+COPY requirements-server.txt ./
+RUN python -m pip install --no-cache-dir -r requirements-server.txt
+
+# 复制项目代码（含 agent 核心与 server 层）
+COPY . .
+
+# 运行 Agent 时使用的配置与工作区
+ENV ASWE_CONFIG_PATH=/app/config/agent.yaml \
+    ASWE_WORKSPACE_ROOT=/app/server_workspaces \
+    ASWE_DB_PATH=/app/server.db
+
+EXPOSE 8000
+
+# 健康检查：uvicorn 启动后 /healthz 返回 200
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)" || exit 1
+
+CMD ["python", "-m", "uvicorn", "server.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]

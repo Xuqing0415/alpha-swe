@@ -1,0 +1,49 @@
+# Alpha-SWE SWE-bench 基准配置（方向二）
+# 用法: python -m agent run "issue" --config config/swebench.yaml --workspace <repo> --output json
+agent:
+  max_rounds: 40            # SWE-bench 任务通常需要更多轮次
+  max_retries: 3
+  max_concurrency: 1
+  keep_recent_rounds: 3
+  token_threshold: 0.8
+  max_token_limit: 120000   # 单实例 token 预算（官方建议 10 万级）
+  trace_enabled: true
+  archive_enabled: true
+  metrics_enabled: true
+  snapshot_enabled: false
+  regression_check_enabled: true
+  auto_testgen: false
+  mutation_check_enabled: false
+  counterfactual_enabled: true
+  workspace_context_enabled: true   # 注入仓库结构摘要，帮助快速定位
+
+tools:
+  terminal_execute:
+    enabled: true
+    timeout: 120
+  file_ops:
+    enabled: true
+  file_search:
+    enabled: true
+
+sandbox:
+  workspace: "./workspace"
+  docker_enabled: false       # 默认本地工具层；--docker 时由 CLI 打开
+  network_policy: allow       # 允许安装依赖/运行测试（评估环境按实例隔离）
+  no_network: false
+
+context:
+  output_truncate: 8000
+
+memory:
+  backend: hybrid
+  db_path: "memory.db"
+  max_entities: 2000
+
+llm:
+  provider: litellm
+  model: deepseek/deepseek-chat
+  base_url: "https://api.deepseek.com"
+  api_key_env: "DEEPSEEK_API_KEY"
+  temperature: 0.2
+  max_tokens: 4096

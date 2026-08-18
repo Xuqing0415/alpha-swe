@@ -1,0 +1,11 @@
+# Alpha-SWE 服务层依赖（方向三）
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pydantic>=2.6
+PyYAML>=6.0
+SQLAlchemy>=2.0
+httpx>=0.27
+# Agent 运行时依赖
+litellm>=1.40
+docker>=7.0
+psutil>=5.9
