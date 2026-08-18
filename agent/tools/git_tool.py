@@ -90,8 +90,6 @@ class GitTool(Tool):
             except Exception:
                 pass
             raise
-        except Exception as e:
-            raise
         return proc.returncode, _decode(out).strip(), _decode(err).strip()
 
     async def _current_branch(self, workspace: str) -> Optional[str]:

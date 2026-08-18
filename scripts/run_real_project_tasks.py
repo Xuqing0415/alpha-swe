@@ -26,9 +26,9 @@ import stat
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SAMPLE_PROJECT = REPO_ROOT / "tests" / "benchmarks" / "sample_project"

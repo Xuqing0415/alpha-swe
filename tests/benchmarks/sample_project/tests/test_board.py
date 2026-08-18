@@ -2,7 +2,7 @@
 import pytest
 
 from taskboard.board import Board
-from taskboard.models import Priority, Status
+from taskboard.models import Priority
 
 
 def make_board(tmp_path):

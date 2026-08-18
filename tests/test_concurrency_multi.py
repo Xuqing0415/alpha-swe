@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import subprocess
 import sys
 import textwrap
@@ -30,7 +29,6 @@ sys.path.insert(0, REPO_ROOT)
 
 from agent.config import (AgentConfig, AppConfig, MCPOptions, MemoryConfig,
                           SandboxConfig)
-from agent.core.decision_logger import DecisionLogger
 from agent.core.loop import AgentLoop
 from agent.core.task import Task
 from agent.llm import MockLLM
@@ -39,7 +37,6 @@ from agent.memory.store import SqliteMemoryStore
 from agent.multiagent import Blackboard
 from agent.project_lock import ProjectLock, ProjectLockError
 from agent.tools.fileio import FileIOTool
-from agent.tools.manager import ToolManager
 
 
 # ---------------- 跨进程 worker（subprocess 独立解释器，贴近真实多实例） ----------------

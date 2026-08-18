@@ -165,7 +165,6 @@ def summarize_session(doc: Dict[str, Any]) -> Dict[str, Any]:
 
     tool_events = [e for e in events
                    if e.get("type") == "tool_call" and e.get("data")]
-    tool_ok = [e for e in tool_events if e["data"].get("success")]
     tool_fail = [e for e in tool_events if not e["data"].get("success")]
 
     # 首次实际压缩发生的时机：按时间戳找第一条 compression_level 决策，

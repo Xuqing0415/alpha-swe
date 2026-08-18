@@ -1,5 +1,4 @@
 """store 单元测试。"""
-import json
 
 from taskboard.models import Priority, Task
 from taskboard.store import JsonStore

@@ -14,7 +14,7 @@ import sys
 import time
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 
 # 失败行提取：pytest short summary 的 FAILED 行
 PYTEST_FAILED_LINE = re.compile(

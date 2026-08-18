@@ -17,7 +17,7 @@ import time
 from datetime import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from agent.config import AppConfig, load_config, load_mcp_config
 from agent.context.manager import ContextManager
@@ -62,7 +62,7 @@ class TaskPreempted(Exception):
 class TaskBudgetExceeded(Exception):
     """任务资源预算耗尽（进阶 2.3）：token 或时间预算用尽，任务终止。"""
 
-    def __init__(self, kind: str, used: float, budget: float,
+    def __init__(self, kind: str, used: float, budget: float,  # noqa: B042 结构化异常字段
                  report: Optional[Dict[str, Any]] = None,
                  borrowed: float = 0.0):
         super().__init__(
@@ -1526,7 +1526,7 @@ class AgentLoop:
         borrowed = task.metadata.get("_budget_borrowed", 0)
         if used > token_budget + borrowed:
             deficit = used - (token_budget + borrowed)
-            got = self._borrow_budget(task, deficit)
+            self._borrow_budget(task, deficit)
             borrowed = task.metadata.get("_budget_borrowed", 0)
         if used > token_budget + borrowed:
             report = self._budget_report(

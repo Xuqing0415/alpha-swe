@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 """主线三：自我评估与持续进化（3.1 能力画像 / 3.2 改进提议 / 3.3 基准提取 + 集成）。"""
-import json
 from types import SimpleNamespace
 
 from agent.config import (AgentConfig, AppConfig, MCPOptions, MemoryConfig,

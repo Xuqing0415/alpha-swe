@@ -4,8 +4,6 @@
 2.1A 黑板文件级写锁（并发写冲突防护）
 1.1A 三层快照对比（Last_known / Current_disk / Agent_intended）
 """
-import asyncio
-import json
 import os
 from pathlib import Path
 
@@ -268,7 +266,7 @@ async def test_worker_write_blocked_while_other_holds_lock(ws_tmp):
                              '{"final_answer": "done"}'))
     # coder 模拟持有 a.txt 写锁
     assert bb.lock_file(str(ws / "a.txt"), "coder") is True
-    result = await tester.execute_task(
+    await tester.execute_task(
         Task(id="t1", instruction="写入 a.txt"))
     # tester 的写入被拦截：文件未被创建，锁仍由 coder 持有
     assert not (ws / "a.txt").exists()

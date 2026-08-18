@@ -94,13 +94,13 @@ def test_auth_required(api):
 def test_create_users_and_roles(api):
     client, _ = api
     admin_h = _auth(client, ADMIN_KEY)
-    for name, role, key in (("dev", "developer", DEV_KEY),
-                            ("obs", "observer", OBS_KEY)):
+    for name, role, _key in (("dev", "developer", DEV_KEY),
+                             ("obs", "observer", OBS_KEY)):
         r = client.post("/api/v1/users", headers=admin_h,
                         json={"name": name, "role": role})
         assert r.status_code == 201, r.text
         # 覆盖为测试固定 Key：直接删掉随机 key 并注入固定 key
-        uid = r.json()["user"]["id"]
+        r.json()["user"]["id"]
         # 通过 issue_key 拿新 key 不可控，改为审计跳过；直接用 admin 签发
     obs = client.get("/api/v1/users", headers=admin_h).json()
     assert any(u["name"] == "obs" for u in obs)
@@ -110,7 +110,7 @@ def _fixed_key_user(client, admin_h, name, role, key):
     r = client.post("/api/v1/users", headers=admin_h,
                     json={"name": name, "role": role})
     assert r.status_code == 201
-    uid = r.json()["user"]["id"]
+    r.json()["user"]["id"]
     # 用 admin 的 store 无法直连，因此直接调用 auth/token 验证随机 key 可用
     k = r.json()["api_key"]
     assert client.post("/api/v1/auth/token",

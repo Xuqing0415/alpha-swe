@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from agent.core.task import Task, TaskStatus
 from agent.llm import BaseLLM

@@ -1,5 +1,5 @@
 """Task/TaskDAG 测试。"""
-from agent.core.task import Task, TaskDAG, TaskStatus
+from agent.core.task import TaskDAG, TaskStatus
 
 
 def test_create_and_query():

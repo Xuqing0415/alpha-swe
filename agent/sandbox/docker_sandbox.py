@@ -21,7 +21,7 @@ import shlex
 import tarfile
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from agent.config import SandboxConfig
 
@@ -141,8 +141,8 @@ class DockerSandbox:
             "timeout_seconds": self.config.timeout_seconds,
             "volumes": {workspace: {"bind": self.config.workdir,
                                     "mode": self.config.volume_mode}},
-            "tmpfs": {path: "rw,size=64m"
-                      for path in self.config.writable_paths},
+            "tmpfs": dict.fromkeys(self.config.writable_paths,
+                                   "rw,size=64m"),
         }
 
     # ---- 生命周期 ----
@@ -159,17 +159,17 @@ class DockerSandbox:
             spec = self.build_container_spec(workspace)
             image = await self._ensure_image(client, spec["image"])
             self._image = str(getattr(image, "id", spec["image"]))
-            create_kw: Dict[str, Any] = dict(
-                image=spec["image"],
-                detach=True,
-                working_dir=self.config.workdir,
-                network_mode=spec["network_mode"],
-                mem_limit=spec["mem_limit"],
-                nano_cpus=spec["nano_cpus"],
-                read_only=spec["read_only"],
-                volumes=spec["volumes"],
-                tmpfs=spec.get("tmpfs") or None,
-            )
+            create_kw: Dict[str, Any] = {
+                "image": spec["image"],
+                "detach": True,
+                "working_dir": self.config.workdir,
+                "network_mode": spec["network_mode"],
+                "mem_limit": spec["mem_limit"],
+                "nano_cpus": spec["nano_cpus"],
+                "read_only": spec["read_only"],
+                "volumes": spec["volumes"],
+                "tmpfs": spec.get("tmpfs") or None,
+            }
             if self.config.container_name:
                 create_kw["name"] = self.config.container_name
             container = await asyncio.to_thread(

@@ -22,21 +22,19 @@ from __future__ import annotations
 
 import logging
 import os
-import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from server.auth import current_user, require_role
 from server.config import ServerConfig
 from server.events import sse_generator
 from server.models import ApiKeyCreate, SessionCreate, TaskCreate, TokenRequest, UserCreate
-from server.store import (ADMIN_ROLE, DEVELOPER_ROLE, OBSERVER_ROLE, Store,
+from server.store import (ADMIN_ROLE, DEVELOPER_ROLE, Store,
                           User, utc_iso)
 from server.tasks import DONE_EVENT, TaskQueue
 
@@ -266,7 +264,6 @@ def _seed_admin(store: Store, cfg: ServerConfig) -> None:
                 admin, _ = store.create_user("admin", ADMIN_ROLE)
                 # 直接以明文写入自定义 Key 的哈希
                 from server.store import ApiKey, hash_api_key
-                from sqlalchemy.orm import Session as SASession
                 with store.Session() as s:
                     s.add(ApiKey(user_id=admin.id, prefix=key[:8],
                                  key_hash=hash_api_key(key)))
@@ -277,7 +274,7 @@ def _seed_admin(store: Store, cfg: ServerConfig) -> None:
             admin, key = store.create_user("admin", ADMIN_ROLE)
             print("=" * 60, flush=True)
             print(f"[Alpha-SWE] 初始管理员 API Key: {key}", flush=True)
-            print(f"[Alpha-SWE] 角色: admin  用户名: admin", flush=True)
+            print("[Alpha-SWE] 角色: admin  用户名: admin", flush=True)
             print("=" * 60, flush=True)
 
 

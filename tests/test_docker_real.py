@@ -15,10 +15,8 @@
 """
 from __future__ import annotations
 
-import asyncio
 import os
 import stat
-import time
 from pathlib import Path
 
 import pytest
@@ -55,16 +53,16 @@ def _make_workspace() -> Path:
 
 
 def _cfg(ws: Path, **overrides) -> SandboxConfig:
-    kwargs = dict(
-        docker_enabled=True,
-        image=TEST_IMAGE,
-        workspace=str(ws),
-        read_only_root=True,
-        timeout_seconds=30,
-        memory_limit="256m",
-        cpu_limit=1.0,
-        max_snapshots=3,
-    )
+    kwargs = {
+        "docker_enabled": True,
+        "image": TEST_IMAGE,
+        "workspace": str(ws),
+        "read_only_root": True,
+        "timeout_seconds": 30,
+        "memory_limit": "256m",
+        "cpu_limit": 1.0,
+        "max_snapshots": 3,
+    }
     kwargs.update(overrides)
     return SandboxConfig(**kwargs)
 

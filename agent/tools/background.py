@@ -72,13 +72,13 @@ class BackgroundTaskManager:
     # ---- 生命周期 ----
     async def start(self, command: str, workspace: str) -> BackgroundHandle:
         """启动长驻进程；进程意外退出时记录退出码与最后输出。"""
-        kwargs = dict(
-            cwd=workspace,
-            env={**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"},
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+        kwargs = {
+            "cwd": workspace,
+            "env": {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"},
+            "stdin": asyncio.subprocess.DEVNULL,
+            "stdout": asyncio.subprocess.PIPE,
+            "stderr": asyncio.subprocess.PIPE,
+        }
         if os.name == "nt":
             # Windows：cmd /c 直跑，避免 PowerShell 5.1 对原生命令 stdout 的
             # 缓冲延迟（后台长驻进程的输出会一直积压到进程退出才可见）。

@@ -28,7 +28,6 @@ from agent.config import (AgentConfig, AppConfig, ContextConfig, MCPOptions,
 from agent.core.loop import AgentLoop
 from agent.core.task import Task
 from agent.llm import MockLLM
-from agent.tools.base import ErrorCategory, ToolResult
 from agent.tools.fileio import FileIOTool
 from agent.tools.manager import ToolManager
 
@@ -158,7 +157,7 @@ async def _run_chaos_iteration(
     if result.ok:
         try:
             passed = case.verify(ws_tmp)
-        except Exception as e:
+        except Exception:
             passed = False
         graceful = passed  # 恢复后必须真正通过完成标准
         return {"ok": True, "graceful": graceful,
@@ -175,7 +174,7 @@ async def test_chaos_random_stream(ws_tmp):
     """随机故障流：在基准集子集上注入写入故障，验证自动恢复与显式降级。"""
     rng = random.Random(CHAOS_SEED)
     outcomes = []
-    for i in range(CHAOS_ITERATIONS):
+    for _ in range(CHAOS_ITERATIONS):
         case = rng.choice(PY_CASES)
         inject_write = rng.random() < CHAOS_INJECT_RATE
         llm_fail = rng.random() < CHAOS_LLM_FAIL_RATE

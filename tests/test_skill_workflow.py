@@ -1,5 +1,4 @@
 """阶段三测试：技能工作流（YAML 加载/匹配/展开 DAG/热加载/端到端执行/失败回退）。"""
-import asyncio
 from pathlib import Path
 
 import pytest
@@ -7,9 +6,7 @@ import pytest
 from agent.config import (AgentConfig, AppConfig, MCPOptions, MemoryConfig,
                           SandboxConfig, SkillConfig)
 from agent.context.skill import SkillLibrary
-from agent.core.decision_logger import DecisionLogger
 from agent.core.loop import AgentLoop
-from agent.core.task import Task
 from agent.llm import MockLLM
 
 REST_SKILL = """name: add-rest-endpoint

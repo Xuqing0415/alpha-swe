@@ -1,0 +1,37 @@
+﻿name: quality-gate
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "agent/**"
+      - "server/**"
+      - "swe_eval/**"
+      - "scripts/**"
+      - "tests/**"
+      - ".flake8"
+      - ".github/workflows/quality-gate.yml"
+
+jobs:
+  lint:
+    name: flake8 lint gate (F/B/C4/E9)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install linters
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install flake8 flake8-bugbear flake8-comprehensions
+
+      - name: flake8 gate
+        run: |
+          flake8 agent/ swe_eval/ server/ scripts/ tests/ --jobs=1

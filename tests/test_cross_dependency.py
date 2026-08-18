@@ -8,7 +8,6 @@
 - Planner 按复杂度为子任务估算预算；
 - TUI 任务行对依赖等待任务显示「依赖」标记。
 """
-import asyncio
 
 import pytest
 
@@ -127,11 +126,11 @@ def test_render_dependency_tree_ascii_lines():
     """依赖图以 ASCII 连线树渲染：|-- 兄弟 / +-- 末位 / 等依赖标记。"""
     from tui.app import _render_dependency_tree
     dag = TaskDAG()
-    a = dag.create_task("根任务", task_id="a")
+    dag.create_task("根任务", task_id="a")
     b = dag.create_task("依赖A", task_id="b",
                         dependencies=["a"])
-    c = dag.create_task("依赖B", task_id="c",
-                        dependencies=["b"])
+    dag.create_task("依赖B", task_id="c",
+                    dependencies=["b"])
     b.metadata["_waiting_reason"] = "dependency"
     b.mark(TaskStatus.WAITING)
     text = _render_dependency_tree(list(dag.all()))
@@ -150,8 +149,8 @@ def test_render_dependency_tree_cycle_marked():
     from tui.app import _render_dependency_tree
     dag = TaskDAG()
     a = dag.create_task("A", task_id="a")
-    b = dag.create_task("B", task_id="b",
-                        dependencies=["a"])
+    dag.create_task("B", task_id="b",
+                    dependencies=["a"])
     a.dependencies = ["b"]
     text = _render_dependency_tree(list(dag.all()))
     assert "环，见上" in text.plain

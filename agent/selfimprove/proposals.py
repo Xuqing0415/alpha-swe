@@ -332,8 +332,8 @@ class ProposalStore:
         return sorted(proposals, key=lambda p: p.get("seq", 0))
 
     def summary(self) -> Dict[str, int]:
-        counts = {s: 0 for s in (STATUS_PENDING, STATUS_PROMOTED,
-                                 STATUS_REJECTED, STATUS_LOCAL)}
+        counts = dict.fromkeys((STATUS_PENDING, STATUS_PROMOTED,
+                                STATUS_REJECTED, STATUS_LOCAL), 0)
         for p in self._data["proposals"].values():
             s = p.get("status")
             if s in counts:

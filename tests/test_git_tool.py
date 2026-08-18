@@ -1,5 +1,4 @@
 """Git 工具测试（方案 3.4）：只读操作、提交、分支、网络策略拦截。"""
-import asyncio
 import subprocess
 
 import pytest

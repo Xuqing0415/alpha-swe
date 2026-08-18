@@ -13,11 +13,11 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import yaml
 
-from agent.context.skill import Skill, SkillLibrary, SkillParam, SkillStep
+from agent.context.skill import Skill, SkillLibrary, SkillStep
 from agent.core.task import Task
 
 logger = logging.getLogger("alpha-swe.context.skill_author")

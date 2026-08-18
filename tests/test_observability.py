@@ -1,7 +1,6 @@
 """阶段七可观测性测试：Tracer / MetricsRegistry / SessionArchive+Replay。"""
 import json
 
-import pytest
 
 from agent.observability import (MetricsRegistry, SessionArchive, SessionReplay,
                                  Tracer)
@@ -144,7 +143,7 @@ def test_tracer_get_timeline_data_relative():
     assert rows[1]["status"] == "error"
     assert rows[0]["duration"] >= 0
     # 进行中的 span 不出现
-    s3 = tr.start_span("task:running", "task")
+    tr.start_span("task:running", "task")
     rows2 = tr.get_timeline_data()
     assert len(rows2) == 2
 

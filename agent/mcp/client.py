@@ -214,12 +214,12 @@ class MCPClient:
         """
         try:
             return await stack.enter_async_context(agen)
-        except BaseException:
+        except BaseException:  # noqa: B036
             try:
                 import anyio
                 with anyio.CancelScope(shield=True):
                     await agen.aclose()
-            except BaseException:
+            except BaseException:  # noqa: B036
                 pass
             raise
 

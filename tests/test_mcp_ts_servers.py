@@ -4,7 +4,6 @@
 （dist 缺失时自动跳过）。数据文件通过环境变量指向临时目录，避免污染仓库。
 """
 import json
-import sys
 from pathlib import Path
 
 import pytest

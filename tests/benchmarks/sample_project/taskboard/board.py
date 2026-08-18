@@ -1,7 +1,6 @@
 """任务看板核心：Board —— 增删改查 + 搜索过滤 + 统计。"""
 from __future__ import annotations
 
-import re
 from typing import Iterable, List, Optional
 
 from taskboard.models import Priority, Status, Task

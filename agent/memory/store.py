@@ -86,7 +86,7 @@ class MemoryStore(ABC):
         """查找与 text 最相似的已有记忆（写入前去重用）；默认后端不支持。"""
         return []
 
-    def bump(self, memory_id: Any) -> None:
+    def bump(self, memory_id: Any) -> None:  # noqa: B027 可选钩子默认空实现
         """记忆被引用/去重命中时更新使用计数与时间；默认不记录。"""
 
     # ---- 便捷写入（子类复用 remember 即可） ----
@@ -765,7 +765,7 @@ class QdrantMemoryStore(VectorMemoryStore):
                  counter_example_penalty: Optional[float] = None):
         try:
             from qdrant_client import QdrantClient
-            from qdrant_client.models import (Distance, PointStruct,
+            from qdrant_client.models import (PointStruct,
                                               VectorParams)
         except ImportError as e:
             raise RuntimeError("qdrant 后端需要安装 qdrant-client") from e

@@ -87,12 +87,12 @@ def write_mock_config(root, max_tokens: int = 200) -> str:
 
 def make_cli_args(config: str, workspace: str, **over) -> argparse.Namespace:
     """构造 CLI 参数命名空间（等价于 parse_args 的结果）。"""
-    base = dict(
-        command="run", prompt="测试任务", config=config, workspace=workspace,
-        output="json", timeout=None, max_cost=None,
-        cost_per_1k_tokens=cli.DEFAULT_COST_PER_1K, max_tokens=None,
-        disable_docker=True, enable_mcp=False,
-    )
+    base = {
+        "command": "run", "prompt": "测试任务", "config": config, "workspace": workspace,
+        "output": "json", "timeout": None, "max_cost": None,
+        "cost_per_1k_tokens": cli.DEFAULT_COST_PER_1K, "max_tokens": None,
+        "disable_docker": True, "enable_mcp": False,
+    }
     base.update(over)
     return argparse.Namespace(**base)
 

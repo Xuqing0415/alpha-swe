@@ -13,9 +13,7 @@
 """
 from __future__ import annotations
 
-import json
 import logging
-from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -48,7 +46,7 @@ def _category_of(result: Dict[str, Any]) -> str:
 
 def classify_failures(results: List[Dict[str, Any]]) -> Dict[str, int]:
     """统计失败实例的分类计数（含 resolved 行，便于观察占比）。"""
-    counter: Dict[str, int] = {c: 0 for c in _CATEGORY_ORDER}
+    counter: Dict[str, int] = dict.fromkeys(_CATEGORY_ORDER, 0)
     for r in results:
         if r.get("status") == "resolved":
             continue

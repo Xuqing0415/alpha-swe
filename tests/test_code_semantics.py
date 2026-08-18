@@ -103,8 +103,8 @@ def test_js_ts_tree_sitter_call_edges(ws_tmp):
         "function main() { const a = new App(); return a.greet(); }\n",
         encoding="utf-8")
     cg = build_call_graph(str(ws_tmp))
-    assert "run" in [c for c in cg.callees_of("App.greet")]
-    assert "greet" in [c for c in cg.callees_of("main")]
+    assert "run" in list(cg.callees_of("App.greet"))
+    assert "greet" in list(cg.callees_of("main"))
     callers = [c for c, _ in cg.callers_of("run")]
     assert "App.greet" in callers
 

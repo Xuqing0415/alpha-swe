@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from agent.tools.base import ErrorCategory, ExecutionContext, Tool, ToolResult
 

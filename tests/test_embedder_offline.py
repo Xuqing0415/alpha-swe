@@ -6,7 +6,6 @@
 - find_local_model 的本地目录 / HF 缓存识别；
 - 离线环境变量与 huggingface_hub 共享客户端重置。
 """
-from pathlib import Path
 
 import pytest
 

@@ -7,10 +7,10 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any, Dict, List, Optional
+from typing import List, Optional
 
 from agent.config import PlannerConfig
-from agent.core.task import Task, TaskDAG
+from agent.core.task import Task
 from agent.llm import BaseLLM, MockLLM
 
 logger = logging.getLogger("alpha-swe.planner")

@@ -19,7 +19,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import yaml
 
@@ -566,7 +566,7 @@ def _link_blocks(blocks: List[Tuple[str, List[Task]]],
     """串联多个技能块：前一块最后一步 -> 后一块第一步（管道依赖）。"""
     out: List[Task] = []
     prev_last: Optional[Task] = None
-    for name, tasks in blocks:
+    for _name, tasks in blocks:
         if not tasks:
             continue
         if prev_last is not None and tasks[0].dependencies:

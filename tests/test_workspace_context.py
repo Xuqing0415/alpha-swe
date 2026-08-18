@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 """会话间工作流连续性（主线一 1.2）：WorkspaceContext 单测 + 续接提示集成测试。"""
-import json
 from pathlib import Path
 
 import pytest

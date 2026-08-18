@@ -1,6 +1,5 @@
 """阶段五测试：沙箱安全加固（网络细粒度策略/假网络、文件保护、审计回滚、资源熔断）。"""
 import asyncio
-from pathlib import Path
 
 import pytest
 
@@ -145,7 +144,7 @@ async def test_file_audit_records_diff_and_rollback(ws_tmp):
 
 @pytest.mark.asyncio
 async def test_circuit_breaker_kills_memory_hog():
-    psutil = pytest.importorskip("psutil")
+    pytest.importorskip("psutil")
     tool = TerminalTool(resource_monitor=True, memory_limit_mb=150,
                         poll_interval=0.05)
     result = await tool.execute(

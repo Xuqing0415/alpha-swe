@@ -6,12 +6,12 @@ from pathlib import Path
 import pytest
 
 from agent.config import (AgentConfig, AppConfig, MCPOptions, MemoryConfig,
-                          SandboxConfig, WorkerRoleConfig, load_team_config)
+                          SandboxConfig, load_team_config)
 from agent.core.decision_logger import DecisionLogger
 from agent.core.task import Task, TaskDAG
 from agent.llm import MockLLM
-from agent.multiagent import (Blackboard, Message, MsgType, OrchestratorAgent,
-                              TeamPlanner, WorkerAgent)
+from agent.multiagent import (Blackboard, OrchestratorAgent,
+                              TeamPlanner)
 
 
 def make_config(ws_tmp: Path) -> AppConfig:

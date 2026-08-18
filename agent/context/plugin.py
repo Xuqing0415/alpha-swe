@@ -118,7 +118,7 @@ class ProjectContext:
                  profile: Optional["ProjectProfile"] = None,
                  call_graph: Optional["CallGraph"] = None):
         self.files = [str(f) for f in (files or [])]
-        self.deps = set(str(d) for d in (deps or []))
+        self.deps = {str(d) for d in (deps or [])}
         self.root = root
         self.profile = profile
         self.call_graph = call_graph

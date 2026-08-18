@@ -352,12 +352,12 @@ def _mock_config(ws_tmp) -> str:
 
 def _cli_args(cfg_path, workspace, **over):
     from agent import __main__ as cli
-    base = dict(
-        command="run", prompt="触发解析失败", config=str(cfg_path),
-        workspace=str(workspace), output="json", timeout=None, max_cost=None,
-        cost_per_1k_tokens=cli.DEFAULT_COST_PER_1K, max_tokens=None,
-        disable_docker=True, enable_mcp=False,
-    )
+    base = {
+        "command": "run", "prompt": "触发解析失败", "config": str(cfg_path),
+        "workspace": str(workspace), "output": "json", "timeout": None, "max_cost": None,
+        "cost_per_1k_tokens": cli.DEFAULT_COST_PER_1K, "max_tokens": None,
+        "disable_docker": True, "enable_mcp": False,
+    }
     base.update(over)
     return argparse.Namespace(**base)
 

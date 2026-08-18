@@ -120,6 +120,15 @@ def _collect_deps(root: Path) -> Dict[str, Dict[str, str]]:
     return deps
 
 
+def _sha1_file(path: Path) -> str:
+    """文件内容 sha1（分块读取，避免大文件占满内存）。"""
+    digest = hashlib.sha1()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 class ProjectStateTracker:
     """项目状态跟踪器：扫描/对比/持久化项目快照。"""
 
@@ -205,7 +214,7 @@ class ProjectStateTracker:
     def scan(self) -> Dict[str, Any]:
         """当前项目结构 + 依赖清单 + 技术栈。"""
         root = Path(self.workspace)
-        structure: Dict[str, Dict[str, int]] = {}
+        structure: Dict[str, Dict[str, Any]] = {}
         if root.is_dir():
             for p in root.rglob("*"):
                 if not p.is_file():
@@ -221,7 +230,8 @@ class ProjectStateTracker:
                 except OSError:
                     continue
                 structure[rel] = {"mtime_ns": st.st_mtime_ns,
-                                  "size": st.st_size}
+                                  "size": st.st_size,
+                                  "sha1": _sha1_file(p)}
         deps = _collect_deps(root) if root.is_dir() else {}
         return {"structure": structure, "deps": deps,
                 "tech_stack": self._tech_stack(root, list(structure))}
@@ -324,12 +334,20 @@ class ProjectStateTracker:
             return None
         if entry.get("deleted"):
             return None
-        return (entry.get("mtime_ns"), entry.get("size"))
+        if entry.get("sha1"):
+            return ("c", entry["sha1"])
+        return ("m", entry.get("mtime_ns"), entry.get("size"))
 
     @staticmethod
     def _sig_eq(a: Dict[str, Any], b: Dict[str, Any]) -> bool:
         sa, sb = ProjectStateTracker._sig(a), ProjectStateTracker._sig(b)
-        return sa is not None and sa == sb
+        if sa is None or sb is None:
+            return False
+        if sa[0] == "c" and sb[0] == "c":
+            return sa == sb
+        # 至少一侧缺少内容 sha1（旧快照），回退 mtime/size
+        return (a.get("mtime_ns"), a.get("size")) == (
+            b.get("mtime_ns"), b.get("size"))
 
     @staticmethod
     def _same_intent(intent: Dict[str, Any],
@@ -447,8 +465,8 @@ class ProjectStateTracker:
         diff["files"]["removed"] = sorted(old_paths - new_paths)
         diff["files"]["modified"] = sorted(
             p for p in (new_paths & old_paths)
-            if (new_struct[p].get("mtime_ns"), new_struct[p].get("size"))
-            != (old_struct[p].get("mtime_ns"), old_struct[p].get("size")))
+            if not ProjectStateTracker._sig_eq(
+                old_struct[p], new_struct[p]))
         return diff
 
     @staticmethod
@@ -464,8 +482,7 @@ class ProjectStateTracker:
                 changes["files"].append({"path": p, "kind": "added"})
             elif new is None:
                 changes["files"].append({"path": p, "kind": "removed"})
-            elif (old.get("mtime_ns"), old.get("size")) != (
-                    new.get("mtime_ns"), new.get("size")):
+            elif not ProjectStateTracker._sig_eq(old, new):
                 changes["files"].append({"path": p, "kind": "modified"})
         s_deps = start.get("deps", {}) or {}
         c_deps = current.get("deps", {}) or {}

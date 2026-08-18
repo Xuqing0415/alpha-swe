@@ -43,7 +43,6 @@ def test_resolve_workspace_path_rejects_escape(ws_tmp):
 @pytest.mark.asyncio
 async def test_file_search_skips_excluded_dirs(ws_tmp):
     """方案 3.1：搜索跳过 node_modules/.git/__pycache__ 等目录。"""
-    from agent.tools import fileio as fileio_mod
 
     ctx = ExecutionContext(workspace=str(ws_tmp))
     tool = FileIOTool()

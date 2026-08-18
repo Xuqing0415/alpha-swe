@@ -6,7 +6,7 @@ import json
 import sys
 
 from taskboard.board import Board
-from taskboard.models import Priority, Status
+from taskboard.models import Priority
 
 
 def _format_task(t) -> str:

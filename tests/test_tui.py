@@ -1,5 +1,4 @@
 """TUI 测试：事件格式化、事件订阅、终端实时输出桥接、Textual 无头运行。"""
-import asyncio
 import json
 import re
 from pathlib import Path
@@ -756,8 +755,6 @@ async def test_tui_file_tree_toggle_and_search(ws_tmp):
 @pytest.mark.asyncio
 async def test_tui_file_tree_marks_from_tool_call(ws_tmp):
     """tool_call 事件更新文件树修改/活动标记。"""
-    from textual.containers import Vertical
-
     from tui.file_tree import FileTreeView
 
     ws = ws_tmp / "ws"
@@ -819,7 +816,6 @@ async def test_tui_f5_cycles_to_timeline_view(ws_tmp):
     """F5 循环到时间线视图并渲染 tracer span。"""
     from textual.widgets import Static
 
-    from tui.timeline_view import summarize
 
     cfg = make_config(ws_tmp)
     llm = ScriptedLLM('{"final_answer": "完成"}')
