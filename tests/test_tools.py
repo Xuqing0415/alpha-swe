@@ -92,7 +92,7 @@ async def test_terminal_echo(ws_tmp):
 async def test_terminal_timeout(ws_tmp):
     ctx = ExecutionContext(workspace=str(ws_tmp))
     tool = TerminalTool()
-    r = await tool.execute({"command": "Start-Sleep -Seconds 5", "timeout": 1}, ctx)
+    r = await tool.execute({"command": "sleep 5", "timeout": 1}, ctx)
     assert r.success is False
     assert r.metadata.get("timed_out") is True
 

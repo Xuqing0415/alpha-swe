@@ -65,4 +65,5 @@ jobs:
             --ignore=tests/test_fault_injection.py \
             --ignore=tests/test_benchmark_suite.py \
             --ignore=tests/test_real_project_e2e.py \
-            --ignore=tests/test_soak.py
+            --ignore=tests/test_soak.py \
+            --ignore=tests/test_docker_real.py

@@ -49,7 +49,7 @@ def test_error_category_default_and_to_dict():
 async def test_terminal_timeout_classified_transient(ws_tmp):
     ctx = ExecutionContext(workspace=str(ws_tmp))
     tool = TerminalTool(default_timeout=1.0)
-    r = await tool.execute({"command": "Start-Sleep -Seconds 5", "timeout": 1}, ctx)
+    r = await tool.execute({"command": "sleep 5", "timeout": 1}, ctx)
     assert r.success is False
     assert r.metadata.get("timed_out") is True
     assert r.error_category == ErrorCategory.TRANSIENT
@@ -91,9 +91,9 @@ async def test_loop_circuit_breaker_after_three_timeouts(ws_tmp):
     cfg = make_config(ws_tmp)
     # 每次都用同样的慢命令，让 TerminalTool 自管超时（0.5s）快速失败
     llm = ScriptedLLM(
-        '{"tool": "terminal_execute", "params": {"command": "Start-Sleep -Seconds 5", "timeout": 0.5}}',
-        '{"tool": "terminal_execute", "params": {"command": "Start-Sleep -Seconds 5", "timeout": 0.5}}',
-        '{"tool": "terminal_execute", "params": {"command": "Start-Sleep -Seconds 5", "timeout": 0.5}}',
+        '{"tool": "terminal_execute", "params": {"command": "sleep 5", "timeout": 0.5}}',
+        '{"tool": "terminal_execute", "params": {"command": "sleep 5", "timeout": 0.5}}',
+        '{"tool": "terminal_execute", "params": {"command": "sleep 5", "timeout": 0.5}}',
     )
     loop = AgentLoop(config=cfg, llm=llm, planner=StubPlanner())
     result = await loop.run("连续超时熔断测试")
@@ -101,4 +101,4 @@ async def test_loop_circuit_breaker_after_three_timeouts(ws_tmp):
     assert "熔断" in result.final_answer
     task = loop.scheduler.dag.get("t0")
     assert task.metadata.get("_timeout_strikes", {}).get(
-        "terminal:Start-Sleep -Seconds 5") == 3
+        "terminal:sleep 5") == 3
