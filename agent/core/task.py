@@ -167,6 +167,50 @@ class TaskDAG:
         task.mark(status, result=result, error=error)
         return task
 
+    def abort_dependents(self, task_id: str) -> List[Task]:
+        """依赖失败时级联终止所有依赖它的未完成任务，避免调度死等。
+
+        critical 依赖者标 FAILED（失败向上传播），normal/optional 标 SKIPPED
+        （不阻塞其他分支）；被终止任务再递归终止其自身依赖者。
+        """
+        aborted: List[Task] = []
+        stack = [task_id]
+        seen = {task_id}
+        while stack:
+            cur = stack.pop()
+            for t in self._tasks.values():
+                if t.id in seen or cur not in t.dependencies:
+                    continue
+                seen.add(t.id)
+                if t.status in (TaskStatus.IDLE, TaskStatus.WAITING):
+                    t.metadata.pop("_waiting_reason", None)
+                    if (t.criticality or "normal") == "critical":
+                        t.mark(TaskStatus.FAILED,
+                               error=f"前置任务失败（{cur}）已级联终止")
+                    else:
+                        t.mark(TaskStatus.SKIPPED,
+                               error=f"前置任务失败（{cur}）已跳过")
+                    aborted.append(t)
+                stack.append(t.id)
+        return aborted
+
+    def abort_failed_dependencies(self) -> List[Task]:
+        """扫描所有未完成任务，若其任一前置依赖已 FAILED 则级联终止。
+
+        防御性兜底：任何途径（快照恢复 / spawn）产生的“依赖失败仍 WAITING”
+        状态都会被清理，保证 run_to_completion 不会永久挂起。
+        """
+        aborted: List[Task] = []
+        for t in self._tasks.values():
+            if t.status not in (TaskStatus.IDLE, TaskStatus.WAITING):
+                continue
+            for dep_id in t.dependencies:
+                dep = self._tasks.get(dep_id)
+                if dep is not None and dep.status == TaskStatus.FAILED:
+                    aborted.extend(self.abort_dependents(dep.id))
+                    break
+        return aborted
+
     def promote_dependents(self, task_id: str) -> List[Task]:
         """任务完成后，把依赖它的任务提升为 READY（含跨任务依赖等待）。
 

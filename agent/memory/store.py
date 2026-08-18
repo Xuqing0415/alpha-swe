@@ -189,7 +189,14 @@ class SqliteMemoryStore(MemoryStore):
         self.counter_example_penalty = (
             counter_example_penalty if counter_example_penalty is not None else 0.3
         )
-        self._conn = sqlite3.connect(db_path, check_same_thread=False)
+        self._conn = sqlite3.connect(db_path, check_same_thread=False,
+                                     timeout=30)  # busy_timeout 30s
+        # 多实例共享后端：WAL 允许并发读 + 单写者，减少 "database is locked"
+        try:
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA synchronous=NORMAL")
+        except sqlite3.Error:
+            pass
         self._conn.execute("""
             CREATE TABLE IF NOT EXISTS memories (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -327,7 +334,14 @@ class HybridLocalMemoryStore(VectorMemoryStore):
         self.counter_example_penalty = (
             counter_example_penalty if counter_example_penalty is not None else 0.3
         )
-        self._conn = sqlite3.connect(db_path, check_same_thread=False)
+        self._conn = sqlite3.connect(db_path, check_same_thread=False,
+                                     timeout=30)  # busy_timeout 30s
+        # 多实例共享后端：WAL 允许并发读 + 单写者，减少 "database is locked"
+        try:
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA synchronous=NORMAL")
+        except sqlite3.Error:
+            pass
         self._conn.execute("""
             CREATE TABLE IF NOT EXISTS memories (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,

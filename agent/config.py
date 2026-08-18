@@ -83,6 +83,12 @@ class SandboxConfig(BaseModel):
     snapshot_prefix: str = "alphaswe/snap"  # docker commit 快照镜像前缀
     auto_rollback: bool = True              # 任务失败时自动回滚到任务前快照
     container_name: str = ""                # 稳定容器名（空 = docker 自动生成）
+    # 只读根文件系统下仍可写的容器内路径（tmpfs 挂载，默认 /tmp 保证临时文件可用）
+    writable_paths: List[str] = Field(default_factory=lambda: ["/tmp"])
+    # 快照保留上限：超过后自动清理最旧快照镜像（默认 5 个，0 = 不限制）
+    max_snapshots: int = 5
+    # 命令超时强杀后自动重启容器，避免后续 exec 全部失败（默认开启）
+    restart_after_timeout: bool = True
 
     @model_validator(mode="before")
     @classmethod
@@ -193,8 +199,8 @@ class PlannerConfig(BaseModel):
     allow_parallel: bool = True
     split_threshold_complexity: float = 0.0  # 0 = 总是拆分（保持旧行为）
     # 进阶 2.3：预算估算基准（按任务复杂度线性缩放）
-    budget_token_base: int = 10000
-    budget_time_base: float = 300.0
+    budget_token_base: int = 100000
+    budget_time_base: float = 1800.0
 
 
 
@@ -204,7 +210,7 @@ class ContextConfig(BaseModel):
     compression_threshold: float = 0.8
     compression_method: str = "summary"  # summary | vector_retrieval
     archive_dir: str = "./logs/archives"  # 长工具输出归档目录
-    output_truncate: int = 2000  # 工具输出超过该长度触发输出压缩
+    output_truncate: int = 8000  # 工具输出超过该长度触发输出压缩（文件读取应允许显示完整小文件，避免模型反复部分读取）
     # 分级压缩压力阈值（当前 token / max_tokens）：
     # light_threshold 以下不压缩；light 只压工具输出；
     # medium 压缩旧对话（保留决策点）；heavy 递归摘要。
@@ -252,6 +258,9 @@ class AgentConfig(BaseModel):
     max_rounds: int = 30
     max_loop_iterations: Optional[int] = None  # 覆盖 max_rounds（用户方案字段）
     max_retries: int = 3
+    syntax_check_enabled: bool = True  # 写/edit 后 .py 语法校验（即时捕获错误编辑）
+    tool_repeat_limit: int = 5      # 相同工具+参数在窗口内重复出现达该次数即拦截并纠偏
+    tool_repeat_window: int = 15   # 重复检测窗口（最近 N 轮工具调用历史）
     max_timeout_strikes: int = 3  # 同一命令/工具连续超时熔断阈值（方案 2.1）
     snapshot_dir: str = "./logs/snapshots"  # 任务快照目录（方案 1.3 断点续跑）
     snapshot_enabled: bool = True
@@ -267,8 +276,8 @@ class AgentConfig(BaseModel):
     preemption_enabled: bool = True
     # 进阶 2.3：资源预算管理——每任务 token/时间预算（秒）
     budget_enabled: bool = True
-    default_token_budget: int = 10000
-    default_time_budget: float = 300.0
+    default_token_budget: int = 100000
+    default_time_budget: float = 1800.0
     budget_warn_ratio: float = 0.8       # 达到该比例发出告警
     budget_borrow_enabled: bool = True   # 高优先级可借用低优先级未用预算
     parallel_tool_calls: bool = True  # 单次响应多工具是否并行执行
@@ -313,6 +322,10 @@ class AgentConfig(BaseModel):
     # 主线一 1.1/1.2：项目状态感知与会话间工作流连续性（.swe-agent/）
     state_tracker_enabled: bool = True       # 项目状态快照与跨会话差异注入
     workspace_context_enabled: bool = True   # 会话间工作流续接（next_session_hint）
+    # 多实例互斥：同一项目目录同一时刻只允许一个实例操作（跨进程）
+    project_lock_enabled: bool = False       # 默认关闭；多实例部署时开启
+    project_lock_timeout: float = 0.0        # 锁获取超时（秒，0=立即失败）
+    project_lock_holder: str = ""            # 锁持有者标识（空=pid-<pid>）
     # 主线三 3.1-3.3：自我评估与持续进化
     self_improve_enabled: bool = True          # 总开关（能力画像 + 改进循环 + 基准提取）
     capability_enabled: bool = True            # 3.1 能力画像（EWMA 成功率 + 弱项提示）

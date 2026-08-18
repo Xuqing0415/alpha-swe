@@ -1,0 +1,46 @@
+# Alpha-SWE 真实项目实战基准配置
+# 用法: python -m agent run "任务" --config config/benchmark.yaml --workspace <项目目录> --output json
+agent:
+  max_rounds: 30
+  max_retries: 3
+  max_concurrency: 1
+  keep_recent_rounds: 3
+  token_threshold: 0.8
+  max_token_limit: 100000
+  trace_enabled: true
+  archive_enabled: true
+  metrics_enabled: true
+  snapshot_enabled: false
+  regression_check_enabled: true
+  auto_testgen: false
+  mutation_check_enabled: false
+  counterfactual_enabled: true
+
+tools:
+  terminal_execute:
+    enabled: true
+    timeout: 60
+  file_ops:
+    enabled: true
+  file_search:
+    enabled: true
+
+sandbox:
+  workspace: "./workspace"
+  docker_enabled: false
+  network_policy: deny
+  no_network: true
+
+context:
+  output_truncate: 8000   # 允许完整显示小文件，减少模型重复部分读取
+
+memory:
+  backend: hybrid
+  db_path: "memory.db"
+  max_entities: 2000
+
+llm:
+  provider: litellm
+  model: deepseek/deepseek-chat
+  base_url: "https://api.deepseek.com"
+  api_key_env: "DEEPSEEK_API_KEY"

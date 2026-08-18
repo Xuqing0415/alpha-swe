@@ -95,6 +95,20 @@ class DockerSandbox:
             raise RuntimeError("容器未启动（docker_enabled=False 或 start() 未调用）")
         return self._container
 
+    @staticmethod
+    def _shell_cmd(command) -> Any:
+        """把字符串命令包装为 /bin/sh -c，支持 && / | / 重定向等 shell 语法。
+
+        docker exec 不经过 shell（docker-py 用 shlex 拆分字符串），若不包装，
+        所有 shell 语法（管道/重定向/&&）都会失效甚至产生错误文件/目录。
+        """
+        if isinstance(command, list):
+            return command
+        cmd = str(command).strip()
+        if cmd.startswith("/bin/sh ") or cmd.startswith("sh "):
+            return cmd
+        return ["/bin/sh", "-c", cmd]
+
     def _log(self, name: str, config_key: str, config_value: Any, decision: str) -> None:
         if self.decision_logger is not None:
             self.decision_logger.record(name, config_key, config_value, decision)
@@ -127,6 +141,8 @@ class DockerSandbox:
             "timeout_seconds": self.config.timeout_seconds,
             "volumes": {workspace: {"bind": self.config.workdir,
                                     "mode": self.config.volume_mode}},
+            "tmpfs": {path: "rw,size=64m"
+                      for path in self.config.writable_paths},
         }
 
     # ---- 生命周期 ----
@@ -152,6 +168,7 @@ class DockerSandbox:
                 nano_cpus=spec["nano_cpus"],
                 read_only=spec["read_only"],
                 volumes=spec["volumes"],
+                tmpfs=spec.get("tmpfs") or None,
             )
             if self.config.container_name:
                 create_kw["name"] = self.config.container_name
@@ -196,7 +213,7 @@ class DockerSandbox:
 
         def _run():
             return container.exec_run(
-                command, demux=True, workdir=workdir,
+                self._shell_cmd(command), demux=True, workdir=workdir,
                 environment=environment or {},
             )
 
@@ -209,6 +226,8 @@ class DockerSandbox:
                 await asyncio.to_thread(container.kill)
             except Exception as e:
                 logger.warning("kill 容器失败: %s", e)
+            if self.config.restart_after_timeout:
+                await self._restart_after_kill(command)
             return ExecResult(exit_code=-1, stdout="", stderr=f"命令超时({timeout}s)，容器已强制 kill")
         except Exception as e:
             return ExecResult(exit_code=-1, stdout="", stderr=f"容器执行失败: {e}")
@@ -226,9 +245,12 @@ class DockerSandbox:
 
     # ---- 文件操作（限定 workdir，即 /workspace 卷挂载点） ----
     def _container_path(self, rel_path: str) -> str:
-        """相对工作区路径 -> 容器内绝对路径（防穿越）。"""
+        """相对工作区路径 -> 容器内绝对路径（防穿越，含 URL 编码变体）。"""
         clean = str(rel_path).replace(chr(92), "/").lstrip("/")
-        if ".." in clean.split("/"):
+        # 解码 %2e(%2E)=.、%2f(%2F)=/，识别编码后的 ../ 穿越
+        decoded = re.sub(r"%2[eE]", ".", clean)
+        decoded = re.sub(r"%2[fF]", "/", decoded)
+        if ".." in decoded.split("/"):
             raise PermissionError(f"禁止容器内路径穿越: {rel_path}")
         return posixpath.join(self.config.workdir, clean)
 
@@ -252,6 +274,11 @@ class DockerSandbox:
             raise RuntimeError("容器未启动")
         full = self._container_path(rel_path)
         parent = posixpath.dirname(full)
+        if parent and parent != self.config.workdir:
+            await self.exec_run(
+                f"mkdir -p {shlex.quote(parent)}",
+                timeout=min(self.config.timeout_seconds, 30),
+            )
         tar = self._make_tar(posixpath.basename(full), content.encode("utf-8"))
         await asyncio.to_thread(self._container.put_archive, parent, tar)
 
@@ -291,6 +318,59 @@ class DockerSandbox:
             raw = tf.extractfile(member)
             return raw.read().decode("utf-8", errors="replace") if raw else ""
 
+    async def _restart_after_kill(self, command: str) -> None:
+        """超时 kill 后重启容器；失败则标记容器已死，由后续 start() 重建。"""
+        try:
+            await asyncio.to_thread(self._container.restart)
+            self._log("docker.restart", "sandbox.restart_after_timeout", True,
+                      f"超时 kill 后已重启容器: {self._container_id}")
+        except Exception as e:
+            logger.warning("超时后重启容器失败: %s", e)
+            self._log("docker.restart_failed", "sandbox.restart_after_timeout",
+                      True, f"超时后重启容器失败: {str(e)[:120]}")
+            self._container = None
+            self._container_id = ""
+
+    def snapshot_images(self) -> List[str]:
+        """列出快照仓库下的全部镜像 tag（用于清理/统计）。"""
+        if not self.enabled:
+            return []
+        try:
+            images = self._docker().images.list(self.config.snapshot_prefix)
+        except Exception as e:
+            logger.debug("列快照镜像失败: %s", e)
+            return []
+        return [tag for img in images
+                for tag in getattr(img, "tags", [])
+                if tag.startswith(f"{self.config.snapshot_prefix}:")]
+
+    async def cleanup_snapshots(self, keep_last: Optional[int] = None) -> int:
+        """清理多余快照镜像，只保留最近 keep_last 个；返回删除数量。"""
+        if not self.enabled:
+            return 0
+        keep = self.config.max_snapshots if keep_last is None else keep_last
+        if keep <= 0:
+            return 0
+        try:
+            tags = sorted(self.snapshot_images(),
+                          key=lambda t: t.rsplit("-", 1)[-1])
+        except Exception as e:
+            logger.warning("快照清理排序失败: %s", e)
+            return 0
+        stale = tags[:-keep] if len(tags) > keep else []
+        removed = 0
+        for tag in stale:
+            try:
+                await asyncio.to_thread(self._docker().images.remove, tag,
+                                        force=True, noprune=True)
+                removed += 1
+                self._log("docker.snapshot_cleanup", "sandbox.max_snapshots",
+                          self.config.max_snapshots,
+                          f"清理旧快照镜像: {tag}")
+            except Exception as e:
+                logger.warning("清理快照镜像失败 %s: %s", tag, e)
+        return removed
+
     # ---- 快照 / 回滚 ----
     async def snapshot(self, label: str = "snap") -> Optional[str]:
         """docker commit 当前容器为镜像；返回镜像 tag。失败返回 None。"""
@@ -311,6 +391,11 @@ class DockerSandbox:
         self._snapshot_stack.append(tag)
         self._log("docker.snapshot", "sandbox.snapshot_prefix", repo,
                   f"快照 {label} -> {repo}:{tag}")
+        if self.config.max_snapshots > 0:
+            try:
+                await self.cleanup_snapshots()
+            except Exception as e:  # 清理失败不影响快照本身
+                logger.warning("快照自动清理失败: %s", e)
         return tag
 
     async def rollback(self, snapshot: Optional[str] = None) -> bool:

@@ -119,6 +119,43 @@ def test_parser_tool_calls_list():
 # ---- Agent 循环决策点 ----
 
 @pytest.mark.asyncio
+async def test_repeat_tool_call_guard(ws_tmp):
+    """相同工具+参数连续重复调用达阈值时被拦截并注入纠偏，任务仍能继续完成。"""
+    read = ('{"tool_calls": [{"tool": "file_ops", '
+            '"params": {"action": "read", "path": "a.txt"}}]}')
+    cfg = make_config(ws_tmp)
+    cfg.agent.tool_repeat_limit = 2
+    # 3 次相同 read（第 3 次被拦截），第 4 次 final_answer
+    loop = AgentLoop(config=cfg, llm=ScriptedLLM(read, read, read, '{"final_answer": "完成"}'),
+                     planner=StubPlanner())
+    result = await loop.run("读文件 a.txt 并报告")
+    assert result.ok
+    assert any(d["name"] == "tool.repeat_guard" for d in loop._decision.records())
+
+
+@pytest.mark.asyncio
+async def test_syntax_check_after_broken_write(ws_tmp):
+    """write 出语法错误的 .py 时立即被语法校验拦截并反馈，修复后可继续完成。"""
+    bad = ('{"tool_calls": [{"tool": "file_ops", '
+           '"params": {"action": "write", "path": "broken.py", '
+           '"content": "def f(:"}}]}')
+    good = ('{"tool_calls": [{"tool": "file_ops", '
+            '"params": {"action": "write", "path": "broken.py", '
+            '"content": "def f():\\n    return 1"}}]}')
+    cfg = make_config(ws_tmp)
+    cfg.agent.syntax_check_enabled = True
+    cfg.agent.regression_check_enabled = False
+    loop = AgentLoop(config=cfg, llm=ScriptedLLM(bad, good, '{"final_answer": "完成"}'),
+                     planner=StubPlanner())
+    result = await loop.run("写一个 python 文件并修复语法错误")
+    assert result.ok
+    calls = [e for e in loop.events if e.get("type") == "tool_call"]
+    assert calls[0]["data"]["success"] is False
+    assert "语法校验" in calls[0]["data"]["output"]
+    assert calls[1]["data"]["success"] is True
+
+
+@pytest.mark.asyncio
 async def test_parallel_tool_calls_config(ws_tmp):
     tool_calls = ('{"tool_calls": [{"tool": "file_ops", '
                   '"params": {"action": "write", "path": "a.txt", "content": "A"}}, '

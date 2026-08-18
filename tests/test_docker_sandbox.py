@@ -65,7 +65,14 @@ class FakeContainer:
     def exec_run(self, command, demux=False, workdir=None, environment=None,
                  socket=False):
         self.exec_calls.append(command)
-        cmd = str(command).strip()
+        # 模拟 DockerSandbox._shell_cmd：拆出 /bin/sh -c 包装后的原始命令
+        if isinstance(command, list) and len(command) >= 2 \
+                and command[:2] == ["/bin/sh", "-c"]:
+            cmd = str(command[2]).strip()
+        else:
+            cmd = str(command).strip()
+        if cmd.startswith("mkdir "):
+            return FakeExecResult(0, (b"", b""))
         if cmd.startswith("echo "):
             return FakeExecResult(0, (cmd[5:].strip().encode() + b"\n", b""))
         if "sleep" in cmd:
@@ -205,7 +212,7 @@ async def test_exec_run_in_container():
     res = await sb.exec_run("echo hello-docker")
     assert res.exit_code == 0
     assert "hello-docker" in res.stdout
-    assert client._created[0].exec_calls == ["echo hello-docker"]
+    assert client._created[0].exec_calls == [["/bin/sh", "-c", "echo hello-docker"]]
     assert any(dp.name == "docker.exec" for dp in dl.decisions)
 
 
@@ -328,8 +335,8 @@ async def test_loop_routes_terminal_into_container(ws_tmp):
         result = await loop.run("容器任务")
         assert result.ok
         assert docker.running
-        # 终端命令进入了容器（fake exec）
-        assert client._created[-1].exec_calls == ["echo in-container"]
+        # 终端命令进入了容器（fake exec，已包装为 /bin/sh -c）
+        assert client._created[-1].exec_calls == [["/bin/sh", "-c", "echo in-container"]]
         # 任务执行前有快照
         assert client.commits
         assert any(dp.name == "docker.snapshot" for dp in dl.decisions)

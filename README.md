@@ -277,7 +277,23 @@ python -X utf8 examples/quick_demo.py
   不再是「未验证」；缺 Key 时 CLI 快速失败并给出清晰报错。
 - **技能数量**：`skills/skill_manifest.json` 注册 19 个技能定义（3 个 Markdown + 15 个工作流 YAML），
   清单「内置 10 个技能」已过时。
-- **尚未验证（维持清单声明）**：真实 Docker 容器沙箱、多用户/团队共享、>8h 连续运行稳定性。
+- **真实 Docker 容器沙箱**：已在 Docker Desktop 29.6.1 下真实验证（18 项真实 daemon 用例 + 13 项 fake 离线用例全部通过）；
+  报告见 `docs/01-docker-verification.md`，修复了 exec 无 shell 语法/镜像 CMD/tmpfs 格式/路径穿越/超时恢复/快照清理等 6 个真实问题。
+- **多用户/多实例并发**：已验证（项目锁/文件写锁/SQLite WAL 共享记忆、9 项跨进程测试全部通过）；
+  报告见 `docs/02-concurrency-verification.md`，部署指南见 `docs/04-multi-instance-guide.md`。
+- **真实项目长期任务实战**：已在基准项目 `tests/benchmarks/sample_project` 上执行 L1-L4 真实 LLM 任务（报告见 `docs/03-real-project-verification.md`）；
+  运行器 `scripts/run_real_project_tasks.py`、基准配置 `config/benchmark.yaml`。
+- **>8h 连续运行稳定性**：仍未长期现场打卡（保留作为后续项）。
+
+## 真实项目基准实战（方向一 · 阶段 3）
+
+- **基准项目**：`tests/benchmarks/sample_project`（taskboard，21 项 pytest），植入 8 个
+  L1-L4 缺陷/改进点；完成标准用「pytest 全绿 + 内容断言」自动判定。
+- **运行器**：`scripts/run_real_project_tasks.py`（复制项目→真实 LLM 独立子进程执行→
+  端态校验→汇总 `logs/real_project_report.json`）；`--skip-llm` 只校验完成标准（CI 回归用）。
+- **实测（DeepSeek-chat，2026-08-18）**：端态完成率 4/8（L1 2/2、L2 1/2、L3 1/2、L4 0/2），
+  平均 ≈25 万 token/任务。发现并修复：调度器失败依赖死锁、子任务预算过紧、工具输出截断过严、
+  模型重复工具调用空转、写坏 `.py` 无即时反馈（详见 `docs/03-real-project-verification.md`）。
 
 ## 真实项目持续工作（主线一 1.1/1.2）
 

@@ -134,6 +134,12 @@ class Scheduler:
         if task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED,
                            TaskStatus.SKIPPED):
             self.dag.promote_dependents(task.id)
+            if task.status == TaskStatus.FAILED:
+                # 前置失败级联终止依赖者，避免依赖等待死锁
+                aborted = self.dag.abort_dependents(task.id)
+                if aborted:
+                    logger.warning("task %s failed, aborting %d dependents",
+                                   task.id, len(aborted))
             if self._on_snapshot is not None:
                 try:
                     self._on_snapshot()
@@ -159,6 +165,9 @@ class Scheduler:
         self.wake = _wake  # 供外部（后台任务/用户输入）唤醒
 
         while self.dag.pending():
+            # 防御性清理：前置依赖已失败的任务不能永久 WAITING
+            if self.dag.abort_failed_dependencies():
+                continue
             # 进阶 2.1：高优先级任务完成后恢复被抢占的任务
             self.promote_paused()
             ready = self.ready()

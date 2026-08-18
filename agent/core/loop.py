@@ -40,6 +40,7 @@ from agent.planner.planner import Planner
 from agent.prompt.builder import PromptBuilder, estimate_tokens
 from agent.sandbox.audit import FileAuditStore
 from agent.sandbox.docker_sandbox import DockerSandbox
+from agent.project_lock import ProjectLock, ProjectLockError
 from agent.sandbox.policy import SandboxPolicy
 from agent.tools.base import ExecutionContext, ToolResult
 from agent.tools.background import BackgroundTaskTool
@@ -182,6 +183,8 @@ class AgentLoop:
         self.docker = docker_sandbox or DockerSandbox(
             self.config.sandbox, self._decision,
         )
+        # 多实例互斥：项目锁（配置开启时 run() 获取、close() 释放）
+        self.project_lock = None
         self.tools = tools or self._default_tools()
         # 方案 2.4：注入自定义工具集时，从管理器找回后台任务工具，
         # 确保 close() 仍能清理由外部注册的 background_task 实例
@@ -438,6 +441,25 @@ class AgentLoop:
             self._decision.record(
                 "docker_enabled", "sandbox.docker_enabled", True,
                 f"容器状态: {self.docker.status()}",
+            )
+
+        # 多实例互斥：项目锁（另一实例持有时明确拒绝启动）
+        if (self.config.agent.project_lock_enabled
+                and self.project_lock is None):
+            lock = ProjectLock(
+                project_dir=self.config.sandbox.workspace,
+                holder=self.config.agent.project_lock_holder or "",
+            )
+            if not lock.acquire(timeout=self.config.agent.project_lock_timeout):
+                info = lock.holder_info()
+                raise ProjectLockError(
+                    f"项目 {self.config.sandbox.workspace} 正被实例 "
+                    f"{info.get('holder', '?')} (pid={info.get('pid', '?')}) "
+                    f"锁定；请等待其退出或进入只读模式")
+            self.project_lock = lock
+            self._decision.record(
+                "project_lock", "agent.project_lock_enabled", True,
+                f"已获取项目锁（holder={lock.holder}）",
             )
 
         # 启动决策记录：循环上限 / 记忆后端 / 沙箱网络
@@ -923,6 +945,45 @@ class AgentLoop:
                             return
                         continue
                     degenerate_streak = 0
+                    # 重复工具调用保护（窗口化）：同一 tool+params 在最近 N 轮内出现达到阈值即拦截并纠偏。
+                    # 与第一版相比改为窗口统计，避免模型通过交替调用其它工具蹲过“连续重复”检测。
+                    sigs = [self._tool_call_sig(name, params) for name, params in calls]
+                    hist = task.metadata.setdefault("_tool_call_history", [])
+                    intercepted = False
+                    if sigs:
+                        hist.append(sigs[0])
+                        if len(hist) > self.config.agent.tool_repeat_window:
+                            del hist[: len(hist) - self.config.agent.tool_repeat_window]
+                        cur = sigs[0]
+                        count = sum(1 for s in hist if s == cur)
+                        if count >= self.config.agent.tool_repeat_limit:
+                            hist.pop()
+                            rname, rparams = calls[0]
+                            guards = task.metadata.get("_repeat_guards", 0) + 1
+                            task.metadata["_repeat_guards"] = guards
+                            obs = (f"[\u91cd\u590d\u5de5\u5177\u8c03\u7528] \u4f60\u5728\u6700\u8fd1 {len(hist)} \u8f6e\u5185\u5df2\u8c03\u7528\u76f8\u540c\u5de5\u5177\u4e0e\u53c2\u6570 {count} \u6b21\uff08{rname}: "
+                                   f"{json.dumps(rparams, ensure_ascii=False)[:120]}\uff09\uff0c\u7ed3\u679c\u4e0d\u4f1a\u53d8\u5316\u3002"
+                                   f"\u8bf7\u76f4\u63a5\u57fa\u4e8e\u5df2\u6709\u4fe1\u606f\u7ee7\u7eed\uff08\u4fee\u6539\u6587\u4ef6\u6216\u8f93\u51fa final_answer\uff09\uff0c"
+                                   f"\u4e0d\u8981\u91cd\u590d\u8bfb\u53d6/\u6267\u884c\u3002")
+                            task.history.append({"role": "observation", "content": obs})
+                            self._emit("tool_call", task_id=task.id, tool=rname,
+                                       params=rparams, success=False, output=obs[:300])
+                            self.metrics.record_tool_result(False)
+                            self._decision.record(
+                                "tool.repeat_guard", "agent.tool_repeat_limit",
+                                self.config.agent.tool_repeat_limit,
+                                f"相同工具调用在窗口内出现 {count} 次已拦截: {rname}",
+                            )
+                            if guards >= 4:
+                                task.mark(TaskStatus.FAILED,
+                                          error=f"重复工具调用保护：模型在 {guards} \u6b21拦\u622a\u540e\u4ecd\u91cd\u590d\u76f8\u540c\u64cd\u4f5c\uff0c\u5df2\u7ec8\u6b62\u4efb\u52a1")
+                                self.tracer.end_span(task_span, status="error",
+                                                     error=task.error)
+                                self._on_task_failure(task)
+                                return
+                            intercepted = True
+                    if intercepted:
+                        continue
                     parallel = self.config.agent.parallel_tool_calls and len(calls) > 1
                     if parallel:
                         self._decision.record(
@@ -1048,6 +1109,14 @@ class AgentLoop:
                     "搜索用 Select-String，不要使用 bash 语法（如 ls -la / find / cat）。")
         self.prompt_builder.set_exec_env(text)
 
+    @staticmethod
+    def _tool_call_sig(name: str, params: Any) -> str:
+        """工具调用签名：用于连续重复调用检测。"""
+        try:
+            return f"{name}:{json.dumps(params, sort_keys=True, ensure_ascii=False)}"
+        except (TypeError, ValueError):
+            return f"{name}:{str(params)[:200]}"
+
     def _first_degenerate_call(
         self, calls: List[tuple]
     ) -> Optional[Tuple[str, Dict[str, Any], str, str]]:
@@ -1144,6 +1213,32 @@ class AgentLoop:
             result.error = (result.error or "") + (
                 f"（{key} 连续超时 {n} 次，触发熔断，任务中止）")
 
+    @staticmethod
+    def _syntax_check_python(result, params) -> ToolResult:
+        """写/edit 后的 .py 文件进行 Python 语法校验：被破坏时立即返回清晰错误，避免模型在破坏文件上继续无效循环。"""
+        path = str(params.get("path", ""))
+        action = str(params.get("action", ""))
+        if action not in ("write", "edit", "append") or not path.endswith(".py"):
+            return result
+        try:
+            target = Path(result.metadata.get("path") or path)
+            if not target.exists():
+                return result
+            import ast
+            ast.parse(target.read_text(encoding="utf-8-sig"))
+            return result
+        except SyntaxError as e:
+            msg = (f"[\u8bed\u6cd5\u6821\u9a8c] \u4fee\u6539\u540e {Path(path).name} "
+                   f"\u5b58\u5728 Python \u8bed\u6cd5\u9519\u8bef: {e.msg} "
+                   f"\uff08\u884c {e.lineno}, \u5217 {e.offset}\uff09\u3002"
+                   f"\u8bf7\u5148 read \u8be5\u6587\u4ef6\u786e\u8ba4\u5f53\u524d\u5185\u5bb9\uff0c"
+                   f"\u518d\u7528 edit \u6b63\u786e\u4fee\u590d\uff1a\u4ec5\u66ff\u6362\u76ee\u6807\u884c\uff0c"
+                   f"\u4e0d\u8981\u91cd\u590d\u5df2\u6709\u4ee3\u7801\u3002")
+            return ToolResult(success=False, error=msg, output=msg,
+                              metadata=result.metadata)
+        except Exception:
+            return result
+
     async def _run_tool(self, name: str, params: Dict[str, Any],
                         task: Task) -> ToolResult:
         """带确认策略执行单个工具（require_confirmation / auto_approve）。
@@ -1189,6 +1284,8 @@ class AgentLoop:
             )
             if result.success and name == "file_ops":
                 self._note_agent_file_write(params)
+                if self.config.agent.syntax_check_enabled:
+                    result = self._syntax_check_python(result, params)
             if result.metadata.get("timed_out"):
                 self._track_timeout(name, params, task, result)
             # 进阶 3.1：代码写入后自动补齐测试（无测试覆盖时生成 test_*.py）
@@ -1912,6 +2009,12 @@ class AgentLoop:
         self._mcp_connected = False
         if self.docker.running:
             await self.docker.stop()
+        if self.project_lock is not None:
+            try:
+                self.project_lock.release()
+            except Exception:
+                logger.exception("项目锁释放失败")
+            self.project_lock = None
         bg = getattr(self, "_background_tasks", None)
         if bg is not None:
             try:

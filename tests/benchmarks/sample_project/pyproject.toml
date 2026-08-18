@@ -1,0 +1,10 @@
+[project]
+name = "taskboard"
+version = "0.1.0"
+description = "轻量 JSON 任务看板库 + CLI"
+requires-python = ">=3.9"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"

@@ -29,3 +29,8 @@ mcp-servers/*/dist/
 *.qdrant/
 # 本地模型权重（scripts/download_embedding_model.py 下载）
 models/
+
+# 本地 SQLite 记忆库（含 WAL 副产物）
+memory.db
+memory.db-shm
+memory.db-wal
