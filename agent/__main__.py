@@ -26,6 +26,7 @@
     - 非交互式 CLI 默认不连接 MCP 服务器（避免外部依赖阻塞任务），
       需要时用 ``--enable-mcp`` 显式开启；
     - Docker 沙箱沿用配置文件（config/agent.yaml），可用 ``--disable-docker`` 关闭；
+    - 未指定 ``--workspace`` 时默认以当前目录（cwd）为工作区；
     - ``--max-tokens`` 覆盖上下文 token 上限（压缩阈值按配置比例计算）。
 """
 from __future__ import annotations
@@ -125,6 +126,10 @@ def build_config(args: argparse.Namespace) -> AppConfig:
     if args.workspace:
         cfg.sandbox.workspace = str(
             Path(args.workspace).expanduser().resolve())
+    else:
+        # CLI 默认以当前目录为工作区：cd 进项目后直接操作项目文件，
+        # 而不是 ./workspace 沙箱子目录（真实项目场景的预期行为）。
+        cfg.sandbox.workspace = str(Path.cwd().resolve())
     if args.disable_docker:
         cfg.sandbox.docker_enabled = False
     if args.enable_mcp:

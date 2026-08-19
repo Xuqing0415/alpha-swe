@@ -285,3 +285,13 @@ def test_cli_budget_exit_4(ws_tmp, capsys):
     assert payload["status"] == "budget"
     assert payload["ok"] is False
     assert "预算" in payload.get("error", "")
+
+def test_build_config_default_workspace_is_cwd(ws_tmp, monkeypatch):
+    """未传 --workspace 时 CLI 默认以当前目录为工作区（修复真实任务访问不到项目文件）。"""
+    cfg_path = write_mock_config(ws_tmp)
+    args = make_cli_args(cfg_path, None)
+    proj = ws_tmp / "proj"
+    proj.mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(proj)
+    cfg = cli.build_config(args)
+    assert cfg.sandbox.workspace == str(proj.resolve())
