@@ -60,17 +60,17 @@ async def test_git_log_and_commit(repo):
 async def test_git_branch_and_delete(repo):
     tool = GitTool()
     ctx = ExecutionContext(workspace=str(repo))
-    r = await tool.execute({"action": "branch", "branch": "feature/x"}, ctx)
+    r = await tool.execute({"action": "branch", "branch": "feature-x"}, ctx)
     assert r.success, r.error
     r = await tool.execute({"action": "branch"}, ctx)
     assert r.success
-    assert "feature/x" in r.output
+    assert "feature-x" in r.output
     # 删除当前所在分支应被拒绝
-    r = await tool.execute({"action": "branch_delete", "branch": "feature/x"}, ctx)
+    r = await tool.execute({"action": "branch_delete", "branch": "feature-x"}, ctx)
     assert r.success is False
     # 切回 main 后可以删除
     git("checkout", "main", cwd=str(repo))
-    r = await tool.execute({"action": "branch_delete", "branch": "feature/x"}, ctx)
+    r = await tool.execute({"action": "branch_delete", "branch": "feature-x"}, ctx)
     assert r.success, r.error
 
 
