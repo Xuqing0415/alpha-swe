@@ -17,6 +17,7 @@ build/
 workspace/
 .swe-agent/
 .pytest_cache/
+.coverage
 pytest-cache-files-*
 decision_log*.jsonl
 
