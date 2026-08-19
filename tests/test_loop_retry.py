@@ -134,3 +134,56 @@ async def test_loop_retry_respects_zero_budget(ws_tmp):
     task = loop.scheduler.dag.get("t0")
     assert task.retry_count == 0
     assert task.status == TaskStatus.FAILED
+
+@pytest.mark.asyncio
+async def test_retry_resets_rounds_and_auto_upgrades_context(ws_tmp):
+    """轮数耗尽失败重试：轮数重置、上限收缩、自动升级为带上下文的收敛重试。"""
+    cfg = make_config(ws_tmp)  # max_rounds=10
+    loop = AgentLoop(config=cfg, llm=MockLLM(),
+                     planner=StubPlanner(max_retries=2, strategy="immediate"))
+
+    seen = []
+
+    async def worker(task):
+        seen.append(task.round_count)  # 记录每次执行进入时的轮数
+        task.round_count = 10  # 模拟一次执行耗尽全部轮数
+        task.mark(TaskStatus.FAILED, error="超过最大轮数 10")
+
+    wrapped = loop._wrap_with_retry(worker)
+    t = Task(id="t0", instruction="x", max_retries=2,
+             retry_strategy="immediate", criticality="critical")
+    loop.scheduler.submit(t)
+    await wrapped(t)
+    assert t.retry_count == 2
+    # 每次重试进入时轮数都是 0（已重置），证明重试不是空转 no-op
+    assert seen == [0, 0, 0]
+    assert t.metadata["_round_cap"] == 5  # max(5, 10×0.5^2) = 5
+    # 策略性失败自动注入失败原因 + 收敛指令
+    assert any("[上一步失败原因]" in h.get("content", "")
+               for h in t.history)
+    assert any("直接收敛" in h.get("content", "")
+               for h in t.history)
+
+
+@pytest.mark.asyncio
+async def test_loop_stall_guard_aborts_no_progress(ws_tmp):
+    """连续只读无产出达到 stall_abort_rounds 即中止，且先注入收敛提示。"""
+    cfg = make_config(ws_tmp)
+    cfg.agent.stall_warn_rounds = 2
+    cfg.agent.stall_abort_rounds = 4
+    llm = ScriptedLLM(
+        '{"tool": "file_ops", "params": {"action": "read", "path": "a.txt"}}',
+        '{"tool": "file_ops", "params": {"action": "read", "path": "b.txt"}}',
+        '{"tool": "file_ops", "params": {"action": "read", "path": "c.txt"}}',
+        '{"tool": "file_ops", "params": {"action": "read", "path": "d.txt"}}',
+    )
+    loop = AgentLoop(config=cfg, llm=llm,
+                     planner=StubPlanner(max_retries=0))
+    result = await loop.run("无产出中止测试")
+    assert result.ok is False
+    task = loop.scheduler.dag.get("t0")
+    assert task.status == TaskStatus.FAILED
+    assert "无进展" in (task.error or "")
+    assert task.metadata["_stall_rounds"] == 4
+    assert any("收敛提示" in h.get("content", "")
+               for h in task.history)

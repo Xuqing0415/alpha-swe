@@ -267,6 +267,10 @@ class AgentConfig(BaseModel):
     tool_repeat_window: int = 15   # 重复检测窗口（最近 N 轮工具调用历史）
     max_timeout_strikes: int = 3  # 同一命令/工具连续超时熔断阈值（方案 2.1）
     max_denial_strikes: int = 3  # 同类沙箱拦截重复熔断阈值（防无效重试烧预算）
+    retry_rounds_scale: float = 0.5  # 任务重试轮数上限缩放：max_rounds*scale^重试次数（下限 5）
+    budget_borrow_ratio: float = 3.0  # 预算借用上限 = 自身 token 预算 × 该倍数（防无限借用）
+    stall_warn_rounds: int = 12  # 连续 N 轮无产出（无写操作且未收敛）注入收敛提示
+    stall_abort_rounds: int = 24  # 无产出累计达该轮数即中止（低于 max_rounds 30）
     snapshot_dir: str = "./logs/snapshots"  # 任务快照目录（方案 1.3 断点续跑）
     snapshot_enabled: bool = True
     snapshot_keep: int = 5  # 保留最近 N 个快照

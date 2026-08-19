@@ -44,7 +44,7 @@ from agent.project_lock import ProjectLock, ProjectLockError
 from agent.sandbox.policy import SandboxPolicy
 from agent.tools.base import ErrorCategory, ExecutionContext, ToolResult
 from agent.tools.background import BackgroundTaskTool
-from agent.tools.fileio import FileIOTool
+from agent.tools.fileio import WRITE_ACTIONS, FileIOTool
 from agent.tools.git_tool import GitTool
 from agent.tools.manager import ToolManager
 from agent.tools.terminal import TerminalTool
@@ -769,16 +769,29 @@ class AgentLoop:
                     return  # 重试预算耗尽：critical 保持 FAILED，其余转 SKIPPED
                 task.retry_count += 1
                 strategy = task.retry_strategy
+                # 每次重试轮数上限收缩，且重置已用轮数（此前不重置导致重试是空转 no-op）
+                scale = float(getattr(self.config.agent, "retry_rounds_scale", 0.5))
+                task.metadata["_round_cap"] = max(
+                    5, int(self._max_rounds * (scale ** task.retry_count)))
+                task.round_count = 0
+                # 策略性失败（轮数耗尽/中止/熔断/无进展）自动升级为带上下文的收敛重试
+                strategic = any(
+                    k in str(task.error or "") for k in
+                    ("超过最大轮数", "已中止", "熔断", "无进展"))
+                if strategy == "retry_with_context" or strategic:
+                    strategy = "retry_with_context"
                 self._decision.record(
                     "task.retry", "agent.max_retries", task.max_retries,
                     f"任务 {task.id} 第 {task.retry_count} 次重试"
                     f"（策略 {strategy}）: {str(task.error or '')[:120]}",
                 )
                 if strategy == "retry_with_context":
-                    # 把失败原因回写进下一轮 Prompt（对应方案 1.1）
+                    # 把失败原因回写进下一轮 Prompt（对应方案 1.1）+ 收敛指令
                     task.history.append({
                         "role": "user",
-                        "content": f"[上一步失败原因] {task.error}",
+                        "content": (f"[上一步失败原因] {task.error}\n"
+                                    f"请基于已有信息直接收敛：不要重复浏览或重复执行相同检查，"
+                                    f"尽快输出 final_answer。"),
                     })
                 task.mark(TaskStatus.RETRYING)
                 self._emit("task_retry", task_id=task.id,
@@ -864,6 +877,8 @@ class AgentLoop:
         resumed = bool(task.metadata.pop("_resumed", False))
         task.metadata.setdefault("_started_at", time.monotonic())
         task.mark(TaskStatus.RUNNING)
+        round_cap = int(task.metadata.get("_round_cap") or self._max_rounds)
+        task.metadata.setdefault("_stall_rounds", 0)
         if resumed:  # 进阶 2.1：抢占后恢复执行
             self._emit("task_resumed", task_id=task.id,
                        priority=task.priority)
@@ -887,7 +902,7 @@ class AgentLoop:
         degenerate_streak = 0  # 连续空参数工具调用计数（防无效循环）
 
         try:
-            while task.round_count < self._max_rounds:
+            while task.round_count < round_cap:
                 await self._checkpoint(task)
                 task.round_count += 1
 
@@ -1054,6 +1069,42 @@ class AgentLoop:
                     if any(r.metadata.get("waiting") for r in results):
                         task.mark(TaskStatus.WAITING)  # 挂起，释放控制权
                         return
+
+                    # 收敛检测：本轮无任何文件修改即累计"无产出"轮数；
+                    # 达到阈值注入收敛提示，达到中止阈值则中止（防只读浏览空转）
+                    wrote = any(
+                        (name == "file_ops" and params.get("action") in WRITE_ACTIONS
+                         and r.success)
+                        or (name == "git_ops" and params.get("action") in ("commit", "push")
+                            and r.success)
+                        for (name, params), r in zip(calls, results)
+                    )
+                    if wrote:
+                        task.metadata["_stall_rounds"] = 0
+                    else:
+                        stall = int(task.metadata.get("_stall_rounds", 0)) + 1
+                        task.metadata["_stall_rounds"] = stall
+                        warn_n = int(getattr(self.config.agent, "stall_warn_rounds", 12))
+                        abort_n = int(getattr(self.config.agent, "stall_abort_rounds", 24))
+                        if stall == warn_n:
+                            obs = (f"[收敛提示] 你已连续 {stall} 轮没有修改任何文件或输出结论。"
+                                   f"若已掌握足够信息，请直接输出 final_answer；"
+                                   f"若仍需检查，请说明下一步计划并尽快收敛。")
+                            task.history.append({"role": "observation", "content": obs})
+                            self._emit("tool_call", task_id=task.id, tool="stall_guard",
+                                       params={}, success=True, output=obs[:200])
+                            self._decision.record(
+                                "stall.warn", "agent.stall_warn_rounds", warn_n,
+                                f"任务 {task.id} 连续 {stall} 轮无产出，注入收敛提示")
+                        if stall >= abort_n:
+                            task.mark(TaskStatus.FAILED,
+                                      error=f"长时间无进展（连续 {stall} 轮无产出且未收敛），已中止")
+                            self._emit("task_failed", task_id=task.id,
+                                       reason="stall_guard")
+                            self.tracer.end_span(task_span, status="error",
+                                                 error=task.error)
+                            self._on_task_failure(task)
+                            return
                     # 进阶 2.1/2.3：工具调用返回也是安全点，先查预算再查抢占
                     self._maybe_enforce_budget(task)
                     await self._maybe_preempt(task)
@@ -1091,7 +1142,7 @@ class AgentLoop:
                     "content": self.parser.retry_feedback(parsed, parse_failures),
                 })
 
-            task.mark(TaskStatus.FAILED, error=f"超过最大轮数 {self._max_rounds}")
+            task.mark(TaskStatus.FAILED, error=f"超过最大轮数 {round_cap}")
             self.tracer.end_span(task_span, status="error", error=task.error)
             self._on_task_failure(task)
         except TaskBudgetExceeded as e:
@@ -1511,6 +1562,14 @@ class AgentLoop:
         """
         if not self.config.agent.budget_borrow_enabled:
             return 0
+        # 借用上限：累计借用不得超过自身预算 × budget_borrow_ratio（防无限借用烧穿总预算）
+        ratio = float(getattr(self.config.agent, "budget_borrow_ratio", 3.0))
+        own_budget = task.token_budget or self.config.agent.default_token_budget
+        already = int(task.metadata.get("_budget_borrowed", 0))
+        cap = max(0, int(own_budget * ratio) - already)
+        if cap <= 0:
+            return 0
+        deficit = min(deficit, cap)
         borrowed = 0
         candidates = [
             t for t in self.scheduler.dag.all()

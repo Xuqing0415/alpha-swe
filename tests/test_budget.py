@@ -109,6 +109,7 @@ def test_borrow_budget_from_lower_priority(ws_tmp):
     loop = AgentLoop(config=cfg, llm=MockLLM(), planner=StubPlanner())
     high = Task(id="high", instruction="h", priority=10, token_budget=100)
     low = Task(id="low", instruction="l", priority=0, token_budget=10000)
+    cfg.agent.budget_borrow_ratio = 10.0  # 放宽上限以覆盖原始完整借用语义
     loop.scheduler.submit(high)
     loop.scheduler.submit(low)
     high.metadata["_tokens_used"] = 500
@@ -149,3 +150,19 @@ async def test_budget_exhaustion_fails_task_no_retry(ws_tmp):
     assert t.retry_count == 0  # 预算耗尽不进入重试循环
     assert any(e["type"] == "budget_exhausted" for e in loop.events)
     assert t.metadata["budget_report"]
+
+def test_borrow_budget_capped_by_ratio(ws_tmp):
+    """借用上限 = 自身预算 × budget_borrow_ratio，超出则触发预算耗尽。"""
+    cfg = make_config(ws_tmp)
+    cfg.agent.budget_borrow_ratio = 2.0
+    loop = AgentLoop(config=cfg, llm=MockLLM(), planner=StubPlanner())
+    high = Task(id="high", instruction="h", priority=10, token_budget=100)
+    low = Task(id="low", instruction="l", priority=0, token_budget=10000)
+    loop.scheduler.submit(high)
+    loop.scheduler.submit(low)
+    high.metadata["_tokens_used"] = 500
+    got = loop._borrow_budget(high, 400)
+    assert got == 200  # 上限 = 100 × 2 = 200
+    assert high.metadata["_budget_borrowed"] == 200
+    with pytest.raises(TaskBudgetExceeded):
+        loop._maybe_enforce_budget(high)
