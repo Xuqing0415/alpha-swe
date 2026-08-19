@@ -23,6 +23,7 @@ class TerminalTool(BaseTool):
             else:
                 result = subprocess.run(
                     ["/bin/sh", "-c", command], shell=False,
+                    capture_output=True, text=True,
                     timeout=timeout, cwd=kwargs.get("cwd")
                 )
             elapsed = (time.time() - start) * 1000
