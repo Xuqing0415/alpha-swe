@@ -42,7 +42,7 @@ from agent.sandbox.audit import FileAuditStore
 from agent.sandbox.docker_sandbox import DockerSandbox
 from agent.project_lock import ProjectLock, ProjectLockError
 from agent.sandbox.policy import SandboxPolicy
-from agent.tools.base import ExecutionContext, ToolResult
+from agent.tools.base import ErrorCategory, ExecutionContext, ToolResult
 from agent.tools.background import BackgroundTaskTool
 from agent.tools.fileio import FileIOTool
 from agent.tools.git_tool import GitTool
@@ -1041,6 +1041,16 @@ class AgentLoop:
                                              error=task.error)
                         self._on_task_failure(task)
                         return
+
+                    if any(r.metadata.get("denial_broken") for r in results):
+                        task.mark(TaskStatus.FAILED,
+                                  error="同类沙箱拦截重复触发熔断（见上一步观察）")
+                        self._emit("task_failed", task_id=task.id,
+                                   reason="denial_circuit_breaker")
+                        self.tracer.end_span(task_span, status="error",
+                                             error=task.error)
+                        self._on_task_failure(task)
+                        return
                     if any(r.metadata.get("waiting") for r in results):
                         task.mark(TaskStatus.WAITING)  # 挂起，释放控制权
                         return
@@ -1231,6 +1241,36 @@ class AgentLoop:
             result.error = (result.error or "") + (
                 f"（{key} 连续超时 {n} 次，触发熔断，任务中止）")
 
+    def _track_denial(self, name: str, params: Dict[str, Any],
+                      task: Task, result: ToolResult) -> None:
+        """同一任务内同类沙箱拦截重复达到阈值即熔断（防无效重试烧预算）。
+
+        键取拦截错误的稳定类别前缀（去具体路径），不同路径变体仍归为一类；
+        达到阈值后标记 denial_broken，由 _execute_task 中止任务。
+        """
+        key = self._denial_key(result.error or "")
+        strikes = task.metadata.setdefault("_denial_strikes", {})
+        n = int(strikes.get(key, 0)) + 1
+        strikes[key] = n
+        threshold = int(getattr(self.config.agent, "max_denial_strikes", 3))
+        self._decision.record(
+            "denial.strike", "agent.max_denial_strikes", threshold,
+            f"{key} 同类拦截 {n}/{threshold} 次",
+        )
+        if n >= threshold:
+            result.metadata["denial_broken"] = True
+            result.error = (result.error or "") + (
+                f"（{key} 同类沙箱拦截 {n} 次，已熔断——该操作不会成功，"
+                f"请更换策略或输出 final_answer）")
+
+    @staticmethod
+    def _denial_key(error: str) -> str:
+        """沙箱拦截错误的稳定分类键：保留类别前缀，去掉具体路径。"""
+        parts = error.split(":", 2)
+        if len(parts) >= 2 and parts[0].strip() == "沙箱拦截":
+            return "沙箱拦截: " + parts[1].strip()
+        return error.strip()[:48]
+
     @staticmethod
     def _syntax_check_python(result, params) -> ToolResult:
         """写/edit 后的 .py 文件进行 Python 语法校验：被破坏时立即返回清晰错误，避免模型在破坏文件上继续无效循环。"""
@@ -1306,6 +1346,8 @@ class AgentLoop:
                     result = self._syntax_check_python(result, params)
             if result.metadata.get("timed_out"):
                 self._track_timeout(name, params, task, result)
+            if result.error_category == ErrorCategory.PERMISSION:
+                self._track_denial(name, params, task, result)
             # 进阶 3.1：代码写入后自动补齐测试（无测试覆盖时生成 test_*.py）
             generated_test = None
             if result.success and self.config.agent.auto_testgen:
@@ -1327,6 +1369,7 @@ class AgentLoop:
                 elapsed_ms=result.elapsed_ms,
                 timed_out=bool(result.metadata.get("timed_out")),
                 circuit_broken=bool(result.metadata.get("circuit_broken")),
+                denial_broken=bool(result.metadata.get("denial_broken")),
             )
             end_attrs = {}
             if result.output:

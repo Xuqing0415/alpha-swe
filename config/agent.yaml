@@ -2,6 +2,7 @@
 agent:
   max_rounds: 30            # 单任务最大 ReAct 轮数
   max_retries: 3            # 输出解析失败最大重试次数
+  max_denial_strikes: 3     # 同类沙箱拦截重复 3 次触发熔断，避免无效重试烧预算
   token_threshold: 0.8      # 上下文压缩触发阈值
   max_token_limit: 100000
   keep_recent_rounds: 3     # 压缩时保留的最近轮数

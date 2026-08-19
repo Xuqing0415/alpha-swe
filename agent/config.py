@@ -266,6 +266,7 @@ class AgentConfig(BaseModel):
     tool_repeat_limit: int = 5      # 相同工具+参数在窗口内重复出现达该次数即拦截并纠偏
     tool_repeat_window: int = 15   # 重复检测窗口（最近 N 轮工具调用历史）
     max_timeout_strikes: int = 3  # 同一命令/工具连续超时熔断阈值（方案 2.1）
+    max_denial_strikes: int = 3  # 同类沙箱拦截重复熔断阈值（防无效重试烧预算）
     snapshot_dir: str = "./logs/snapshots"  # 任务快照目录（方案 1.3 断点续跑）
     snapshot_enabled: bool = True
     snapshot_keep: int = 5  # 保留最近 N 个快照

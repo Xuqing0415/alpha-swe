@@ -102,3 +102,22 @@ async def test_loop_circuit_breaker_after_three_timeouts(ws_tmp):
     task = loop.scheduler.dag.get("t0")
     assert task.metadata.get("_timeout_strikes", {}).get(
         "terminal:sleep 5") == 3
+
+@pytest.mark.asyncio
+async def test_loop_denial_breaker_after_repeated_sandbox_blocks(ws_tmp):
+    """同类沙箱拦截（不同路径变体）重复 3 次触发熔断，任务 FAILED 而非烧光预算。"""
+    cfg = make_config(ws_tmp)
+    # 三个不同路径变体：重复工具调用保护不会命中，但同类拦截熔断应生效
+    llm = ScriptedLLM(
+        '{"tool": "file_ops", "params": {"action": "read", "path": "C:/Windows/win.ini"}}',
+        '{"tool": "file_ops", "params": {"action": "read", "path": "C:/Windows/notepad.exe"}}',
+        '{"tool": "file_ops", "params": {"action": "read", "path": "C:/Windows/system32/drivers/etc/hosts"}}',
+    )
+    loop = AgentLoop(config=cfg, llm=llm, planner=StubPlanner())
+    result = await loop.run("沙箱拦截熔断测试")
+    assert result.ok is False
+    assert "熔断" in result.final_answer
+    task = loop.scheduler.dag.get("t0")
+    assert task.status.value == "failed"
+    strikes = task.metadata.get("_denial_strikes", {})
+    assert sum(strikes.values()) == 3
