@@ -32,7 +32,9 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pyyaml pydantic jinja2 pytest pytest-asyncio litellm psutil numpy
+          pip install -r requirements-server.txt
+          pip install pytest pytest-asyncio pytest-cov rich textual numpy \
+              scikit-learn mcp jinja2
 
       - name: Chaos stage - benchmark + fault injection + random chaos + soak
         env:
