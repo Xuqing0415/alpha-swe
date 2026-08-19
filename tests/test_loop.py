@@ -1,5 +1,6 @@
 """AgentLoop 端到端测试：脚本化 LLM、解析重试、中断注入。"""
 import asyncio
+import os
 from pathlib import Path
 
 import pytest
@@ -228,14 +229,17 @@ async def test_think_with_tool_executes_and_emits_think(ws_tmp):
 
 
 @pytest.mark.asyncio
-async def test_exec_env_injected_on_windows_fallback(ws_tmp):
-    """非 Docker 回退时应向提示词注入 Windows PowerShell 环境说明。"""
+async def test_exec_env_injected_on_fallback(ws_tmp):
+    """非 Docker 回退时应向提示词注入与实际平台匹配的执行环境说明。"""
     cfg = make_config(ws_tmp)
     llm = ScriptedLLM('{"final_answer": "完成"}')
     loop = AgentLoop(config=cfg, llm=llm, planner=StubPlanner())
     await loop.run("环境说明测试")
     assert loop.prompt_builder.exec_env
-    assert "PowerShell" in loop.prompt_builder.exec_env
+    if os.name == "nt":
+        assert "PowerShell" in loop.prompt_builder.exec_env
+    else:
+        assert "bash" in loop.prompt_builder.exec_env or "/bin/sh" in loop.prompt_builder.exec_env
 
 
 @pytest.mark.asyncio

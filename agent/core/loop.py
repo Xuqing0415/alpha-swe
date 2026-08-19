@@ -1182,10 +1182,14 @@ class AgentLoop:
         if getattr(self.docker, "running", False):
             text = ("沙箱为 Linux（Docker 容器）：shell 为 bash (/bin/sh)，"
                     "支持 && / || / 管道与 POSIX 工具（ls、grep、find、cat 等）。")
-        else:
+        elif os.name == "nt":
             text = ("本机为 Windows PowerShell 5.1：不支持 && 与 ||，命令之间请用 ; 分隔；"
                     "路径分隔符用 \\；列目录用 Get-ChildItem，读文件用 Get-Content，"
                     "搜索用 Select-String，不要使用 bash 语法（如 ls -la / find / cat）。")
+        else:
+            text = ("本机为 Linux/macOS 原生 Shell（bash/sh）：支持 && / || / 管道与 "
+                    "POSIX 工具（ls、grep、find、cat 等），路径分隔符用 /，"
+                    "不要使用 PowerShell 语法（如 Get-ChildItem / Select-String）。")
         self.prompt_builder.set_exec_env(text)
 
     @staticmethod

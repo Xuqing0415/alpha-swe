@@ -1,5 +1,7 @@
 """执行引擎可靠性测试（方案 2.1/4.1）：错误分类、超时安全网、连续超时熔断。"""
 import asyncio
+import json
+import os
 from pathlib import Path
 
 import pytest
@@ -108,11 +110,18 @@ async def test_loop_denial_breaker_after_repeated_sandbox_blocks(ws_tmp):
     """同类沙箱拦截（不同路径变体）重复 3 次触发熔断，任务 FAILED 而非烧光预算。"""
     cfg = make_config(ws_tmp)
     # 三个不同路径变体：重复工具调用保护不会命中，但同类拦截熔断应生效
-    llm = ScriptedLLM(
-        '{"tool": "file_ops", "params": {"action": "read", "path": "C:/Windows/win.ini"}}',
-        '{"tool": "file_ops", "params": {"action": "read", "path": "C:/Windows/notepad.exe"}}',
-        '{"tool": "file_ops", "params": {"action": "read", "path": "C:/Windows/system32/drivers/etc/hosts"}}',
-    )
+    # 必须用各平台真正“越界”的绝对路径：Windows 用 C:/Windows，POSIX 用 /etc
+    if os.name == "nt":
+        denial_paths = ["C:/Windows/win.ini", "C:/Windows/notepad.exe",
+                        "C:/Windows/system32/drivers/etc/hosts"]
+    else:
+        denial_paths = ["/etc/passwd", "/etc/hostname", "/usr/bin/env"]
+    llm = ScriptedLLM(*[
+        json.dumps({"tool": "file_ops",
+                    "params": {"action": "read", "path": p}},
+                   ensure_ascii=False)
+        for p in denial_paths
+    ])
     loop = AgentLoop(config=cfg, llm=llm, planner=StubPlanner())
     result = await loop.run("沙箱拦截熔断测试")
     assert result.ok is False
