@@ -11,14 +11,16 @@
 - 时间预算耗尽；
 - _retry_available 对预算耗尽任务返回 False。
 """
+import json
 import time
 from pathlib import Path
 
 import pytest
 
 from agent.config import (MCPOptions, AgentConfig, AppConfig,
-                          MemoryConfig, SandboxConfig)
+                          MemoryConfig, PlannerConfig, SandboxConfig)
 from agent.core.loop import AgentLoop, TaskBudgetExceeded
+from agent.planner.planner import Planner
 from agent.core.task import Task, TaskDAG, TaskStatus
 from agent.llm import MockLLM
 
@@ -85,12 +87,16 @@ def test_budget_warning_emitted(ws_tmp):
         e["type"] == "budget_warning" and e["data"]["kind"] == "token"
         for e in loop.events
     )
-    # 超过 100% -> 借用无来源 -> 抛预算耗尽
+    # 超过 100% -> 借用无来源 -> 宽限两次后抛预算耗尽
     t.metadata["_tokens_used"] = 2000
+    loop._maybe_enforce_budget(t)  # 宽限 1：注入收敛指令
+    loop._maybe_enforce_budget(t)  # 宽限 2
     with pytest.raises(TaskBudgetExceeded) as ei:
-        loop._maybe_enforce_budget(t)
+        loop._maybe_enforce_budget(t)  # 第 3 次检测：硬失败
     assert ei.value.kind == "token"
     assert ei.value.report
+    # 宽限期间已向上下文注入收敛指令
+    assert any("预算已耗尽" in h.get("content", "") for h in t.history)
 
 
 def test_time_budget_exhaustion(ws_tmp):
@@ -139,7 +145,8 @@ async def test_budget_exhaustion_fails_task_no_retry(ws_tmp):
 
     cfg = make_config(ws_tmp)
     llm = ScriptedLLM(
-        '{"tool": "file_ops", "params": {"action": "read", "path": "nope.py"}}'
+        '{"tool": "file_ops", "params": {"action": "read", "path": "nope.py"}}',
+        '{"tool": "file_ops", "params": {"action": "read", "path": "nope2.py"}}',
     )
     loop = AgentLoop(config=cfg, llm=llm, planner=BudgetPlanner())
     result = await loop.run("预算测试")
@@ -164,5 +171,46 @@ def test_borrow_budget_capped_by_ratio(ws_tmp):
     got = loop._borrow_budget(high, 400)
     assert got == 200  # 上限 = 100 × 2 = 200
     assert high.metadata["_budget_borrowed"] == 200
+    loop._maybe_enforce_budget(high)  # 宽限 1
+    loop._maybe_enforce_budget(high)  # 宽限 2
     with pytest.raises(TaskBudgetExceeded):
-        loop._maybe_enforce_budget(high)
+        loop._maybe_enforce_budget(high)  # 硬失败
+
+
+@pytest.mark.asyncio
+async def test_budget_grace_allows_final_answer(ws_tmp):
+    """预算耗尽宽限一轮：模型按指令直接输出 final_answer 可正常完成。"""
+
+    class BudgetPlanner:
+        async def plan(self, prompt, context=""):
+            return [Task(id="t0", instruction=prompt, token_budget=1,
+                         time_budget=3600, criticality="critical")]
+
+    cfg = make_config(ws_tmp)
+    llm = ScriptedLLM(
+        '{"tool": "file_ops", "params": {"action": "read", "path": "nope.py"}}',
+        '{"final_answer": "预算内收敛"}',
+    )
+    loop = AgentLoop(config=cfg, llm=llm, planner=BudgetPlanner())
+    result = await loop.run("预算宽限测试")
+    assert result.ok
+    assert result.final_answer == "预算内收敛"
+    t = loop.scheduler.dag.get("t0")
+    assert t.status == TaskStatus.COMPLETED
+    assert t.metadata.get("_budget_grace", 0) >= 1
+    assert any("预算已耗尽" in h.get("content", "") for h in t.history)
+
+
+def test_planner_clamps_llm_budget_override():
+    """LLM 自设预算收敛到规则估算的 [0.5x, 4x] 区间，防极端值。"""
+    planner = Planner(config=PlannerConfig())
+    raw = json.dumps([{
+        "instruction": "读取 README",
+        "token_budget": 999999,
+        "time_budget": 999999,
+    }])
+    tasks = planner._parse_plan("```json\n" + raw + "\n```")
+    assert len(tasks) == 1
+    est, secs = Planner._estimate_budget("读取 README", PlannerConfig())
+    assert 0 < tasks[0].token_budget <= int(est * 4)
+    assert 0 < tasks[0].time_budget <= secs * 4.0

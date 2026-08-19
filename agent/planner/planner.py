@@ -214,10 +214,15 @@ class Planner:
                 token_budget = int(item.get("token_budget") or tokens)
             except (TypeError, ValueError):
                 token_budget = tokens
+            # LLM 自设预算不可靠（实测出现 67500/80000 的随意大值）：
+            # 收敛到规则估算的 [0.5x, 4x] 区间，防极端预算烧穿成本
+            token_budget = max(int(tokens * 0.5),
+                               min(token_budget, int(tokens * 4)))
             try:
                 time_budget = float(item.get("time_budget") or seconds)
             except (TypeError, ValueError):
                 time_budget = seconds
+            time_budget = max(60.0, min(time_budget, seconds * 4.0))
             tasks.append(Task(
                 id=f"t{i}",
                 instruction=instruction,

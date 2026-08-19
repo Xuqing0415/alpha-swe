@@ -1629,6 +1629,13 @@ class AgentLoop:
                 f"任务 {task.id} token 预算 {used}/{token_budget}"
                 f"（{pct}%，达到告警阈值）",
             )
+            # 告警注入模型上下文：让模型知道预算紧张，尽快收敛
+            task.history.append({
+                "role": "user",
+                "content": (f"[预算警告] token 预算已用 {used}/{token_budget}"
+                            f"（{pct}%）。请立即收敛：不要再重复浏览或执行多余检查，"
+                            f"尽快基于已有信息输出 final_answer。"),
+            })
         if (not task.metadata.get("_time_warned")
                 and elapsed >= time_budget * warn_ratio):
             task.metadata["_time_warned"] = True
@@ -1649,6 +1656,29 @@ class AgentLoop:
             self._borrow_budget(task, deficit)
             borrowed = task.metadata.get("_budget_borrowed", 0)
         if used > token_budget + borrowed:
+            grace = int(task.metadata.get("_budget_grace", 0))
+            if grace < 2:
+                # 预算宽限：前两次检测只注入"立即收敛"指令并放行一轮，
+                # 给模型机会输出 final_answer，避免关键任务在进展中被硬杀
+                # 导致级联失败（成本仅多一轮 LLM 调用）
+                task.metadata["_budget_grace"] = grace + 1
+                if grace == 0:
+                    task.history.append({
+                        "role": "user",
+                        "content": ("[预算已耗尽] 本轮禁止再调用任何工具，"
+                                    "必须直接输出 final_answer 结束任务。"),
+                    })
+                    self._emit("budget_warning", task_id=task.id,
+                               kind="token", used=used,
+                               budget=token_budget,
+                               pct=int(used / token_budget * 100)
+                               if token_budget else 0,
+                               grace=True)
+                    self._decision.record(
+                        "budget.grace", "agent.budget_enabled", True,
+                        f"任务 {task.id} 预算耗尽，宽限一轮要求立即收敛",
+                    )
+                return
             report = self._budget_report(
                 task, used, token_budget, elapsed, time_budget, borrowed)
             raise TaskBudgetExceeded(
