@@ -295,3 +295,11 @@ def test_build_config_default_workspace_is_cwd(ws_tmp, monkeypatch):
     monkeypatch.chdir(proj)
     cfg = cli.build_config(args)
     assert cfg.sandbox.workspace == str(proj.resolve())
+
+def test_read_prompt_strips_bom_and_warns_mojibake(monkeypatch, capsys):
+    """stdin 携带 BOM / 中文被替换为 ? 时：剥 BOM、返回内容并给出管道编码警告。"""
+    monkeypatch.setattr("sys.stdin",
+                        io.StringIO("\ufeff? README ?????\n"))
+    prompt = cli.read_prompt(argparse.Namespace(prompt=None))
+    assert prompt == "? README ?????"
+    assert "编码" in capsys.readouterr().err

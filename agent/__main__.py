@@ -27,6 +27,8 @@
       需要时用 ``--enable-mcp`` 显式开启；
     - Docker 沙箱沿用配置文件（config/agent.yaml），可用 ``--disable-docker`` 关闭；
     - 未指定 ``--workspace`` 时默认以当前目录（cwd）为工作区；
+    - stdin 中文任务描述在 Windows PowerShell 5.1 管道下可能被替换为
+      ``?``（US-ASCII 编码），检测到时会给出警告；建议直接传位置参数。
     - ``--max-tokens`` 覆盖上下文 token 上限（压缩阈值按配置比例计算）。
 """
 from __future__ import annotations
@@ -149,7 +151,18 @@ def read_prompt(args: argparse.Namespace) -> str:
     if args.prompt and args.prompt != "-":
         return args.prompt
     data = sys.stdin.read()
-    prompt = data.strip()
+    prompt = data.strip().lstrip("\ufeff")
+    # Windows PowerShell 5.1 管道默认 $OutputEncoding=US-ASCII，
+    # 中文会被替换成 '?'（并常带 BOM）；检测疑似乱码并给出可操作提示，
+    # 避免把损坏的任务描述喂给模型（信息已丢失，无法恢复，只能提示）。
+    if "\ufeff" in data or prompt.count("?") >= 3:
+        print(
+            "[警告] 任务描述疑似存在管道编码问题（中文被替换为 ?）。"
+            "建议改用位置参数：python -m agent run \"任务描述\"；"
+            "或先执行：$OutputEncoding = [Console]::OutputEncoding = "
+            "[Text.Encoding]::UTF8",
+            file=sys.stderr,
+        )
     if not prompt:
         raise UsageError("未提供任务描述：请传位置参数，或通过 stdin 输入")
     return prompt
