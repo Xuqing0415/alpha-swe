@@ -79,7 +79,7 @@ class PlannerAgent:
             cmd = params.get("command", "")
             # 权限不足 -> 尝试 sudo 替代
             if "Permission denied" in str(error):
-                logger.info(f"[Planner] 权限不足，尝试替代方案")
+                logger.info("[Planner] 权限不足，尝试替代方案")
                 return {
                     "action": "terminal_execute",
                     "description": f"替代命令（原命令: {cmd}）",

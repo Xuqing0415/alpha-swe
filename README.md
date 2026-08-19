@@ -30,7 +30,7 @@ config/
 └── aggressive.yaml     A/B 对比激进配置（17 项关键参数取反）
 scripts/analyze_decisions.py  决策日志分析：列出已生效/未生效配置项
 examples/quick_demo.py  脚本化 LLM 的端到端演示
-tests/                  新核心测试（569 项，含故障注入/浸泡/混沌/基准集）
+tests/                  新核心测试（760 项，含故障注入/浸泡/混沌/基准集）
 loop.py, scheduler.py, ... 旧版七层原型（保留，作为对照参考）
 ```
 

@@ -215,7 +215,7 @@ class TerminalUI:
         status_text = Text()
         status_text.append("Alpha-SWE 状态\n", style="bold underline")
         status_text.append(f"\n步骤: {d['step']}")
-        status_text.append(f"\n状态: ", style="white")
+        status_text.append("\n状态: ", style="white")
         status_text.append(d["status"], style=f"bold {d['status_color']}")
         status_text.append(f"\n当前操作: {d['current_action']}")
         if d.get("trace_id"):
@@ -226,7 +226,7 @@ class TerminalUI:
         d = self.data
         plan_text = Text("计划栈:\n", style="bold")
         if d["plan_stack"]:
-            for i, p in enumerate(d["plan_stack"][-8:]):
+            for p in d["plan_stack"][-8:]:
                 icon = "✓" if "done" in str(p).lower() else "○"
                 plan_text.append(f"\n{icon} {str(p)[:60]}")
         else:

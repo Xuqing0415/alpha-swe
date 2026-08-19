@@ -1,0 +1,19 @@
+# Alpha-SWE 最小配置示例 —— 只需覆盖关键键即可启动，其余全部使用内置默认值。
+# 用法: python -m agent run "任务描述" --config config/minimal.yaml --workspace ./workspace
+# 说明: 完整出厂默认值见 config/agent.yaml；零 API Key 离线演示用 config/offline.yaml。
+agent:
+  max_rounds: 10
+  max_retries: 2
+
+sandbox:
+  workspace: "./workspace"
+  docker_enabled: false
+  network_policy: deny
+
+memory:
+  backend: hybrid
+  embedder: tfidf
+
+llm:
+  provider: mock
+  model: mock

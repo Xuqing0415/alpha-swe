@@ -100,7 +100,7 @@ def install_tui_logging(verbose: bool = False,
             root.addHandler(JsonLinesLogHandler(
                 json_log_dir, session_id=_SESSION_ID))
         except Exception:
-            logger.warning("结构化 JSONL 日志初始化失败")
+            logging.getLogger(__name__).warning("JSONL 结构化日志初始化失败")
     return bridge
 
 

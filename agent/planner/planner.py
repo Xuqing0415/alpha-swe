@@ -111,7 +111,7 @@ class Planner:
                                                 capability_profile,
                                                 recommended_files_block)},
             ])
-            tasks = self._parse_plan(raw, prompt)
+            tasks = self._parse_plan(raw)
             if tasks:
                 logger.info("规划完成: %d 个子任务", len(tasks))
                 if self.decision_logger is not None:
@@ -184,7 +184,7 @@ class Planner:
         score += min(0.25, sum(1 for t in triggers if t in text) * 0.06)
         return round(min(1.0, score), 3)
 
-    def _parse_plan(self, raw: str, fallback_prompt: str) -> List[Task]:
+    def _parse_plan(self, raw: str) -> List[Task]:
         m = re.search(r"```(?:json)?\s*(\[[\s\S]*?\])\s*```", raw)
         json_text = m.group(1) if m else re.search(r"\[[\s\S]*\]", raw)
         if not json_text:

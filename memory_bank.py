@@ -162,7 +162,7 @@ class MemoryBank:
         # 构建压缩摘要
         lines = ["[记忆摘要] 以下为历史关键实体:"]
         entity_types = {}
-        for etype, name, meta, count in rows:
+        for etype, name, _meta, _count in rows:
             entity_types.setdefault(etype, []).append(name)
 
         for etype, names in entity_types.items():

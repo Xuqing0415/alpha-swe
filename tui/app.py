@@ -22,7 +22,7 @@ import logging
 import time
 import uuid
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from rich.text import Text
 from textual import work
@@ -48,7 +48,7 @@ from tui.file_tree import FileTreeView
 from tui.timeline_view import TimelineDetailScreen, TimelineView
 from tui.messages import (AgentEventMessage, AgentFinishedMessage,
                           AgentStartedMessage, ConfirmationRequestMessage,
-                          TerminalOutputMessage)
+                          LogMessage, TerminalOutputMessage)
 
 logger = logging.getLogger("alpha-swe.tui")
 
@@ -1260,7 +1260,6 @@ class AlphaSWEApp(App[None]):
                 style="cyan")
             text.append("\n")
         self._append_thought(text)
-        self._append_thought(Text("\n".join(lines), style="bright_black"))
 
     def _handle_priority(self, rest: str) -> None:
         """/priority <task_id> <n>：调整任务优先级（抢占判定立即生效）。"""
@@ -1326,7 +1325,7 @@ class AlphaSWEApp(App[None]):
             tree = self.query_one("#file-tree", FileTreeView)
             title = self.query_one("#file-tree-title", Label)
             count = tree.selection_count()
-            title.update(f"文件树（/ 搜索" +
+            title.update("文件树（/ 搜索" +
                          (f" · 已选 {count}" if count else "") + "）")
         except Exception:
             pass
@@ -1487,7 +1486,7 @@ class AlphaSWEApp(App[None]):
             self._append_thought(Text("未挂载日志桥，无法切换过滤级别",
                                       style="yellow"))
             return
-        lvl = handler.cycle_level()
+        handler.cycle_level()
         self._append_thought(Text(
             f"日志级别过滤: {handler.level_label()}"
             f"（Ctrl+L 继续切换，全量日志仍在 logs/tui.log）",

@@ -3,6 +3,29 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+# 更新日志
+
+本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
+版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
+
+## [0.2.0] - 2026-08-19
+
+### 修复
+- TUI：修复 `tui/app.py` 中 `Dict`/`LogMessage` 未定义、残留引用未定义 `lines` 的死代码、
+  未使用变量等 NameError 隐患；`tui/logbridge.py` 修复未定义 `logger` 导致的异常路径崩溃。
+- Planner：移除 `_parse_plan` 从未使用的 `fallback_prompt` 参数。
+- 旧版七层原型：清理 f-string 缺失占位符（F541）与未使用循环变量（B007）。
+- CI：`chaos.yml` 补齐 `mcp`/`scikit-learn` 依赖（修复 chaos-stage 探针批量失败）；
+  `chaos.yml`/`quality-gate.yml` 增加 `concurrency` 取消旧 run 与最小权限 `permissions`。
+
+### 新增
+- 测试：新增 `tests/test_database_cloud_tools.py` 与 `tests/test_memory_edge.py`（45 例），
+  覆盖数据库工具安全策略、云 CLI 超时/降级、记忆后端边界路径，核心模块覆盖率提升至约 85%。
+- 配置：新增 `config/minimal.yaml` 最小配置样例（配合完整样例 `config/agent.yaml`）。
+
+### 质量
+- 全仓 flake8（F/B/C4/E9）零告警；vulture 死代码扫描仅剩上下文管理器协议必需参数（误报）。
+- `pip-audit` 依赖漏洞扫描：运行时与测试依赖均无已知漏洞。
 ## [0.1.0] - 2026-08-18
 
 ### 新增

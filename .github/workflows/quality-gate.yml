@@ -1,5 +1,14 @@
 name: quality-gate
 
+# 同一个 ref 上多个 push 时，旧 run 直接取消，省 CI
+concurrency:
+  group: quality-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+# 最小权限：lint/test 都不需要写仓库
+permissions:
+  contents: read
+
 on:
   workflow_dispatch:
   push:

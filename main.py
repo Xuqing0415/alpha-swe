@@ -207,7 +207,7 @@ def main():
                         result = loop.run(user_input)
 
                     print(f"\n{'=' * 60}")
-                    print(f"  Alpha-SWE 回答:")
+                    print("  Alpha-SWE 回答:")
                     print(f"{'=' * 60}")
                     print(result)
                     print(f"{'=' * 60}\n")
@@ -235,13 +235,13 @@ def main():
                 result = loop.run(args.prompt)
 
             print(f"\n{'=' * 60}")
-            print(f"  Alpha-SWE 回答:")
+            print("  Alpha-SWE 回答:")
             print(f"{'=' * 60}")
             print(result)
             print(f"{'=' * 60}")
 
             # 打印统计信息
-            print(f"\n--- 统计信息 ---")
+            print("\n--- 统计信息 ---")
             print(f"总轮次: {loop.state.round_count}")
             print(f"总步骤: {loop.state.total_steps}")
             print(f"完成步骤: {loop.state.completed_steps}")

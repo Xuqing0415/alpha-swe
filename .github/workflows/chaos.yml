@@ -1,5 +1,15 @@
 name: chaos-stage
 
+# 避免 push 频繁时旧 run 浪费 CI 分钟；
+# schedule 触发时也会复用同一个 group，但极少与 push 同帧撞车，可接受。
+concurrency:
+  group: chaos-stage-${{ github.ref }}
+  cancel-in-progress: true
+
+# 最小权限：当前 step 都不需要写
+permissions:
+  contents: read
+
 on:
   workflow_dispatch:
   schedule:
