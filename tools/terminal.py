@@ -13,7 +13,7 @@ class TerminalTool(BaseTool):
         start = time.time()
         try:
             # Windows 使用 PowerShell（shell=False，避免 cmd 引号转义问题）；
-            # Unix/Linux 使用系统 shell。
+            # Unix/Linux 使用 /bin/sh -c（显式 argv，避免隐式 shell 拼接）。
             if os.name == "nt":
                 result = subprocess.run(
                     ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
@@ -22,7 +22,7 @@ class TerminalTool(BaseTool):
                 )
             else:
                 result = subprocess.run(
-                    command, shell=True, capture_output=True, text=True,
+                    ["/bin/sh", "-c", command], shell=False,
                     timeout=timeout, cwd=kwargs.get("cwd")
                 )
             elapsed = (time.time() - start) * 1000
