@@ -78,8 +78,11 @@ class CloudTool(Tool):
             try:
                 raw = await asyncio.wait_for(proc.communicate(), timeout=timeout)
             except asyncio.TimeoutError:
-                proc.kill()
-                await proc.communicate()
+                try:
+                    proc.kill()
+                    await proc.communicate()
+                except Exception:
+                    pass
                 return ToolResult(
                     success=False, error=f"命令超时（{timeout:.0f}s）",
                     error_category=ErrorCategory.TRANSIENT)

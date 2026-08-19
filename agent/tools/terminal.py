@@ -206,13 +206,13 @@ class TerminalTool(Tool):
                     return total
 
         monitor_task = asyncio.create_task(_monitor()) if self.resource_monitor else None
+        out_task = asyncio.create_task(_read_stream(proc.stdout))
+        err_task = asyncio.create_task(_read_stream(proc.stderr))
+        reader_tasks = [out_task, err_task]
+        if monitor_task is not None:
+            reader_tasks.append(monitor_task)
         try:
-            out_task = asyncio.create_task(_read_stream(proc.stdout))
-            err_task = asyncio.create_task(_read_stream(proc.stderr))
-            tasks = [out_task, err_task]
-            if monitor_task is not None:
-                tasks.append(monitor_task)
-            await asyncio.wait_for(asyncio.gather(*tasks), timeout=timeout)
+            await asyncio.wait_for(asyncio.gather(*reader_tasks), timeout=timeout)
             await asyncio.wait_for(proc.wait(), timeout=timeout)
         except asyncio.TimeoutError:
             proc.terminate()
@@ -221,6 +221,14 @@ class TerminalTool(Tool):
             except asyncio.TimeoutError:
                 proc.kill()
                 await proc.wait()
+            for t in reader_tasks:
+                if not t.done():
+                    t.cancel()
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*reader_tasks, return_exceptions=True), timeout=2)
+            except asyncio.TimeoutError:
+                pass
             return ToolResult(
                 success=False,
                 error=f"命令超时（{timeout}s）并被终止: {command}",

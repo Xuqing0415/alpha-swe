@@ -51,6 +51,7 @@ class BackgroundHandle:
     start_ts: float = field(default_factory=time.time)
     exit_code: Optional[int] = None
     crash_error: Optional[str] = None
+    reader_tasks: List[asyncio.Task] = field(default_factory=list)
 
     def status(self) -> str:
         if self.proc is not None and self.proc.returncode is None:
@@ -120,6 +121,8 @@ class BackgroundTaskManager:
         if proc.returncode is None:
             await self._kill_tree(proc)
             await asyncio.wait_for(proc.wait(), timeout=10)
+        # 取消并等待 reader tasks，避免事件循环关闭后子进程对象 __del__ 报错
+        await self._cancel_reader_tasks(handle)
         # 用户主动停止的进程视为正常退出（非崩溃）
         handle.exit_code = 0
         handle.crash_error = None
@@ -133,6 +136,24 @@ class BackgroundTaskManager:
             except Exception:
                 pass
         self._tasks.clear()
+
+    async def _cancel_reader_tasks(self, handle: BackgroundHandle) -> None:
+        """取消并等待 stdout/stderr/wait 读取任务，防止循环关闭后资源泄漏。"""
+        current = asyncio.current_task()
+        tasks = [
+            t for t in getattr(handle, "reader_tasks", [])
+            if isinstance(t, asyncio.Task) and not t.done() and t is not current
+        ]
+        if not tasks:
+            return
+        for t in tasks:
+            t.cancel()
+        try:
+            await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=2)
+        except asyncio.TimeoutError:
+            pass
+        except Exception:
+            pass
 
     # ---- 查询 ----
     def list_tasks(self) -> List[str]:
@@ -173,6 +194,8 @@ class BackgroundTaskManager:
             handle.crash_error = (
                 f"后台任务意外退出（exit_code={code}）\n最后输出:\n{tail}"
             )
+        # 进程结束后取消其他读取任务，避免事件循环关闭时残留 task
+        await self._cancel_reader_tasks(handle)
 
     async def _kill_tree(self, proc) -> None:
         """Windows 用 taskkill /T /F 强杀整棵进程树，Unix 用 SIGKILL。"""

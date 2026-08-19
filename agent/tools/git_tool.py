@@ -87,6 +87,7 @@ class GitTool(Tool):
         except asyncio.TimeoutError:
             try:
                 proc.kill()
+                await proc.wait()
             except Exception:
                 pass
             raise

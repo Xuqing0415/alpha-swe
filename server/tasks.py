@@ -264,6 +264,11 @@ class TaskQueue:
         except asyncio.TimeoutError:
             try:
                 proc.terminate()
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=5)
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    await proc.wait()
             except Exception:
                 pass
             self._procs.pop(record.id, None)
