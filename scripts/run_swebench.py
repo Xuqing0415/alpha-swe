@@ -104,7 +104,20 @@ def main(argv=None) -> int:
 
     # 1) 加载并固定子集
     if args.instances:
-        instances = load_instances_file(args.instances)
+        try:
+            instances = load_instances_file(args.instances)
+        except FileNotFoundError:
+            print(
+                f"实例文件不存在: {args.instances}\n"
+                "请先用以下任一方式生成子集：\n"
+                f"  A) 官方导出 JSONL（需已有文件）: 直接指向该文件重跑本命令\n"
+                f"  B) HuggingFace 拉取并固化 20 条（需 pip install datasets）：\n"
+                f"     python -X utf8 scripts/run_swebench.py --hf swe-bench-lite "
+                f"--max-instances 20 --seed 42 --save-subset {args.instances}\n"
+                "  C) 参考 docs/05-swebench-benchmark.md 的生成说明",
+                file=sys.stderr,
+            )
+            return 2
     else:
         hf_name = {"swe-bench": "princeton-nlp/SWE-bench",
                    "swe-bench-lite": "princeton-nlp/SWE-bench_Lite"}[args.hf]

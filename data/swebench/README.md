@@ -5,8 +5,10 @@
 
 ## 子集文件
 
-- `swebench_subset_50.json`（预期）：固定 50 个实例的流行式子集。
-  数据集需要自行下载/准备（见下），本目录只提供生成脚本与批注。
+- `../swebench_lite_20.jsonl`（已固化）：seed=42 从 SWE-bench_Lite test
+  抽出的 20 个实例，可直接 `--instances data/swebench_lite_20.jsonl` 运行。
+- `swebench_subset_50.json`（预期）：固定 50 个实例的流行式子集，
+  按下方方式 B 生成即可。
 
 ## 再生成方法（结果可复现）
 

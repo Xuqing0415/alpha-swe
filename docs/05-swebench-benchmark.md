@@ -19,14 +19,15 @@
 
 ```powershell
 # 1) 准备 20 个实例的子集（两种方式选一）
-#    方式 A：官方导出 JSONL（任意来源，离线可用）
+#    方式 A：HuggingFace 拉取 + 固定种子（推荐，需 pip install datasets，
+#            首次会下载数据集；--save-subset 把子集固化为 data/swebench_lite_20.jsonl）
+python -X utf8 scripts/run_swebench.py --hf swe-bench-lite `
+    --max-instances 20 --seed 42 --save-subset data/swebench_lite_20.jsonl
+
+#    方式 B：官方导出 JSONL（任意来源，离线可用，需先自行准备该文件；
+#            例如官方 SWE-bench 导出或把上方生成的子集复制到目标路径）
 python -X utf8 scripts/run_swebench.py --instances data/swebench_lite_20.jsonl `
     --results-dir logs/swebench/run1 --max-parallel 1 --timeout 1800
-
-#    方式 B：HuggingFace 拉取 + 固定种子（需 pip install datasets，首次下载数据集）
-python -X utf8 scripts/run_swebench.py --hf swe-bench-lite `
-    --max-instances 20 --seed 42 --save-subset data/swebench_lite_20.jsonl `
-    --results-dir logs/swebench/run1
 ```
 
 运行前确保：
