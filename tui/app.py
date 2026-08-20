@@ -59,6 +59,8 @@ _NARROW_WIDTH = 100
 # 渲染仍由 0.5s 定时器兜底，避免突发事件导致 TUI 卡顿。
 _EVENT_REFRESH_MIN_INTERVAL = 0.1
 _MAIN_VIEWS = ["log", "diff", "metrics", "timeline", "bg"]
+# diff 主区有界缓冲：视图隐藏时不直写 RichLog（否则 deferred renders 无限累积）
+_DIFF_BUFFER_MAX = 1000
 _PHASE_COLORS = {
     "idle": "bright_black", "planning": "cyan", "ready": "cyan",
     "running": "yellow", "waiting": "yellow",
@@ -554,6 +556,7 @@ class AlphaSWEApp(App[None]):
         self._main_view = "log"
         self._diff_path = ""  # 最近一次文件变更（D 键切换用）
         self._diff_lines: List[Text] = []
+        self._diff_buffer: List[Any] = []  # diff 主区缓冲（有界，见 _DIFF_BUFFER_MAX）
         self._terminal_diff_mode = False  # 终端区显示 diff 而非原始输出
         self._left_view = "tasks"  # 左侧面板：任务 / 文件树
         self._tree_modified: set = set()  # 被 Agent 修改过的文件
@@ -592,7 +595,7 @@ class AlphaSWEApp(App[None]):
                 with Vertical(id="main-area"):
                     yield VirtualLog(id="main-log")
                     yield RichLog(id="diff-log", highlight=True, markup=True,
-                                  wrap=True, auto_scroll=True)
+                                  wrap=True, auto_scroll=True, max_lines=1000)
                     yield Static("", id="metrics-view", markup=True)
                     yield TimelineView(id="timeline-view")
                     yield Static("", id="bg-view", markup=True)
@@ -784,7 +787,20 @@ class AlphaSWEApp(App[None]):
                 f"{tool} {_short(params, 120)}", style="dim"))
 
     def _append_diff(self, renderable) -> None:
-        self.query_one("#diff-log", RichLog).write(renderable)
+        self._diff_buffer.append(renderable)
+        if len(self._diff_buffer) > _DIFF_BUFFER_MAX:
+            self._diff_buffer = self._diff_buffer[-_DIFF_BUFFER_MAX:]
+        # 只在 diff 主区实际显示时直写；隐藏期写入会进 RichLog 的
+        # _deferred_renders 且不渲染不裁剪（无限累积），故改为有界缓冲
+        if self._main_view == "diff":
+            self.query_one("#diff-log", RichLog).write(renderable)
+
+    def _flush_diff_log(self) -> None:
+        """进入 diff 主区视图时从有界缓冲重放（先清空避免重复累积）。"""
+        log = self.query_one("#diff-log", RichLog)
+        log.clear()
+        for line in self._diff_buffer:
+            log.write(line)
 
     def _apply_terminal_view(self) -> None:
         """按当前模式刷新终端区：文件变更 diff 或原始终端输出。"""
@@ -1513,6 +1529,8 @@ class AlphaSWEApp(App[None]):
         self._main_view = _MAIN_VIEWS[(idx + 1) % len(_MAIN_VIEWS)]
         self.query_one("#main-log", VirtualLog).display = self._main_view == "log"
         self.query_one("#diff-log", RichLog).display = self._main_view == "diff"
+        if self._main_view == "diff":
+            self._flush_diff_log()
         self.query_one("#metrics-view", Static).display = (
             self._main_view == "metrics")
         self.query_one("#timeline-view", TimelineView).display = (
