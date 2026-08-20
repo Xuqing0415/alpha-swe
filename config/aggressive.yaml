@@ -26,6 +26,7 @@ context:
   max_tokens: 2000            # 极小上下文窗口
   compression_threshold: 0.5  # 更早触发压缩
   compression_method: vector_retrieval
+  compression_safety_margin: 1.15  # 估算 token 安全边际（防低估导致压缩过晚）
 
 memory:
   backend: none               # 禁用长期记忆

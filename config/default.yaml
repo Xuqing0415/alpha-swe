@@ -42,6 +42,7 @@ context:
   max_tokens: 8000
   compression_threshold: 0.8
   compression_method: summary
+  compression_safety_margin: 1.15  # 估算 token 安全边际（触发/分级用 估算值×系数，防低估）
 
 memory:
   backend: hybrid             # none | sqlite | hybrid | chroma | qdrant

@@ -58,7 +58,8 @@ class ContextManager:
                  output_truncate: int = 2000,
                  light_threshold: float = 0.8,
                  medium_threshold: float = 0.9,
-                 heavy_threshold: float = 1.05):
+                 heavy_threshold: float = 1.05,
+                 token_safety_margin: float = 1.0):
         self.keep_recent_rounds = keep_recent_rounds
         # 新配置（ContextConfig）优先；旧参数保持兼容
         self.token_threshold = (
@@ -75,6 +76,9 @@ class ContextManager:
         self.light_threshold = light_threshold
         self.medium_threshold = medium_threshold
         self.heavy_threshold = heavy_threshold
+        # 估算 token 安全边际：触发/分级用 估算值×系数（生产路径由
+        # config.context.compression_safety_margin 驱动，默认 1.15）
+        self.token_safety_margin = max(1.0, token_safety_margin)
         # 白名单：非空时只激活列出的技能/插件（对应配置 active_skills / active_plugins）
         self.active_skills = list(active_skills or [])
         self.active_plugins_config = list(active_plugins or [])
@@ -119,17 +123,24 @@ class ContextManager:
         return "\n".join(parts)
 
     def should_compact(self, history: List[Dict[str, Any]]) -> bool:
-        total = sum(estimate_tokens(str(h.get("content", ""))) for h in history)
+        total = self._estimate_total(history)
         threshold = int(self.max_token_limit * self.token_threshold)
         if total > threshold:
             if self.decision_logger is not None:
                 self.decision_logger.record(
                     "trigger_compression", "context.compression_threshold",
                     self.token_threshold,
-                    f"触发压缩: {total} > {threshold} tokens",
+                    "触发压缩: %d(安全边际x%.2f) > %d tokens"
+                    % (total, self.token_safety_margin, threshold),
                 )
             return True
         return False
+
+    def _estimate_total(self, history: List[Dict[str, Any]]) -> int:
+        """估算历史 token 并乘以安全边际（防低估超窗）。"""
+        raw = sum(estimate_tokens(str(h.get("content", "")))
+                  for h in history)
+        return int(raw * self.token_safety_margin)
 
     # ---- 分级压缩（对应设计 11 节：light / medium / heavy） ----
     def _compression_level(self, total_tokens: int) -> str:
@@ -205,9 +216,7 @@ class ContextManager:
         if len(history) <= self.keep_recent_rounds:
             return ""
         self.compression_count += 1
-        before_tokens = sum(
-            estimate_tokens(str(h.get("content", ""))) for h in history
-        )
+        before_tokens = self._estimate_total(history)
         old = history[: -self.keep_recent_rounds]
         recent = history[-self.keep_recent_rounds:]
         level = self._compression_level(before_tokens)

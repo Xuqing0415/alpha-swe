@@ -219,6 +219,7 @@ class AgentLoop:
             light_threshold=self.config.context.light_threshold,
             medium_threshold=self.config.context.medium_threshold,
             heavy_threshold=self.config.context.heavy_threshold,
+            token_safety_margin=self.config.context.compression_safety_margin,
         )
         self.memory = memory or (build_layered_memory(self.config.memory, project_key=self.config.sandbox.workspace) if self.config.memory.layered else build_memory(self.config.memory))
         self.memory_creator = memory_creator or ""

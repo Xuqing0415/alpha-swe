@@ -6,6 +6,7 @@ System Prompt(角色/规则) + Tool Descriptions(JSON Schema)
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Dict, List, Optional
 
 from jinja2 import Environment, BaseLoader
@@ -15,10 +16,19 @@ from agent.core.task import Task
 from agent.prompt import templates
 
 
+# CJK 统一表意文字/扩展 A、假名、谚文、CJK 标点、全角形式
+_CJK_RE = re.compile(
+    r"[\u3000-\u303f\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff"
+    r"\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]"
+)
+
+
 def estimate_tokens(text) -> int:
     """粗略估算 token 数（中文约 1 字/token，英文约 1.3 词/token）。
 
     支持 str 或消息列表 [{"role": ..., "content": ...}]：列表自动拼接 content。
+    对 CJK 按单字符计（约 1 token/字），其余保持 max(词数, 字符数//2) 的
+    原估算，避免中文内容被低估一半导致压缩迟迟不触发（排查方案 2.4）。
     """
     if not isinstance(text, str):
         parts = []
@@ -27,7 +37,11 @@ def estimate_tokens(text) -> int:
             if content:
                 parts.append(str(content))
         text = "".join(parts)
-    return max(len(text.split()), len(text) // 2)
+    if not text:
+        return 0
+    cjk = len(_CJK_RE.findall(text))
+    rest = _CJK_RE.sub("", text)
+    return cjk + max(len(rest.split()), len(rest) // 2)
 
 
 class PromptBuilder:

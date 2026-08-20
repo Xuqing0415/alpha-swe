@@ -215,6 +215,9 @@ class ContextConfig(BaseModel):
     max_tokens: int = 8000
     compression_threshold: float = 0.8
     compression_method: str = "summary"  # summary | vector_retrieval
+    # 估算 token 的安全边际：触发/分级决策使用 估算值×系数，防止估算器
+    # 低估导致超窗才触发压缩（排查方案 2.4）
+    compression_safety_margin: float = 1.15
     archive_dir: str = "./logs/archives"  # 长工具输出归档目录
     output_truncate: int = 8000  # 工具输出超过该长度触发输出压缩（文件读取应允许显示完整小文件，避免模型反复部分读取）
     # 分级压缩压力阈值（当前 token / max_tokens）：
