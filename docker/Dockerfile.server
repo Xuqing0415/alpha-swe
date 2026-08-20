@@ -1,6 +1,6 @@
 # Alpha-SWE 产品化服务镜像（方向三）
 # 构建: docker build -t alphaswe/server:latest -f docker/Dockerfile.server .
-FROM python:3.11-slim
+FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
     DEBIAN_FRONTEND=noninteractive

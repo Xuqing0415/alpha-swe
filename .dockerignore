@@ -1,0 +1,56 @@
+# ===== 运行时无关：依赖与本地环境 =====
+.venv
+**/node_modules
+**/__pycache__
+*.pyc
+*.pyo
+*.egg-info
+dist
+build
+
+# ===== 数据与运行时产物（镜像内会重新生成）=====
+.git
+.gitignore
+.idea
+.vscode
+.workbuddy
+.swe-agent
+.pytest_cache
+.mypy_cache
+logs
+test_workspace
+workspace
+server_workspaces
+*.db
+*.db-shm
+*.db-wal
+*.chroma
+*.qdrant
+memory.db
+memory.db-*
+server.db
+.coverage
+pytest-cache-files-*
+
+# ===== 本地模型权重（运行时按需下载，不打包）=====
+models
+
+# ===== 开发/测试/文档（镜像只跑服务，不需要）=====
+tests
+test_all.py
+scripts
+swe_eval
+examples
+docs
+benchmarks
+data
+.github
+vscode-extension
+
+# ===== 仓库元文件 =====
+README.md
+CHANGELOG.md
+ROADMAP.md
+LICENSE
+CODE_OF_CONDUCT.md
+CONTRIBUTING.md

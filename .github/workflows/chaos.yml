@@ -16,7 +16,20 @@ on:
     # UTC 18:00 = 北京时间次日 02:00，每日跑一次混沌回归
     - cron: "0 18 * * *"
   push:
+    branches: [master]
     paths:
+      # 被测核心（chaos 实际演练的是 agent.core）
+      - "agent/**"
+      # 混沌/压测阶段自身用例
+      - "tests/test_benchmark_suite.py"
+      - "tests/test_fault_injection.py"
+      - "tests/test_chaos_smoke.py"
+      - "tests/test_real_project_e2e.py"
+      - "tests/test_soak.py"
+      - ".github/workflows/chaos.yml"
+  pull_request:
+    paths:
+      - "agent/**"
       - "tests/test_benchmark_suite.py"
       - "tests/test_fault_injection.py"
       - "tests/test_chaos_smoke.py"
@@ -39,12 +52,19 @@ jobs:
           python-version: "3.12"
           cache: "pip"
 
+      # benchmark 套件含 js/ts 用例，verify 阶段会调用 `node --check`，
+      # 显式安装 node 避免依赖镜像预装，保证跨 runner 行为一致。
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements-server.txt
           pip install pytest pytest-asyncio pytest-cov rich textual numpy \
-              scikit-learn mcp jinja2
+            scikit-learn mcp jinja2 psutil
 
       - name: Chaos stage - benchmark + fault injection + random chaos + soak
         env:
