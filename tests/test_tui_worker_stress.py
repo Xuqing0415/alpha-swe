@@ -217,8 +217,6 @@ async def test_tui_worker_direct_burst_no_loss(ws_tmp, monkeypatch):
             "events": n, "elapsed_s": round(elapsed, 3),
             "events_per_sec": round(rate, 1), "refresh_calls": len(calls),
         }
-        print(f"\n[direct_burst] events={n} elapsed={elapsed:.3f}s "
-              f"rate={rate:.0f}/s refresh={len(calls)}")
 
 
 @pytest.mark.asyncio
@@ -255,8 +253,6 @@ async def test_tui_worker_burst_source_throughput(ws_tmp, monkeypatch):
             "events": n, "elapsed_s": round(elapsed, 3),
             "events_per_sec": round(rate, 1), "refresh_calls": len(calls),
         }
-        print(f"\n[burst_source] events={n} elapsed={elapsed:.3f}s "
-              f"rate={rate:.0f}/s refresh={len(calls)}")
 
 
 @pytest.mark.asyncio
@@ -301,10 +297,6 @@ async def test_tui_worker_buffers_bounded(ws_tmp, monkeypatch):
         assert terminal_buf <= _TERMINAL_MAX, f"terminal 缓冲超限: {terminal_buf}"
         assert vlog_rows <= _VLOG_MAX + 100, f"VirtualLog 超限: {vlog_rows}"
         assert term_rows <= 1000 + 100, f"terminal-log 未裁剪: {term_rows}"
-        print(f"\n[buffers] events={n} elapsed={elapsed:.3f}s "
-              f"terminal_buf={terminal_buf} vlog={vlog_rows} "
-              f"diff_buf={diff_buf} diff_visible={diff_rows} "
-              f"terminal_log={term_rows}")
 
 
 def test_tui_worker_stress_summary():
