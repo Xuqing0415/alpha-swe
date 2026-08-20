@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from swe_eval.dataset import (Instance, load_instances_file,
+from swe_eval.dataset import (Instance, _run_git, load_instances_file,
                               repo_dir_name, save_instances_jsonl,
                               select_subset)
 
@@ -77,6 +77,17 @@ def test_invalid_jsonl_raises(ws_tmp):
     path.write_text("not json\n", encoding="utf-8")
     with pytest.raises(ValueError):
         load_instances_file(path)
+
+
+def test_run_git_without_cwd():
+    # 回归：cwd=None 时不得传 cwd="None"，否则 Windows 抛 WinError 267
+    proc = _run_git(["version"])
+    assert proc.returncode == 0
+
+
+def test_run_git_with_cwd(ws_tmp):
+    proc = _run_git(["version"], cwd=ws_tmp)
+    assert proc.returncode == 0
 
 
 def test_repo_dir_name():

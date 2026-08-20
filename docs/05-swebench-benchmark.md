@@ -36,6 +36,14 @@ python -X utf8 scripts/run_swebench.py --instances data/swebench_lite_20.jsonl `
 - 本机有 git 与网络（克隆 GitHub 仓库）；
 - 机器内存/CPU 允许：`--max-parallel` 建议 1-2。
 
+## 2.5 仓库准备与本地镜像
+
+- 同 repo 多个实例共享本地镜像 `logs/swebench/<run>/_repos/_mirror/<repo>`：
+  第一个实例全量 `git clone --mirror`，后续实例走 `--reference` 秒级检出
+  （实测 sphinx 全量 ~300s -> 镜像复用 ~5s）；批量结束自动清理镜像。
+- 若 `git clone` 报连接失败/证书错误，先检查 `HTTP_PROXY` / `HTTPS_PROXY`
+  环境变量是否指向失效代理（如 `127.0.0.1:9`），清掉后重试。
+
 ## 3. 输出产物
 
 每次运行在 `logs/swebench/<run>/` 下：

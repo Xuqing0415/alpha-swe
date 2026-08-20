@@ -18,6 +18,7 @@ import json
 import logging
 import random
 import subprocess
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
@@ -103,12 +104,17 @@ def _run_git(args: List[str], cwd: Optional[Path] = None,
              timeout: float = 600) -> subprocess.CompletedProcess:
     """执行 git，Windows 下隐藏控制台窗口；失败时抛 RuntimeError。"""
     cmd = ["git", *args]
+    kwargs: Dict[str, Any] = {
+        "capture_output": True, "text": True, "timeout": timeout,
+        "encoding": "utf-8", "errors": "replace",
+        "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    }
+    if cwd is not None:
+        # 仅显式 cwd 时传入；否则 str(None)="None" 会被当作目录，
+        # 在 Windows 上抛 WinError 267（克隆等无 cwd 调用秒败）
+        kwargs["cwd"] = str(cwd)
     try:
-        proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout, cwd=str(cwd),
-            encoding="utf-8", errors="replace",
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
+        proc = subprocess.run(cmd, **kwargs)
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"git 命令超时: {' '.join(cmd)}") from None
     except FileNotFoundError:
@@ -213,11 +219,23 @@ def repo_dir_name(instance: Instance) -> str:
     return f"{instance.repo.replace('/', '__')}__{instance.instance_id}"
 
 
+# 每 repo 一个线程锁：同 repo 多个实例并发时只建一次镜像
+_mirror_locks: Dict[str, threading.Lock] = {}
+_mirror_locks_guard = threading.Lock()
+
+
+def _mirror_lock(repo: str) -> threading.Lock:
+    with _mirror_locks_guard:
+        return _mirror_locks.setdefault(repo, threading.Lock())
+
+
 def prepare_repo(instance: Instance, work_root: Path | str,
                  git_bin: str = "git") -> Path:
     """克隆（或复用）仓库并检出 base_commit，创建评估分支。
 
-    返回仓库目录；同一 work_root 下按实例复用，避免重复克隆。
+    同一 work_root 下按实例复用；同 repo 多个实例共享本地镜像
+    （work_root/_mirror/<repo>），实例克隆走 --reference 秒级检出，
+    避免每个实例重复全量克隆同一仓库。
     """
     work_root = Path(work_root)
     repo_dir = work_root / repo_dir_name(instance)
@@ -231,9 +249,17 @@ def prepare_repo(instance: Instance, work_root: Path | str,
     if not instance.repo or not instance.base_commit:
         raise ValueError(f"实例缺少 repo/base_commit: {instance.instance_id}")
     url = f"https://github.com/{instance.repo}.git"
-    logger.info("克隆 %s -> %s", url, repo_dir)
-    _run_git(["clone", "--quiet", "--no-tags", url, str(repo_dir)],
-             timeout=1800)
+    mirror = work_root / "_mirror" / instance.repo.replace("/", "__")
+    with _mirror_lock(instance.repo):
+        if not (mirror / "HEAD").exists():
+            logger.info("建立本地镜像 %s -> %s", url, mirror)
+            _run_git(["clone", "--mirror", "--quiet", url, str(mirror)],
+                     timeout=1800)
+        else:
+            logger.info("复用本地镜像 %s", mirror)
+        logger.info("从镜像克隆 %s -> %s", url, repo_dir)
+        _run_git(["clone", "--quiet", "--no-tags", "--reference",
+                  str(mirror), url, str(repo_dir)], timeout=1800)
     _run_git(["checkout", "--quiet", instance.base_commit], cwd=repo_dir)
     _run_git(["checkout", "-b", "alphaswe_eval"], cwd=repo_dir)
     return repo_dir

@@ -182,6 +182,9 @@ class SweBenchRunner:
                         "error": f"runner 异常: {e}",
                         "elapsed_s": 0.0, "adapter": {}, "eval": {},
                     }
+        if not self.keep_repos:
+            # 批量结束清理本地镜像，避免仓库对象堆积磁盘
+            shutil.rmtree(self._repos_dir / "_mirror", ignore_errors=True)
         return [results[i.instance_id] for i in instances
                 if i.instance_id in results]
 
