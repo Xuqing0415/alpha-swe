@@ -236,6 +236,35 @@ class TerminalTool(Tool):
                 elapsed_ms=(time.time() - start) * 1000,
                 error_category=ErrorCategory.TRANSIENT,
             )
+        except asyncio.CancelledError:
+            # 外层中断/关闭：终止子进程、回收 reader 任务并显式关闭
+            # 管道流与子进程 transport，避免孤儿进程和 "unclosed transport"
+            # 泄漏（Windows Proactor 退出时报 I/O operation on closed pipe）。
+            if proc.returncode is None:
+                proc.kill()
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=2)
+                except (Exception, asyncio.CancelledError):
+                    pass
+            for t in reader_tasks:
+                if not t.done():
+                    t.cancel()
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*reader_tasks, return_exceptions=True), timeout=2)
+            except (Exception, asyncio.CancelledError):
+                pass
+            for stream in (proc.stdout, proc.stderr):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except Exception:
+                        pass
+            try:
+                proc._transport.close()
+            except Exception:
+                pass
+            raise
 
         out = (await out_task).strip()
         err = (await err_task).strip()

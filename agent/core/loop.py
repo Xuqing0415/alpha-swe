@@ -337,6 +337,7 @@ class AgentLoop:
             docker=docker,
         ))
         manager.register(TestRunnerTool(
+            default_timeout=self.config.tools.test_runner.timeout,
             decision_logger=self._decision,
         ))
         # 方案 2.4：后台任务生命周期管理（start/status/logs/stop）
@@ -1256,15 +1257,17 @@ class AgentLoop:
         action = params.get("action") if isinstance(params, dict) else None
         return f"{name}:{action or '?'}"
 
-    @staticmethod
-    def _tool_timeout(name: str, params: Dict[str, Any]) -> Optional[float]:
+    def _tool_timeout(self, name: str, params: Dict[str, Any]) -> Optional[float]:
         """按工具类型给外层超时（方案 2.1：terminal 60s / file_read 5s / file_write 10s）。
 
         terminal_execute 自带 terminate->kill 清理，返回 None 由工具层自管；
-        file_ops 按 action 区分读/写/搜索；其余工具统一 30s 兜底。
+        file_ops 按 action 区分读/写/搜索；run_tests 用独立较长超时；
+        其余工具统一 30s 兜底。
         """
         if name == "terminal_execute":
             return None
+        if name == "run_tests":
+            return self.config.tools.test_runner.timeout
         if name == "file_ops":
             action = params.get("action") if isinstance(params, dict) else None
             return {"read": 5.0, "write": 10.0, "append": 10.0,

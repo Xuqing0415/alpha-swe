@@ -179,6 +179,25 @@ async def run_tests(framework: str, target: str, workspace: str,
             return TestResult(success=False, framework=framework,
                               output=f"测试超时（{timeout:.0f}s）并被终止",
                               duration_ms=(time.time() - start) * 1000)
+        except asyncio.CancelledError:
+            # 外层超时/中断取消：必须终止子进程并排空管道、关闭 transport，
+            # 否则会留下孤儿 pytest 进程与未关闭的 asyncio 传输（Windows Proactor
+            # 退出时报 "unclosed transport" / "I/O operation on closed pipe"）。
+            if proc.returncode is None:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                try:
+                    await asyncio.wait_for(proc.communicate(), timeout=5)
+                except (Exception, asyncio.CancelledError):
+                    pass
+            # 兜底：显式关闭子进程 transport，避免取消竞态下句柄残留
+            try:
+                proc._transport.close()
+            except Exception:
+                pass
+            raise
     except FileNotFoundError as e:
         return TestResult(success=False, framework=framework,
                           output=f"找不到测试命令: {e}",

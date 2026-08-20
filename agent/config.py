@@ -34,6 +34,8 @@ class ToolsConfig(BaseModel):
     terminal_execute: ToolEntry = Field(default_factory=ToolEntry)
     file_ops: ToolEntry = Field(default_factory=ToolEntry)
     file_search: ToolEntry = Field(default_factory=ToolEntry)
+    # 测试运行器：单次跑测允许更长时间（pytest 全量/集成测试远超 30s）
+    test_runner: ToolEntry = Field(default_factory=lambda: ToolEntry(timeout=300.0))
     # 方向二阶段三：扩展工具（默认关闭，避免影响普通任务）
     database: ToolEntry = Field(default_factory=ToolEntry)      # 数据库查询（默认只读）
     dependency: ToolEntry = Field(default_factory=ToolEntry)    # 依赖清单/审计建议

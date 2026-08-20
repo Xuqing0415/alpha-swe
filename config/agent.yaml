@@ -29,6 +29,9 @@ tools:
     enabled: true
   file_search:
     enabled: true
+  test_runner:
+    enabled: true
+    timeout: 300
 
 sandbox:
   workspace: "./workspace"
