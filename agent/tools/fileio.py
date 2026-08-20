@@ -56,6 +56,8 @@ class FileIOTool(Tool):
             "start_line": {"type": "integer", "description": "起始行号（edit 需要，1 起）"},
             "end_line": {"type": "integer", "description": "结束行号（edit 需要，含该行）"},
             "pattern": {"type": "string", "description": "正则表达式（search 需要）"},
+            "expected": {"type": "string", "description": "预期内容（write/edit 可选）："
+                         "磁盘现状与预期不一致时拒绝写入并返回冲突，避免行号错位"},
         },
         "required": ["action", "path"],
     }
@@ -182,6 +184,18 @@ class FileIOTool(Tool):
             if action == "read":
                 return await self._read(target, start)
             if action == "write":
+                expected = params.get("expected")
+                if expected:
+                    before = await self._read_before(target)
+                    mismatch = self._expected_mismatch(before, expected)
+                    if mismatch:
+                        return ToolResult(
+                            success=False,
+                            error=f"写入冲突: {target} {mismatch}",
+                            elapsed_ms=(time.time() - start) * 1000,
+                            error_category=ErrorCategory.PERMANENT,
+                            metadata={"edit_conflict": True},
+                        )
                 return await self._write(target, params.get("content", ""), start,
                                          task_id=context.task_id or "")
             if action == "append":
@@ -279,6 +293,21 @@ class FileIOTool(Tool):
                           elapsed_ms=(time.time() - start) * 1000)
 
     @staticmethod
+    def _expected_mismatch(before: Optional[str], expected: Any) -> Optional[str]:
+        """外部修改冲突检测（排查方案 2.2）：磁盘现状与预期不一致时返回原因。
+
+        返回 None 表示一致；否则返回可读冲突说明（预期/实际各截断 80 字符）。
+        """
+        if expected is None or before is None:
+            return None
+        expected_text = str(expected).rstrip("\n")
+        before_text = before.rstrip("\n")
+        if before_text == expected_text:
+            return None
+        return ("文件内容与预期不一致（可能已被外部修改），请重新读取后再编辑"
+                f"；预期: {expected_text[:80]!r}，实际: {before_text[:80]!r}")
+
+    @staticmethod
     def _apply_edit(before: Optional[str], params: Dict[str, Any]) -> str:
         """对旧内容执行行区间替换（纯函数，供本地与 docker 路径复用）。"""
         s_line = int(params.get("start_line", 0) or 0)
@@ -315,6 +344,20 @@ class FileIOTool(Tool):
                 error_category=ErrorCategory.PERMANENT,
             )
         before = await self._read_before(target)
+        expected = params.get("expected")
+        if expected:
+            lines = (before or "").splitlines()
+            range_text = "\n".join(lines[s_line - 1:e_line])
+            mismatch = self._expected_mismatch(range_text, expected)
+            if mismatch:
+                return ToolResult(
+                    success=False,
+                    error=(f"编辑冲突: {target}（第 {s_line}-{e_line} 行）"
+                           f"{mismatch}"),
+                    elapsed_ms=(time.time() - start) * 1000,
+                    error_category=ErrorCategory.PERMANENT,
+                    metadata={"edit_conflict": True},
+                )
         try:
             after = self._apply_edit(before, params)
         except ValueError as e:

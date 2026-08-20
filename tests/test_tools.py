@@ -135,3 +135,68 @@ async def test_fileio_write_metadata_has_diff_snapshot(ws_tmp):
     assert "print(1)" in r.metadata["diff_before"]
     assert "# end" in r.metadata["diff_after"]
 
+# ---- 排查方案 2.2：外部修改冲突检测（expected 预期内容） ----
+@pytest.mark.asyncio
+async def test_fileio_write_conflict_detected(ws_tmp):
+    """write 携带 expected 且磁盘内容不一致时拒绝写入并标记冲突。"""
+    ctx = ExecutionContext(workspace=str(ws_tmp))
+    tool = FileIOTool()
+    content = "line1\nline2\n"
+    r = await tool.execute({"action": "write", "path": "a.txt",
+                            "content": content}, ctx)
+    assert r.success
+
+    # expected 与实际一致 -> 正常覆盖
+    r = await tool.execute({"action": "write", "path": "a.txt",
+                            "content": "new\n", "expected": content}, ctx)
+    assert r.success
+
+    # 外部把文件改掉后，expected 与实际不一致 -> 冲突拒绝
+    (ws_tmp / "a.txt").write_text("外部改动\n", encoding="utf-8")
+    r = await tool.execute({"action": "write", "path": "a.txt",
+                            "content": "覆盖\n", "expected": content}, ctx)
+    assert r.success is False
+    assert r.metadata.get("edit_conflict") is True
+    assert "冲突" in r.error or "不一致" in r.error
+    # 文件未被覆盖
+    assert (ws_tmp / "a.txt").read_text(encoding="utf-8") == "外部改动\n"
+
+
+@pytest.mark.asyncio
+async def test_fileio_edit_conflict_detected(ws_tmp):
+    """edit 行区间与 expected 不一致时拒绝，避免行号错位误改。"""
+    ctx = ExecutionContext(workspace=str(ws_tmp))
+    tool = FileIOTool()
+    content = "line1\nline2\nline3\n"
+    (ws_tmp / "b.txt").write_text(content, encoding="utf-8")
+
+    # expected 匹配第 1 行 -> 正常编辑
+    r = await tool.execute(
+        {"action": "edit", "path": "b.txt", "start_line": 1, "end_line": 1,
+         "content": "first\n", "expected": "line1"}, ctx)
+    assert r.success
+
+    # 外部改动后行内容与 expected 不符 -> 冲突拒绝
+    (ws_tmp / "b.txt").write_text("外部改动\nline2\nline3\n",
+                                  encoding="utf-8")
+    r = await tool.execute(
+        {"action": "edit", "path": "b.txt", "start_line": 1, "end_line": 1,
+         "content": "xxx\n", "expected": "line1"}, ctx)
+    assert r.success is False
+    assert r.metadata.get("edit_conflict") is True
+    assert (ws_tmp / "b.txt").read_text(encoding="utf-8").startswith("外部改动")
+
+
+@pytest.mark.asyncio
+async def test_fileio_without_expected_still_works(ws_tmp):
+    """不带 expected 时行为不变（不引入额外拦截）。"""
+    ctx = ExecutionContext(workspace=str(ws_tmp))
+    tool = FileIOTool()
+    r = await tool.execute({"action": "write", "path": "c.txt",
+                            "content": "x\n"}, ctx)
+    assert r.success
+    r = await tool.execute({"action": "edit", "path": "c.txt",
+                            "start_line": 1, "end_line": 1,
+                            "content": "y\n"}, ctx)
+    assert r.success
+    assert (ws_tmp / "c.txt").read_text(encoding="utf-8") == "y\n"
