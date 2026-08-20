@@ -44,9 +44,11 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from agent.attribution import classify_failure
 from agent.config import AppConfig, load_config
 from agent.core.loop import AgentLoop, LoopResult
+from agent.errorlog import print_error, write_error_log
 from agent.observability.archive import (
     files_modified_from_events as extract_files_modified,
 )
+from agent.selfcheck import critical_failed, format_selfcheck, run_selfcheck
 
 EXIT_OK = 0
 EXIT_FAILED = 1
@@ -117,6 +119,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                        help="关闭 Docker 沙箱，改用本地工具层")
     run_p.add_argument("--enable-mcp", action="store_true",
                        help="开启 MCP 服务器连接（CLI 默认关闭）")
+    run_p.add_argument("--self-check", action="store_true",
+                       help="仅运行启动自检并退出（0=关键检查全部通过）")
     run_p.add_argument("--version", action="version",
                        version="alpha-swe " + _version())
     return parser.parse_args(argv)
@@ -333,6 +337,25 @@ def _emit(payload: Dict[str, Any], output_format: str) -> None:
               file=sys.stderr)
 
 
+def _cli_context(args: argparse.Namespace) -> Dict[str, Any]:
+    """错误日志上下文：入口参数摘要（不含敏感值）。"""
+    return {
+        "command": getattr(args, "command", "?"),
+        "config": str(getattr(args, "config", "") or ""),
+        "workspace": str(getattr(args, "workspace", "") or ""),
+        "output": str(getattr(args, "output", "text")),
+        "prompt": str(getattr(args, "prompt", "") or "")[:120],
+    }
+
+
+def _report_fatal(exc: BaseException, args: argparse.Namespace,
+                  phase: str = "cli") -> None:
+    """统一错误出口（方案 1.1）：全量 traceback + 上下文落盘并打印。"""
+    ctx = {**_cli_context(args), "phase": phase}
+    path = write_error_log(exc, context=ctx)
+    print_error(exc, context=ctx, log_path=path)
+
+
 def run_cli(args: argparse.Namespace,
             loop_factory: Optional[Callable[[AppConfig], AgentLoop]] = None
             ) -> int:
@@ -341,8 +364,23 @@ def run_cli(args: argparse.Namespace,
     try:
         cfg = build_config(args)
     except Exception as e:
-        print("配置加载失败: %s" % e, file=sys.stderr)
+        _report_fatal(e, args, phase="config")
         return EXIT_FAILED
+    # 启动自检（方案 1.3）：任务开始前暴露配置/环境问题
+    if getattr(args, "self_check", False):
+        items = run_selfcheck(cfg)
+        sys.stderr.write(format_selfcheck(items) + "\n")
+        return EXIT_OK if not critical_failed(items) else EXIT_FAILED
+    try:
+        items = run_selfcheck(cfg)
+        sys.stderr.write(format_selfcheck(items) + "\n")
+        failed = critical_failed(items)
+        if failed:
+            sys.stderr.write(
+                "[警告] %d 项关键自检未通过，任务将继续但能力可能受限\n"
+                % len(failed))
+    except Exception as e:
+        sys.stderr.write("[警告] 启动自检异常: %s\n" % e)
     try:
         prompt = read_prompt(args)
     except UsageError as e:
@@ -351,12 +389,18 @@ def run_cli(args: argparse.Namespace,
     try:
         loop = factory(cfg)
     except Exception as e:
-        print("Agent 初始化失败: %s" % e, file=sys.stderr)
+        _report_fatal(e, args, phase="init")
         return EXIT_FAILED
     started = time.time()
-    exit_code, result, error = asyncio.run(
-        _run(loop, prompt, args.timeout, args.max_cost,
-             args.cost_per_1k_tokens))
+    try:
+        exit_code, result, error = asyncio.run(
+            _run(loop, prompt, args.timeout, args.max_cost,
+                 args.cost_per_1k_tokens))
+    except KeyboardInterrupt:
+        raise
+    except Exception as e:
+        _report_fatal(e, args, phase="run")
+        return EXIT_FAILED
     elapsed = time.time() - started
     payload = make_payload(result, loop, exit_code, elapsed,
                            args.cost_per_1k_tokens, error)
@@ -379,6 +423,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     except UsageError as e:
         print("用法错误: %s" % e, file=sys.stderr)
         return EXIT_INTERRUPT
+    except Exception as e:
+        _report_fatal(e, args, phase="cli")
+        return EXIT_FAILED
 
 
 if __name__ == "__main__":

@@ -20,6 +20,7 @@ import asyncio
 import json
 import logging
 import time
+import traceback
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -34,6 +35,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Footer, Input, Label, RichLog, Static
 
 from agent.config import AppConfig
+from agent.errorlog import write_error_log
 from agent.llm import BaseLLM
 from agent.mcp.manager import MCPManager
 from agent.planner.planner import Planner
@@ -170,7 +172,7 @@ Screen {
 }
 
 /* 弹窗 */
-HelpScreen, TerminalScreen, RegressionScreen {
+HelpScreen, TerminalScreen, RegressionScreen, ErrorScreen {
     align: center middle;
 }
 
@@ -203,6 +205,18 @@ HelpScreen, TerminalScreen, RegressionScreen {
 }
 
 #reg-full-log {
+    height: 1fr;
+}
+
+#error-box {
+    width: 90%;
+    height: 90%;
+    border: round red;
+    padding: 0 1;
+    background: $panel;
+}
+
+#error-full-log {
     height: 1fr;
 }
 
@@ -437,6 +451,45 @@ class RegressionScreen(ModalScreen[None]):
         self.dismiss(None)
 
 
+class ErrorScreen(ModalScreen[None]):
+    """致命错误全屏视图：异常摘要 + 上下文 + 完整日志路径，Esc 退出。"""
+
+    BINDINGS = [Binding("escape", "close_err", "关闭")]
+
+    def __init__(self, exc: BaseException, context: Optional[Dict[str, Any]],
+                 log_path: str) -> None:
+        super().__init__()
+        self._exc = exc
+        self._error_context = context or {}
+        self._log_path = log_path
+
+    def compose(self):
+        with Vertical(id="error-box"):
+            yield Label("任务异常终止（Esc 关闭）", classes="pane-title")
+            yield RichLog(id="error-full-log", highlight=True, markup=True,
+                          wrap=True, auto_scroll=True)
+
+    def on_mount(self) -> None:
+        log = self.query_one("#error-full-log", RichLog)
+        log.clear()
+        log.write(Text(f"异常: {type(self._exc).__name__}: {self._exc}",
+                       style="bold red"))
+        if self._error_context:
+            log.write(Text("上下文:", style="bold white"))
+            for key, value in self._error_context.items():
+                log.write(Text(f"  {key}: {value}", style="white"))
+        if self._log_path:
+            log.write(Text(f"完整错误日志: {self._log_path}", style="yellow"))
+        log.write(Text("=" * 60, style="dim"))
+        tb = "".join(traceback.format_exception(
+            type(self._exc), self._exc, self._exc.__traceback__))
+        for line in tb.rstrip("\n").splitlines()[-60:]:
+            log.write(Text(line, style="red"))
+
+    def action_close_err(self) -> None:
+        self.dismiss(None)
+
+
 class AlphaSWEApp(App[None]):
     """纯终端风格的 Alpha-SWE Agent 界面（设计：信息优先、键盘优先）。"""
 
@@ -573,11 +626,23 @@ class AlphaSWEApp(App[None]):
         assert self.runner is not None
         try:
             await self.runner.run()
-        except Exception as e:  # 兜底：worker 异常也要结束会话
+        except Exception as e:  # 兜底：worker 异常也要结束会话并展示错误面板
+            ctx = {
+                "module": "tui.run_agent",
+                "session_id": self._session_id,
+                "prompt": str(getattr(self, "prompt", ""))[:200],
+            }
+            log_path = write_error_log(e, context=ctx,
+                                       session_id=self._session_id)
             self.runner.result = e
             self._finished = e
             self.refresh_status()
-            raise
+            self._append_thought(Text(
+                f"任务异常终止: {type(e).__name__}: {e}", style="bold red"))
+            if log_path:
+                self._append_thought(Text(
+                    f"完整错误日志: {log_path}", style="yellow"))
+            self.push_screen(ErrorScreen(e, ctx, log_path))
 
     # ---- 消息处理 ----
     def on_agent_started_message(self, msg: AgentStartedMessage) -> None:

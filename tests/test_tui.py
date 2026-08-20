@@ -1190,15 +1190,53 @@ async def test_tui_regression_fullscreen_summary(ws_tmp):
 
 
 @pytest.mark.asyncio
-async def test_tui_regression_fullscreen_no_records(ws_tmp):
-    """无回归记录时 F7 不弹窗，仅提示；/reg 命令同样触发。"""
+async def test_tui_error_screen_shown_on_runner_failure(ws_tmp, monkeypatch):
+    """runner 抛异常时：错误落盘、任务结束、弹出错误面板，Esc 关闭。"""
+    from tui.app import ErrorScreen
+
+    captured = {}
+
+    def fake_write_error_log(exc, *, context=None, session_id=""):
+        captured["exc"] = exc
+        captured["context"] = context
+        return str(ws_tmp / "logs" / "cli_error_test.log")
+
+    monkeypatch.setattr("tui.app.write_error_log", fake_write_error_log)
+
+    class BoomRunner:
+        loop = None
+        result = None
+
+        async def run(self):
+            raise RuntimeError("boom-task")
+
+        def total_rounds(self):
+            return 0
+
+        def dag_summary(self):
+            return {"by_status": {}}
+
+    class BoomApp(AlphaSWEApp):
+        def _make_runner(self):
+            return BoomRunner()
+
     cfg = make_config(ws_tmp)
-    app = AlphaSWEApp("回归空状态", config=cfg, planner=StubPlanner())
+    app = BoomApp("故障注入测试", config=cfg, planner=StubPlanner())
     async with app.run_test(size=(120, 40)) as pilot:
+        for _ in range(120):
+            await pilot.pause(0.05)
+            if isinstance(pilot.app.screen, ErrorScreen):
+                break
+        assert isinstance(pilot.app.screen, ErrorScreen), (
+            f"应弹出错误面板, screen={type(pilot.app.screen)}")
+        assert isinstance(app._finished, RuntimeError)
+        assert captured["context"]["module"] == "tui.run_agent"
+        screen = pilot.app.screen
+        log = screen.query_one("#error-full-log")
+        joined = "".join(getattr(line, "text", "") or str(line)
+                         for line in log.lines)
+        assert "boom-task" in joined
+        assert "\u5b8c\u6574\u9519\u8bef\u65e5\u5fd7" in joined
+        await pilot.press("escape")
         await pilot.pause()
-        await pilot.press("f7")
-        await pilot.pause()
-        assert not isinstance(app.screen, RegressionScreen), "无记录不应弹窗"
-        log = app.query_one("#main-log")
-        joined = "".join(str(line) for line in log.lines)
-        assert "暂无回归检测记录" in joined
+        assert not isinstance(pilot.app.screen, ErrorScreen)
