@@ -1240,3 +1240,28 @@ async def test_tui_error_screen_shown_on_runner_failure(ws_tmp, monkeypatch):
         await pilot.press("escape")
         await pilot.pause()
         assert not isinstance(pilot.app.screen, ErrorScreen)
+@pytest.mark.asyncio
+async def test_tui_event_status_refresh_throttled(ws_tmp, monkeypatch):
+    """排查方案 3.2：高频事件下事件驱动的状态刷新被节流（< 事件数）。"""
+    cfg = make_config(ws_tmp)
+    calls: list = []
+    orig_refresh = AlphaSWEApp.refresh_status
+
+    def counting(self):
+        calls.append(1)
+        return orig_refresh(self)
+
+    monkeypatch.setattr(AlphaSWEApp, "refresh_status", counting)
+    app = AlphaSWEApp("节流测试", config=cfg, llm=MockLLM(),
+                      planner=StubPlanner())
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        for _ in range(40):
+            app.post_message(AgentEventMessage(
+                {"type": "think", "data": {"content": "x"}}))
+        await pilot.pause(0.4)
+        # 40 个事件在节流窗口内不应触发 40 次全量刷新
+        assert len(calls) < 40, f"事件驱动刷新未被节流: {len(calls)} 次"
+        # 显式调用 refresh_status 不受节流影响（直调仍需立即生效）
+        app.refresh_status()
+        assert len(calls) > 0

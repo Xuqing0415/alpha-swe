@@ -55,6 +55,9 @@ from tui.messages import (AgentEventMessage, AgentFinishedMessage,
 logger = logging.getLogger("alpha-swe.tui")
 
 _NARROW_WIDTH = 100
+# 排查方案 3.2：高频事件下状态刷新节流（≤ 每 0.1s 一次），
+# 渲染仍由 0.5s 定时器兜底，避免突发事件导致 TUI 卡顿。
+_EVENT_REFRESH_MIN_INTERVAL = 0.1
 _MAIN_VIEWS = ["log", "diff", "metrics", "timeline", "bg"]
 _PHASE_COLORS = {
     "idle": "bright_black", "planning": "cyan", "ready": "cyan",
@@ -557,6 +560,7 @@ class AlphaSWEApp(App[None]):
         self._tree_active = ""  # 当前正在操作的文件
         self._tree_filter_mode = False  # 文件树搜索模式（输入栏过滤）
         self._last_tree_build = 0.0
+        self._last_event_status_refresh = 0.0  # 事件驱动状态刷新节流时间戳
         self._layout_override: Optional[str] = None
         self._task_panel_visible = True
         self._session_id = uuid.uuid4().hex[:6]
@@ -671,7 +675,10 @@ class AlphaSWEApp(App[None]):
             line.append("上次会话未完成: ", style="bold yellow")
             line.append(str(record["data"].get("hint", "")), style="yellow")
             self._append_terminal(line)
-        self.refresh_status()
+        now = time.monotonic()
+        if now - self._last_event_status_refresh >= _EVENT_REFRESH_MIN_INTERVAL:
+            self._last_event_status_refresh = now
+            self.refresh_status()
 
     def on_terminal_output_message(self, msg: TerminalOutputMessage) -> None:
         self._append_terminal(Text(msg.text, style=""))

@@ -80,7 +80,8 @@ class DecisionLogger:
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
             with open(self.log_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(dp.to_dict(), ensure_ascii=False) + "\n")
-        except OSError as e:
+        except (OSError, TypeError, ValueError) as e:
+            # OSError=磁盘/权限；TypeError/ValueError=决策值不可序列化
             logger.warning("决策日志写入失败 %s: %s", self.log_path, e)
 
     def records(self) -> List[Dict[str, Any]]:

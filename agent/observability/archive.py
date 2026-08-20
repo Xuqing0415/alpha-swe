@@ -54,9 +54,9 @@ class SessionArchive:
         """写档案文件；返回路径（失败或未启用返回 None）。"""
         if not self.enabled or self.archive_dir is None:
             return None
-        doc = self.build(prompt, events, spans, decisions, metrics, result,
-                         session_id=session_id)
         try:
+            doc = self.build(prompt, events, spans, decisions, metrics,
+                             result, session_id=session_id)
             self.archive_dir.mkdir(parents=True, exist_ok=True)
             path = self.archive_dir / (
                 f"session_{int(time.time())}_{doc['session_id']}.json"
@@ -65,8 +65,9 @@ class SessionArchive:
                 json.dump(doc, f, ensure_ascii=False, indent=2)
             logger.info("会话档案已写入: %s", path)
             return path
-        except OSError as e:
-            logger.warning("会话档案写入失败: %s", e)
+        except (OSError, TypeError, ValueError) as e:
+            # OSError=磁盘/权限；TypeError/ValueError=事件含不可序列化内容
+            logger.warning("会话档案写入失败（已降级）: %s", e)
             return None
 
     @staticmethod

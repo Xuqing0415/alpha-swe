@@ -613,13 +613,10 @@ class AgentLoop:
             self.state.transition(AgentPhase.FAILED)
             self.metrics.set("phase", "failed")
             self.tracer.end_span(run_span, status="error", error=str(e))
-            self.tracer.export()
+            self._safe_trace_export()
             result = LoopResult(phase=AgentPhase.FAILED, tasks=plan,
                                 events=self.events)
-            self.archive.write(
-                prompt, self.events, self.tracer.snapshot(),
-                self._decision.records(), self.metrics.snapshot(), result,
-            )
+            self._safe_archive_write(prompt, result)
             self._maybe_counterfactual(prompt, result)
             self._maybe_self_improve(prompt, result)
             self._maybe_extract_benchmark(prompt, result)
@@ -648,7 +645,7 @@ class AgentLoop:
             status="ok" if phase == AgentPhase.COMPLETED else "error",
             phase=phase.value, total_rounds=total_rounds,
         )
-        self.tracer.export()
+        self._safe_trace_export()
         result = LoopResult(
             final_answer=final,
             phase=phase,
@@ -656,16 +653,31 @@ class AgentLoop:
             total_rounds=total_rounds,
             events=self.events,
         )
-        self.archive.write(
-            prompt, self.events, self.tracer.snapshot(),
-            self._decision.records(), self.metrics.snapshot(), result,
-        )
+        self._safe_archive_write(prompt, result)
         self._maybe_counterfactual(prompt, result)
         self._maybe_self_improve(prompt, result)
         self._maybe_extract_benchmark(prompt, result)
         self._last_result = result
         self._end_persistent_session(prompt, result)
         return result
+
+    # ---- 可观测性降级兜底（排查方案 4.3）：任何写失败都不能吞掉任务结果 ----
+    def _safe_archive_write(self, prompt: str, result: LoopResult) -> None:
+        """写会话档案；失败仅记警告，绝不向外抛（否则任务结果被吞）。"""
+        try:
+            self.archive.write(
+                prompt, self.events, self.tracer.snapshot(),
+                self._decision.records(), self.metrics.snapshot(), result,
+            )
+        except Exception as e:
+            logger.warning("会话档案写入异常（已降级）: %s", e)
+
+    def _safe_trace_export(self) -> None:
+        """导出 trace；失败仅记警告，绝不向外抛。"""
+        try:
+            self.tracer.export()
+        except Exception as e:
+            logger.warning("trace 导出异常（已降级）: %s", e)
 
     # ---- 断点续跑（方案 1.3）：任务快照落盘 / 读取 / 恢复 ----
     def _save_snapshot(self) -> None:

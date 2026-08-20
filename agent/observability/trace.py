@@ -171,8 +171,9 @@ class Tracer:
             self._append_rows(rows)
             self._export_otlp(rows)
             return len(rows)
-        except OSError as e:
-            logger.warning("trace 导出失败: %s", e)
+        except (OSError, TypeError, ValueError) as e:
+            # OSError=磁盘/权限；TypeError/ValueError=span 含不可序列化属性
+            logger.warning("trace 导出失败（已降级）: %s", e)
             return 0
 
     def _append_rows(self, rows: List[Dict[str, Any]]) -> None:
@@ -218,8 +219,8 @@ class Tracer:
         if rows:
             try:
                 self._append_rows(rows)
-            except OSError as e:
-                logger.warning("span 落盘失败: %s", e)
+            except (OSError, TypeError, ValueError) as e:
+                logger.warning("span 落盘失败（已降级）: %s", e)
 
     def _export_otlp(self, rows: List[Dict[str, Any]]) -> None:
         """把本次快照推送到 OTLP 端点（失败静默，见 OtlpExporter）。"""
