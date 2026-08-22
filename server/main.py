@@ -377,6 +377,7 @@ def create_app(config: Optional[ServerConfig] = None,
         return _can_access_task(user, task_id).to_dict()
 
     @app.get(f"{API_PREFIX}/tasks/{{task_id}}/events", tags=["tasks"],
+             response_class=StreamingResponse,
              summary="订阅任务 SSE 事件流", openapi_extra={"security": [{"bearerAuth": []}]},
              description=(
                  "以 text/event-stream 持续推送任务进度；任务结束后推送终态"
