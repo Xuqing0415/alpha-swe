@@ -90,6 +90,26 @@ def test_run_git_with_cwd(ws_tmp):
     assert proc.returncode == 0
 
 
+def test_git_env_bypasses_unreachable_proxy(monkeypatch):
+    import swe_eval.dataset as d
+    monkeypatch.setattr(d, "_proxy_unreachable", lambda: True)
+    d._proxy_bypass = None
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9")
+    env = d._git_env()
+    assert "HTTPS_PROXY" not in env
+    d._proxy_bypass = None
+
+
+def test_git_env_keeps_reachable_proxy(monkeypatch):
+    import swe_eval.dataset as d
+    monkeypatch.setattr(d, "_proxy_unreachable", lambda: False)
+    d._proxy_bypass = None
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.local:3128")
+    env = d._git_env()
+    assert env.get("HTTPS_PROXY") == "http://proxy.local:3128"
+    d._proxy_bypass = None
+
+
 def test_repo_dir_name():
     inst = _instance('django__django-11099')
     inst.repo = 'django/django'

@@ -16,12 +16,15 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import random
+import socket
 import subprocess
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
+from urllib.parse import urlsplit
 
 logger = logging.getLogger("swe_eval.dataset")
 
@@ -100,6 +103,52 @@ class Instance:
         return seen
 
 
+_PROXY_ENV_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+                   "http_proxy", "https_proxy", "all_proxy")
+_proxy_bypass: Optional[bool] = None  # None=未探测；True=代理不可达需绕过
+_proxy_probe_lock = threading.Lock()
+
+
+def _proxy_unreachable() -> bool:
+    """探测环境代理是否可达；不可达时 git 应绕过直连。"""
+    for key in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy",
+                "ALL_PROXY", "all_proxy"):
+        val = os.environ.get(key, "").strip()
+        if not val or val.lower() == "none":
+            continue
+        try:
+            parts = urlsplit(val if "://" in val else "http://" + val)
+            host = parts.hostname or "127.0.0.1"
+            port = parts.port or (443 if parts.scheme == "https" else 80)
+        except ValueError:
+            continue
+        try:
+            with socket.create_connection((host, port), timeout=1.5):
+                return False  # 代理可达，保留
+        except OSError:
+            logger.warning(
+                "环境代理不可达 %s://%s:%s，git 子进程将绕过代理直连",
+                parts.scheme or "http", host, port)
+            return True
+    return False
+
+
+def _git_env() -> Dict[str, str]:
+    """git 子进程环境：代理不可达时剔除代理变量（结果缓存，仅探测一次）。"""
+    global _proxy_bypass
+    env = dict(os.environ)
+    if not any(k in env for k in _PROXY_ENV_KEYS):
+        return env
+    with _proxy_probe_lock:
+        if _proxy_bypass is None:
+            _proxy_bypass = _proxy_unreachable()
+        bypass = _proxy_bypass
+    if bypass:
+        for k in _PROXY_ENV_KEYS:
+            env.pop(k, None)
+    return env
+
+
 def _run_git(args: List[str], cwd: Optional[Path] = None,
              timeout: float = 600) -> subprocess.CompletedProcess:
     """执行 git，Windows 下隐藏控制台窗口；失败时抛 RuntimeError。"""
@@ -108,6 +157,7 @@ def _run_git(args: List[str], cwd: Optional[Path] = None,
         "capture_output": True, "text": True, "timeout": timeout,
         "encoding": "utf-8", "errors": "replace",
         "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        "env": _git_env(),
     }
     if cwd is not None:
         # 仅显式 cwd 时传入；否则 str(None)="None" 会被当作目录，
@@ -252,7 +302,9 @@ def prepare_repo(instance: Instance, work_root: Path | str,
     mirror = work_root / "_mirror" / instance.repo.replace("/", "__")
     with _mirror_lock(instance.repo):
         if not (mirror / "HEAD").exists():
-            logger.info("建立本地镜像 %s -> %s", url, mirror)
+            logger.info("建立本地镜像 %s -> %s"
+                        "（首次全量克隆，预计 1-10 分钟，请耐心等待）",
+                        url, mirror)
             _run_git(["clone", "--mirror", "--quiet", url, str(mirror)],
                      timeout=1800)
         else:
