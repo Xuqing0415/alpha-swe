@@ -36,6 +36,15 @@ def utc_iso(dt: Optional[datetime]) -> str:
     return dt.astimezone(timezone.utc).isoformat() if dt else ""
 
 
+def _naive_utc(dt: Optional[datetime]) -> Optional[datetime]:
+    """归一化为无时区的 UTC，便于与 SQLite 存储值比较。"""
+    if dt is None:
+        return None
+    if dt.tzinfo is not None:
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
 def hash_api_key(key: str) -> str:
     return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
@@ -308,10 +317,23 @@ class Store:
                            detail=detail[:4000]))
         self._write(_do)
 
-    def list_audit(self, limit: int = 200) -> List[AuditLog]:
+    def list_audit(self, user_id: Optional[int] = None,
+                   task_id: Optional[str] = None,
+                   start_time: Optional[datetime] = None,
+                   end_time: Optional[datetime] = None,
+                   limit: int = 200, offset: int = 0) -> List[AuditLog]:
         with self._session() as s:
-            return s.query(AuditLog).order_by(
-                AuditLog.id.desc()).limit(limit).all()
+            q = s.query(AuditLog)
+            if user_id is not None:
+                q = q.filter(AuditLog.user_id == user_id)
+            if task_id:
+                q = q.filter(AuditLog.detail.contains(f"task={task_id}"))
+            if start_time is not None:
+                q = q.filter(AuditLog.created_at >= _naive_utc(start_time))
+            if end_time is not None:
+                q = q.filter(AuditLog.created_at <= _naive_utc(end_time))
+            return q.order_by(AuditLog.id.desc()).offset(offset).limit(
+                limit).all()
 
     def close(self) -> None:
         self.engine.dispose()

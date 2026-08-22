@@ -2,7 +2,7 @@
 # 技术债清理质量门禁：F(pyflakes) B(bugbear) C4(comprehensions) E9(语法)
 select = F, B, C4, E9
 # FastAPI/Pydantic 惯用法：Depends/Header/Field 作为默认参数是安全的
-extend-immutable-calls = Field, Depends, Header, require_role
+extend-immutable-calls = Field, Depends, Header, Path, Query, ApiPath, require_role
 # 长行由格式化工具负责，此处不拦
 ignore = E501
 # 单进程运行（Windows/沙箱下 multiprocessing 受限）

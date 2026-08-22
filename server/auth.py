@@ -44,7 +44,8 @@ def get_store(request: Request) -> Store:
 
 def current_user(
     request: Request,
-    authorization: Optional[str] = Header(default=None),
+    authorization: Optional[str] = Header(
+        default=None, include_in_schema=False),
 ) -> User:
     store: Store = request.app.state.store
     user = authenticate(store, authorization)

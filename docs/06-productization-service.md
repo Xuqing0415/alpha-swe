@@ -16,7 +16,8 @@ python -X utf8 -m uvicorn server.main:create_app --factory --host 0.0.0.0 --port
 [Alpha-SWE] 初始管理员 API Key: as_xxxx
 ```
 
-交互式 API 文档：`http://127.0.0.1:8000/docs`。
+交互式 API 文档：`http://127.0.0.1:8000/docs`；
+机器可读 OpenAPI：`http://127.0.0.1:8000/openapi.json`。
 
 ## 2. 核心 API
 
@@ -37,9 +38,40 @@ python -X utf8 -m uvicorn server.main:create_app --factory --host 0.0.0.0 --port
 | GET | `/healthz` | 公开 | 健康检查 |
 
 认证方式：请求头 `Authorization: Bearer <API Key>`（服务端只存 SHA-256 哈希）。
+OpenAPI 中统一通过 `components.securitySchemes.bearerAuth`（HTTP Bearer）声明，
+受保护接口的 `security` 均为 `bearerAuth`；`POST /api/v1/auth/token` 与
+`GET /healthz` 为匿名接口。
 
 角色权限：`observer`（只读） < `developer`（提交/取消任务、会话） <
 `admin`（用户、Key、审计、全量查看）。
+
+### 2.1 错误响应
+
+| 状态码 | 场景 | 响应体 |
+| --- | --- | --- |
+| 401 | 未提供或无效 API Key | `{"detail": "无效或缺失 API Key"}` |
+| 403 | 角色不足 / 访问他人任务 | `{"detail": "需要角色 developer 及以上"}` |
+| 404 | 任务/用户不存在 | `{"detail": "任务不存在"}` |
+| 409 | 用户名已存在 / 任务已结束 | `{"detail": "用户名已存在"}` |
+| 422 | 请求参数校验失败 | FastAPI 默认 `ValidationError` 结构 |
+
+### 2.2 SSE 事件格式（GET /api/v1/tasks/{id}/events）
+
+- `Content-Type: text/event-stream`；连接保持到任务结束或客户端断开；
+- 每帧：`event: <type>` + `data: <json>` + 空行；
+- 事件类型：`running` / `completed` / `failed` / `timeout` / `budget` /
+  `cancelled` / `error` / `done`（`done` 表示流结束）；
+- 任务已结束时订阅，会立即补发终态事件（`data` 含 `final: true`）后关闭。
+
+### 2.3 审计查询参数（GET /api/v1/audit）
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| `user_id` | int | 按用户过滤 |
+| `task_id` | string | 按任务过滤（匹配审计明细 `task=<task_id>`） |
+| `start_time` / `end_time` | ISO 8601 | 时间范围（含边界） |
+| `limit` | int | 返回条数上限，默认 200，最大 1000 |
+| `offset` | int | 分页偏移，默认 0 |
 
 ## 3. 架构与数据流
 
