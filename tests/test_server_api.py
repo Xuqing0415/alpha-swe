@@ -14,6 +14,17 @@ DEV_KEY = "as_dev_test_key_1234567890"
 OBS_KEY = "as_obs_test_key_1234567890"
 
 
+def test_index_landing_page(api):
+    """根路径返回引导页（含 /docs 链接），避免访问 / 时 404。"""
+    client, _ = api
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert "text/html" in resp.headers["content-type"]
+    body = resp.text
+    assert "/docs" in body and "/healthz" in body
+    assert "Alpha-SWE Agent Service" in body
+
+
 def _make_payload(exit_code=0, status="completed"):
     return {
         "ok": exit_code == 0, "status": status, "exit_code": exit_code,

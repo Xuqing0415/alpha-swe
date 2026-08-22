@@ -28,7 +28,7 @@ from typing import Optional
 
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 
 from server.auth import current_user, require_role
 from server.config import ServerConfig
@@ -112,6 +112,43 @@ def create_app(config: Optional[ServerConfig] = None,
         allow_headers=["*"])
 
     _seed_admin(st, cfg)
+
+    # ---------------- 根路径引导页（避免访问 / 时 404） ----------------
+    @app.get("/", tags=["ops"], response_class=HTMLResponse)
+    def index() -> str:
+        return """<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Alpha-SWE Agent Service</title>
+<style>
+  body { font-family: "Cascadia Code", Consolas, monospace; background: #111;
+         color: #ddd; margin: 0; padding: 40px; }
+  h1 { color: #7ee787; font-size: 22px; }
+  a { color: #79c0ff; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code { background: #222; padding: 1px 6px; border-radius: 4px; color: #ffa657; }
+  .card { background: #181818; border: 1px solid #333; border-radius: 8px;
+          padding: 16px 20px; margin: 12px 0; max-width: 720px; }
+  .muted { color: #8b949e; font-size: 13px; }
+</style>
+</head>
+<body>
+  <h1>Alpha-SWE Agent Service</h1>
+  <p class="muted">SWE Agent 产品化服务：多用户任务提交、SSE 进度、审计</p>
+  <div class="card">
+    <p><a href="/docs">/docs</a> - Swagger API 文档（可交互调试）</p>
+    <p><a href="/redoc">/redoc</a> - ReDoc 文档</p>
+    <p><a href="/healthz">/healthz</a> - 健康检查</p>
+    <p><a href="/openapi.json">/openapi.json</a> - OpenAPI 定义</p>
+  </div>
+  <div class="card">
+    <p>API 前缀：<code>/api/v1</code>（如 <code>POST /api/v1/auth/token</code> 换 Key，
+    <code>POST /api/v1/tasks</code> 提交任务）</p>
+    <p>启动方式：<code>uvicorn server.main:create_app --factory --host 0.0.0.0 --port 8000</code></p>
+  </div>
+</body>
+</html>"""
 
     # ---------------- 认证与用户 ----------------
     @app.post(f"{API_PREFIX}/auth/token", tags=["auth"])
