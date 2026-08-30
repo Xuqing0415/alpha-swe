@@ -192,7 +192,7 @@ async def test_e2e_shortcut_blocked_then_sop(ws_tmp):
     loop = AgentLoop(config=_config(ws_tmp, enabled=True), llm=llm,
                      planner=StubPlanner())
     try:
-        result = await loop.run("实现一个计算斐波那契数列的函数")
+        await loop.run("实现一个计算斐波那契数列的函数")
     finally:
         await loop.close()
 
