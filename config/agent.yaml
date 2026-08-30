@@ -133,3 +133,13 @@ skills:
   registry_file: "./skills/skill_manifest.json"  # 技能注册表（requires/permissions/params）
   usage_log: "./logs/skill_usage.jsonl"          # 技能使用/成败历史（版本管理）
   require_task_intent: true                      # 工作流激活需任务意图命中，避免误触发
+
+# phase-barrier 阶段门禁（alpha-swe#1 集成；默认关闭，开启后 Agent 须按 spec->测试->实现->测试 顺序推进）
+phase_barrier:
+  enabled: false
+  workdir: ""            # 空 = 使用 sandbox.workspace
+  user_request: ""       # 阶段 0 证据：用户需求原文（留空则用任务 prompt）
+  task_start_stage: 1
+  implementation_stage: 3
+  test_run_stage: 4
+  timeout: 10

@@ -62,6 +62,29 @@ python -m tui --web "任务提示词"   # 打开 http://127.0.0.1:8765
 - `docs/features/` — 记忆、代码语义、多语言、技能/插件、多 Agent、沙箱、MCP、可观测性、TUI
 - `docs/01`-`09` — Docker/并发/真实项目/SWE-bench/产品化/代码质量/多语言/开源准备等历史验证报告
 
+## 阶段门禁（phase-barrier 集成）
+
+接入 [phase-barrier](https://github.com/Xuqing0415/phase-barrier)（PyPI：[phase-barrier](https://pypi.org/project/phase-barrier/)）作为阶段门禁中间件（[alpha-swe#1](https://github.com/Xuqing0415/alpha-swe/issues/1)）：
+
+- **任务启动钩子**：`run()` 启动时检查门禁阶段（默认阶段 1=Spec 设计），未满足时把约束提示注入 System Prompt；
+- **阶段切换钩子**：`file_ops` 写实现 / `terminal_execute` 测试命令 / `run_tests` 在未达到前置阶段时被拦截，约束消息回传 Agent 强制补全 spec / 测试用例；
+- **门禁工具**：`phase_barrier_gate`（inspect / check / advance / record_test_run / verify）供 Agent 声明与推进阶段；
+- **轻量 SDK**：alpha-swe 只做调用，校验逻辑全部在 phase-barrier 仓库维护；依赖缺失 / 初始化失败自动降级放行，不影响既有行为。
+
+启用方式（`config/agent.yaml`，默认关闭）：
+
+```yaml
+phase_barrier:
+  enabled: true          # 开启阶段门禁
+  workdir: ""            # 空 = 使用 sandbox.workspace
+  user_request: ""       # 阶段 0 证据：用户需求原文（留空则用任务 prompt）
+  task_start_stage: 1
+  implementation_stage: 3
+  test_run_stage: 4
+  timeout: 10
+```
+
+端到端测试见 `tests/test_phase_barrier.py`（跳步写实现被拦截 + 按 SOP 推进到交付）。
 ## 项目状态
 
 全量测试通过；真实 LLM（litellm）与真实 Docker 沙箱均已端到端验证，细节见

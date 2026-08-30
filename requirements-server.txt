@@ -12,3 +12,6 @@ psutil>=5.9
 # agent/memory(embed.py, store.py) 与 agent/prompt(builder.py) 的模块级依赖
 numpy>=1.26
 jinja2>=3.1
+
+# phase-barrier 阶段门禁（编排器钩子集成，alpha-swe#1）
+phase-barrier>=0.22.0

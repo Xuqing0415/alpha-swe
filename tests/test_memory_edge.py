@@ -3,6 +3,7 @@
 import json
 import os
 import sqlite3
+from datetime import datetime, timedelta
 from unittest import mock
 
 import numpy as np
@@ -213,7 +214,8 @@ def test_parse_dt():
 def test_decay_score():
     assert _decay_score(1.0, 5, None, None) == 1.5
     assert _decay_score(1.0, 0, None, None, negative=True) == 0.7
-    old = _decay_score(1.0, 0, "2000-01-01T00:00:00", None,
+    old_ts = (datetime.now() - timedelta(days=60)).isoformat()
+    old = _decay_score(1.0, 0, old_ts, None,
                        decay_days=30, decay_factor=0.1)
     assert 0 < old < 1.0
 

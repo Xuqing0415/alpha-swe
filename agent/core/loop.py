@@ -52,6 +52,8 @@ from agent.tools.test_tool import TestRunnerTool
 from agent.tools.database_tool import DatabaseTool
 from agent.tools.dependency_tool import DependencyTool
 from agent.tools.cloud_tool import CloudTool
+from agent.phase_barrier import PhaseBarrierBridge
+from agent.tools.phase_barrier_tool import PhaseBarrierGateTool
 
 logger = logging.getLogger("alpha-swe.loop")
 
@@ -123,6 +125,8 @@ class AgentLoop:
         docker_sandbox: Optional[DockerSandbox] = None,
     ):
         self.config = config or load_config()
+        # phase-barrier 阶段门禁（alpha-swe#1）：默认关闭；开启后任务启动 / 工具调用走门禁钩子
+        self._barrier_bridge = self._build_barrier_bridge()
         self.state = StateMachine()
         self.cancel_event = asyncio.Event()
         self.events: List[Dict[str, Any]] = []
@@ -319,6 +323,15 @@ class AgentLoop:
                 f"会话间工作流连续性开启（"
                 f"{self.workspace_context.context_file}）",
             )
+
+    def _build_barrier_bridge(self) -> Optional[PhaseBarrierBridge]:
+        """按配置构建 phase-barrier 桥接；未启用时返回 None（完全不影响既有行为）。"""
+        cfg = getattr(self.config, "phase_barrier", None)
+        if cfg is None or not getattr(cfg, "enabled", False):
+            return None
+        workdir = str(getattr(cfg, "workdir", "") or self.config.sandbox.workspace or ".")
+        return PhaseBarrierBridge(cfg, workspace=workdir)
+
     # ---- 默认工具集 ----
     def _default_tools(self) -> ToolManager:
         manager = ToolManager(
@@ -358,6 +371,9 @@ class AgentLoop:
         manager.register(DependencyTool(decision_logger=self._decision))
         if self.config.tools.cloud.enabled:
             manager.register(CloudTool(decision_logger=self._decision))
+        # phase-barrier 门禁工具（alpha-swe#1）：仅启用时注册，供 Agent 声明 / 推进阶段
+        if self._barrier_bridge is not None:
+            manager.register(PhaseBarrierGateTool(self._barrier_bridge))
         raw = self.config.tools.model_dump()
         self._tool_enabled = {name: cfg["enabled"] for name, cfg in raw.items()}
         return manager
@@ -432,6 +448,8 @@ class AgentLoop:
     # ---- 主入口 ----
     async def run(self, prompt: str, resume: bool = False) -> LoopResult:
         self._current_prompt = prompt
+        # phase-barrier 门禁：任务启动钩子（默认检查阶段 1=Spec 设计），失败时把约束提示注入 System Prompt
+        self._barrier_task_start(prompt)
         # 配置降级记录（决策日志/TUI 可见，去重）
         self._record_config_fallbacks()
 
@@ -1368,6 +1386,79 @@ class AgentLoop:
         except Exception:
             return result
 
+    def _barrier_task_start(self, prompt: str) -> None:
+        """任务启动门禁钩子：检查任务启动阶段；未满足时把约束提示注入 System Prompt。"""
+        bridge = self._barrier_bridge
+        if bridge is None:
+            return
+        bridge.set_user_request(prompt)
+        stage = int(getattr(self.config.phase_barrier, "task_start_stage", 1) or 1)
+        gate = bridge.check_stage(stage)
+        if gate.get("skip"):
+            self._decision.record(
+                "phase_barrier.skip", "phase_barrier.enabled", True,
+                "门禁不可用（依赖缺失 / 初始化失败），跳过",
+            )
+            return
+        allowed = bool(gate.get("allowed"))
+        self._decision.record(
+            "phase_barrier.task_start", "phase_barrier.enabled", True,
+            f"检查阶段 {stage}: allowed={allowed} current={gate.get('current_stage')}",
+        )
+        self._emit("phase_barrier_task_start", allowed=allowed, stage=stage,
+                   message=str(gate.get("message") or "")[:300])
+        if not allowed:
+            notice = (
+                "[phase-barrier 门禁] 本任务已启用阶段门禁："
+                + str(gate.get("message") or "")
+                + "。请先完成前置阶段证据（spec.md / 测试用例），"
+                  "再通过 phase_barrier_gate 工具声明 / 推进阶段。"
+            )
+            self.prompt_builder.set_gate_notice(notice)
+
+    def _barrier_gate_check(self, name: str,
+                            params: Dict[str, Any]) -> Optional[ToolResult]:
+        """阶段切换 / 工具调用门禁钩子：写实现、跑测试等操作在未达到前置阶段时直接拦截。"""
+        bridge = self._barrier_bridge
+        if bridge is None:
+            return None
+        if name == "file_ops":
+            action = str(params.get("action") or "")
+            if action in WRITE_ACTIONS:
+                path = str(params.get("path") or "")
+                if not path:
+                    return None
+                check = bridge.check_write(path)
+                if not check.get("allowed", True):
+                    msg = str(check.get("message") or "phase-barrier 拦截写入")
+                    return ToolResult(
+                        success=False, error=msg, output=msg,
+                        error_category=ErrorCategory.PERMISSION,
+                        metadata={"gate": "write", "path": path},
+                    )
+        elif name == "terminal_execute":
+            command = str(params.get("command") or "")
+            if command.strip():
+                check = bridge.check_exec(command)
+                if not check.get("allowed", True):
+                    msg = str(check.get("message") or "phase-barrier 拦截命令")
+                    return ToolResult(
+                        success=False, error=msg, output=msg,
+                        error_category=ErrorCategory.PERMISSION,
+                        metadata={"gate": "exec", "command": command[:120]},
+                    )
+        elif name == "run_tests":
+            stage = int(getattr(self.config.phase_barrier, "test_run_stage", 4) or 4)
+            check = bridge.check_stage(stage)
+            if not check.get("allowed", True):
+                msg = str(check.get("message") or "phase-barrier 拦截测试运行")
+                return ToolResult(
+                    success=False, error=msg, output=msg,
+                    error_category=ErrorCategory.PERMISSION,
+                    metadata={"gate": "test", "stage": stage},
+                )
+        return None
+
     async def _run_tool(self, name: str, params: Dict[str, Any],
                         task: Task) -> ToolResult:
         """带确认策略执行单个工具（require_confirmation / auto_approve）。
@@ -1382,6 +1473,16 @@ class AgentLoop:
             params=self._short_params(params),
         )
         try:
+            gate_result = self._barrier_gate_check(name, params)
+            if gate_result is not None:
+                self.metrics.record_tool_result(False)
+                self._decision.record(
+                    "phase_barrier.blocked", "phase_barrier.enabled", True,
+                    f"{name} 被门禁拦截: {gate_result.error}",
+                )
+                self.tracer.end_span(span, status="error",
+                                     error=gate_result.error or "")
+                return gate_result
             rule = self._needs_confirmation(name, params)
             if rule is not None:
                 decision = await self._ask_confirmation(name, params, rule)
@@ -1415,6 +1516,11 @@ class AgentLoop:
                 self._note_agent_file_write(params)
                 if self.config.agent.syntax_check_enabled:
                     result = self._syntax_check_python(result, params)
+            if name == "run_tests" and self._barrier_bridge is not None:
+                self._barrier_bridge.record_test_run({
+                    "exit_code": 0 if result.success else 1,
+                    "output": result.output or "",
+                })
             if result.metadata.get("timed_out"):
                 self._track_timeout(name, params, task, result)
             if result.error_category == ErrorCategory.PERMISSION:
@@ -2217,6 +2323,8 @@ class AgentLoop:
 
     async def close(self) -> None:
         """释放 MCP 连接、Docker 沙箱、后台任务与记忆后端等资源。"""
+        if self._barrier_bridge is not None:
+            self._barrier_bridge.close()
         await self.mcp.disconnect_all()
         self._mcp_connected = False
         if self.docker.running:
