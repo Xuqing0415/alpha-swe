@@ -8,6 +8,21 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.0] - 2026-08-30
+
+### 新增
+- phase-barrier 阶段门禁集成（[alpha-swe#1](https://github.com/Xuqing0415/alpha-swe/issues/1)）：
+  `requirements-server.txt` 增加 `phase-barrier>=0.22.0`；新增 `agent/phase_barrier.py`
+  （`PhaseBarrierBridge` 轻量 SDK 桥接，依赖缺失/初始化失败/超时自动降级放行）与
+  `agent/tools/phase_barrier_tool.py`（`phase_barrier_gate` 工具：inspect/check/advance/
+  record_test_run/verify）；`AgentLoop` 接入任务启动钩子（约束提示注入
+  System Prompt）与工具拦截钩子（`file_ops`/`terminal_execute`/`run_tests` 未达前置
+  阶段即拦截并回传约束消息），测试运行结果自动记录到门禁状态；
+  `config/agent.yaml` 新增 `phase_barrier` 段（默认关闭）。
+- 测试：新增 `tests/test_phase_barrier.py`（桥接全流程、依赖缺失降级、默认关闭无桥接、
+  端到端"跳步写实现被拦截 + 按 SOP 推进到交付"），共 4 个用例。
+- 文档：README 增加"阶段门禁（phase-barrier 集成）"章节，
+  与 phase-barrier 仓库双向交叉引用。
 ## [0.2.0] - 2026-08-19
 
 ### 修复

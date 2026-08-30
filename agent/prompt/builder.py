@@ -72,6 +72,7 @@ class PromptBuilder:
         self.project_profile = ""
         self.project_state = ""
         self.exec_env = ""
+        self.gate_notice = ""
 
     def _resolve_system_template(self) -> str:
         """按 llm.provider 选择系统提示风格并记录决策。"""
@@ -111,6 +112,10 @@ class PromptBuilder:
         """注入实际执行环境（Windows PowerShell / Linux bash），避免 shell 语法误用。"""
         self.exec_env = context
 
+    def set_gate_notice(self, context: str) -> None:
+        """注入阶段门禁约束提示（phase-barrier）。"""
+        self.gate_notice = context
+
     def set_project_profile(self, context: str) -> None:
         """注入项目约定与技术栈摘要（阶段一 1.3）。"""
         self.project_profile = context
@@ -136,6 +141,7 @@ class PromptBuilder:
             project_profile=self.project_profile,
             project_state=self.project_state,
             exec_env=self.exec_env,
+            gate_notice=self.gate_notice,
         )
         upstream_text = ""
         if upstream:

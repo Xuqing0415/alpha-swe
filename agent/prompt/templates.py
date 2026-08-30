@@ -18,6 +18,10 @@ SYSTEM_TEMPLATE = """你是 Alpha-SWE，一个运行在安全沙箱中的软件�
 ## 执行环境
 {{ exec_env }}
 {% endif %}
+{% if gate_notice %}
+## 阶段门禁提示
+{{ gate_notice }}
+{% endif %}
 {% if memory %}
 ## 检索到的历史记忆
 {{ memory }}
@@ -57,6 +61,9 @@ SYSTEM_TEMPLATE_ANTHROPIC = """<system-role>你是 Alpha-SWE，一个运行在�
 </output-format>
 {% if exec_env %}
 <exec-env>{{ exec_env }}</exec-env>
+{% endif %}
+{% if gate_notice %}
+<gate-notice>{{ gate_notice }}</gate-notice>
 {% endif %}
 {% if memory %}
 <retrieved-memory>{{ memory }}</retrieved-memory>

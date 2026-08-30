@@ -372,6 +372,18 @@ class MCPConfig(BaseModel):
     mcp_servers: List[MCPClientConfig] = Field(default_factory=list)
 
 
+class PhaseBarrierConfig(BaseModel):
+    """phase-barrier 阶段门禁集成（编排器钩子，默认关闭，不改变现有行为）。"""
+
+    enabled: bool = False                 # 总开关；False 时所有钩子跳过
+    workdir: str = ""                     # 门禁工作区；空 = 使用 sandbox.workspace
+    user_request: str = ""                # 阶段 0 证据：用户需求原文（留空则用任务 prompt）
+    task_start_stage: int = 1             # 任务启动钩子检查的阶段（默认 1=Spec 设计）
+    implementation_stage: int = 3         # 写实现代码前必须达到的阶段
+    test_run_stage: int = 4               # 运行测试前必须达到的阶段
+    timeout: float = 10.0                 # 每次 SDK 调用超时（秒），超时降级放行
+
+
 class AppConfig(BaseModel):
     """聚合配置根节点。"""
     agent: AgentConfig = Field(default_factory=AgentConfig)
@@ -389,6 +401,7 @@ class AppConfig(BaseModel):
     active_plugins: List[str] = Field(default_factory=list)
     active_skills: List[str] = Field(default_factory=list)
     decision_log_path: str = ""  # 空 = 仅内存决策日志
+    phase_barrier: PhaseBarrierConfig = Field(default_factory=PhaseBarrierConfig)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "AppConfig":
