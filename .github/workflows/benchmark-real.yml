@@ -23,6 +23,9 @@ jobs:
     name: Real-project L1-L4 rerun
     runs-on: ubuntu-latest
     timeout-minutes: 240
+    # if 条件里不能直接用 secrets 上下文，改用 job 级环境变量做开关
+    env:
+      HAS_DEEPSEEK_KEY: ${{ secrets.DEEPSEEK_API_KEY != '' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -40,7 +43,7 @@ jobs:
           pip install pytest pytest-asyncio rich textual numpy scikit-learn mcp jinja2 psutil
 
       - name: Full benchmark rerun (real LLM)
-        if: ${{ secrets.DEEPSEEK_API_KEY != '' }}
+        if: env.HAS_DEEPSEEK_KEY == 'true'
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
         run: |
@@ -48,7 +51,7 @@ jobs:
             --timeout 1500 --max-cost 2.0 || true
 
       - name: Negative-control harness check (no LLM key)
-        if: ${{ secrets.DEEPSEEK_API_KEY == '' }}
+        if: env.HAS_DEEPSEEK_KEY != 'true'
         run: |
           # 每个任务在未修改的干净副本上完成标准必须判为失败，
           # 说明判定器能识别缺陷（回归保护），预期退出码非 0。
