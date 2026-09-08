@@ -30,6 +30,20 @@ except Exception:  # pragma: no cover - psutil 缺失时退化为自身进程检
         except OSError:
             return False
 
+def _coerce_pid(value: object) -> Optional[int]:
+    """锁文件 pid 字段安全解析；缺失/损坏返回 None（按无 pid 处理）。"""
+    try:
+        return int(value) if value not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+def _coerce_float(value: object) -> float:
+    """acquired_at 字段安全解析；缺失/损坏按 0 处理（视为陈旧锁）。"""
+    try:
+        return float(value) if value not in (None, "") else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
 
 class ProjectLockError(RuntimeError):
     """项目锁获取失败（另一实例正持有）。"""
@@ -62,11 +76,8 @@ class ProjectLock:
         return data
 
     def is_held_by_alive_process(self) -> bool:
-        info = self.holder_info()
-        pid = info.get("pid")
-        if not pid:
-            return False
-        return _pid_exists(int(pid))
+        pid = _coerce_pid(self.holder_info().get("pid"))
+        return pid is not None and _pid_exists(pid)
 
     # ---- 获取 / 释放 ----
     def acquire(self, timeout: float = 0.0) -> bool:
@@ -105,23 +116,37 @@ class ProjectLock:
                 time.sleep(0.1)
 
     def _reclaim_stale(self) -> bool:
-        """锁文件存在但持有者 PID 已不存在 -> 回收；返回是否可重试。"""
+        """锁文件指向已不存在的 pid -> 立即接管；pid 缺失/损坏 -> 超时兜底。
+
+        - 持有者 pid 已确认不存在（进程已死）：立即接管，不再要求 age>5s，
+          否则刚崩溃的残留锁在 timeout=0 下会一直无法回收；
+        - pid 缺失或损坏：保留 stale_after_seconds 超时兜底，避免误删仍在
+          创建中（尚未写入 pid）的新锁。
+        """
         info = self.holder_info()
-        pid = info.get("pid")
-        created = float(info.get("acquired_at") or 0)
+        pid = _coerce_pid(info.get("pid"))
+        created = _coerce_float(info.get("acquired_at"))
         age = time.time() - created
-        if not pid or not _pid_exists(int(pid)) and age > 5.0:
-            # 防御：锁刚创建(<5s)且读不到 pid 时暂不回收，避免误删
-            if pid or age > self.stale_after_seconds:
-                try:
-                    self.lock_path.unlink()
-                    logger.warning("回收残留项目锁: %s (pid=%s age=%.1fs)",
-                                   self.lock_path, pid, age)
-                    return True
-                except FileNotFoundError:
-                    return True
-                except OSError as e:
-                    logger.warning("回收残留锁失败: %s", e)
+        if pid is None:
+            stale = age > self.stale_after_seconds
+        elif _pid_exists(pid):
+            return False  # 持有者仍存活：绝不回收
+        else:
+            stale = True  # 持有者已死 -> 立即接管
+        if not stale:
+            return False
+        # TOCTOU 防御：决策期间文件被改写/重建则放弃本次回收，交由循环重试
+        if self.holder_info() != info:
+            return False
+        try:
+            self.lock_path.unlink()
+            logger.warning("回收残留项目锁: %s (pid=%s age=%.1fs)",
+                           self.lock_path, info.get("pid"), age)
+            return True
+        except FileNotFoundError:
+            return True
+        except OSError as e:
+            logger.warning("回收残留锁失败: %s", e)
         return False
 
     def release(self) -> None:
