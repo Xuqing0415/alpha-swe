@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field, model_validator
 CONFIG_FILE = Path(__file__).resolve().parent.parent / "config" / "agent.yaml"
 DEFAULT_MCP_FILE = Path(__file__).resolve().parent.parent / "config" / "mcp.yaml"
 DEFAULT_TEAM_FILE = Path(__file__).resolve().parent.parent / "config" / "team.yaml"
+DEFAULT_PHASE_BARRIER_DIR = Path(__file__).resolve().parent.parent / "config" / "phase_barrier"
 
 logger = logging.getLogger("alpha-swe.config")
 
@@ -382,6 +383,7 @@ class PhaseBarrierConfig(BaseModel):
     implementation_stage: int = 3         # 写实现代码前必须达到的阶段
     test_run_stage: int = 4               # 运行测试前必须达到的阶段
     timeout: float = 10.0                 # 每次 SDK 调用超时（秒），超时降级放行
+    template: str = ""                    # 模板预设：bug-fix/feature-add/refactor（config/phase_barrier/<name>.yaml）
 
 
 class AppConfig(BaseModel):
@@ -425,8 +427,44 @@ def load_config(path: Optional[str] = None) -> AppConfig:
     for cfg_path in candidates:
         data = _read_yaml_safe(cfg_path, "agent")
         if data is not None:
-            return AppConfig.from_dict(data)
+            cfg = AppConfig.from_dict(data)
+            return _apply_phase_barrier_template(cfg)
     return AppConfig()
+
+
+def load_phase_barrier_template(name: str) -> Dict[str, Any]:
+    """读取 config/phase_barrier/<name>.yaml 的 phase_barrier 覆盖段。
+
+    模板文件缺失 / 损坏 / 不含 phase_barrier 段时返回空 dict（不抛出），
+    保证「模板坏了不能让配置加载崩」。
+    """
+    if not name:
+        return {}
+    safe = name.replace("\\", "/").replace("/", "_")
+    path = DEFAULT_PHASE_BARRIER_DIR / (safe + ".yaml")
+    data = _read_yaml_safe(path, "phase_barrier_template")
+    if not isinstance(data, dict):
+        return {}
+    section = data.get("phase_barrier")
+    if not isinstance(section, dict):
+        return {}
+    # 过滤未知字段：只取 PhaseBarrierConfig 认识的键
+    known = set(PhaseBarrierConfig.model_fields)
+    return {k: v for k, v in section.items() if k in known}
+
+
+def _apply_phase_barrier_template(cfg: AppConfig) -> AppConfig:
+    """若 phase_barrier.template 指定了预设，把模板覆盖段合并进配置。"""
+    name = str(getattr(cfg.phase_barrier, "template", "") or "").strip()
+    if not name:
+        return cfg
+    overlay = load_phase_barrier_template(name)
+    if not overlay:
+        return cfg
+    for key, value in overlay.items():
+        setattr(cfg.phase_barrier, key, value)
+    cfg.phase_barrier.template = name
+    return cfg
 
 
 def load_mcp_config(path: Optional[str] = None) -> MCPConfig:

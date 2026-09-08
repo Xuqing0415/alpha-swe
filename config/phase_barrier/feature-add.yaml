@@ -1,0 +1,13 @@
+# Phase-Barrier 预设模板：feature-add（新增功能）
+#
+# 用法：在 config/agent.yaml 的 phase_barrier 段写入 template: "feature-add"
+# 阶段语义（phase-barrier 仓库约定）：
+#   1) 需求与验收标准  2) 设计 spec  3) 行为测试先行
+#   4) 实现新功能      5) 全量回归通过  6) 交付
+# 建议按任务复杂度放宽 timeout；门禁依赖缺失 / 超时自动降级放行。
+phase_barrier:
+  enabled: true
+  task_start_stage: 1
+  implementation_stage: 3
+  test_run_stage: 4
+  timeout: 15

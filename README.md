@@ -54,6 +54,12 @@ python -m tui --web "任务提示词"   # 打开 http://127.0.0.1:8765
 
 **默认即离线可跑**：`config/agent.yaml` 出厂为本地 hybrid 记忆 + TF-IDF，零外部依赖；
 完全离线演示用 `python -m agent run "任务" --config config/offline.yaml`（内置 MockLLM）。
+
+```powershell
+# 干跑预览执行计划（不执行任何工具/写入）/ 断点续跑（从最近快照恢复）
+python -m agent run "任务" --dry-run
+python -m agent run "任务" --resume
+```
 更多安装、首次运行与接入真实模型/MCP 见 [docs/getting-started.md](docs/getting-started.md)。
 
 ## 文档
@@ -87,7 +93,12 @@ phase_barrier:
   implementation_stage: 3
   test_run_stage: 4
   timeout: 10
+  template: ""        # 可选预设：bug-fix / feature-add / refactor（见 config/phase_barrier/）
 ```
+
+内置常见 SOP 门禁模板（`config/phase_barrier/{bug-fix,feature-add,refactor}.yaml`）：
+设置 `phase_barrier.template: bug-fix` 即自动合并预设的阶段参数；场景级配置模板见
+`examples/recipes/`。门禁状态可经 CLI JSON 的 `phase_barrier` 字段与 TUI 观测。
 
 端到端测试见 `tests/test_phase_barrier.py`（跳步写实现被拦截 + 按 SOP 推进到交付）。
 ## 项目状态

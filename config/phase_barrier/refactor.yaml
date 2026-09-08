@@ -1,0 +1,13 @@
+# Phase-Barrier 预设模板：refactor（重构，行为保持不变）
+#
+# 用法：在 config/agent.yaml 的 phase_barrier 段写入 template: "refactor"
+# 阶段语义（phase-barrier 仓库约定）：
+#   1) 重构目标与范围  2) 现状/依赖 spec  3) 行为基线测试先行
+#   4) 分步重构        5) 行为等价回归  6) 交付
+# 重构类任务强调第 3 阶段的基线测试：先跑通再动手，避免行为漂移。
+phase_barrier:
+  enabled: true
+  task_start_stage: 1
+  implementation_stage: 3
+  test_run_stage: 4
+  timeout: 15

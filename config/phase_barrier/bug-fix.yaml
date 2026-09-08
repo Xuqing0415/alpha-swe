@@ -1,0 +1,15 @@
+# Phase-Barrier 预设模板：bug-fix（修复缺陷）
+#
+# 用法：在 config/agent.yaml 的 phase_barrier 段写入 template: "bug-fix"
+#       （等价于手动把下方覆盖项复制进 agent.yaml）。
+# 阶段语义（phase-barrier 仓库约定，阶段 0 为需求原文）：
+#   1) 需求/缺陷描述落盘  2) 根因分析  3) 测试用例先行（复现失败）
+#   4) 最小修复实现      5) 全量回归通过  6) 交付
+# 证据文件放门禁工作区（默认 sandbox.workspace）：spec/根因、test_*.py、代码与运行记录。
+# 门禁离线不可用（未安装 anti_shortcut / 超时）时自动放行，不影响既有行为。
+phase_barrier:
+  enabled: true
+  task_start_stage: 1
+  implementation_stage: 3
+  test_run_stage: 4
+  timeout: 10

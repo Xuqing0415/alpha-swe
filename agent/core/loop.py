@@ -446,7 +446,8 @@ class AgentLoop:
             self.scheduler.wake()
 
     # ---- 主入口 ----
-    async def run(self, prompt: str, resume: bool = False) -> LoopResult:
+    async def run(self, prompt: str, resume: bool = False,
+                   dry_run: bool = False) -> LoopResult:
         self._current_prompt = prompt
         # phase-barrier 门禁：任务启动钩子（默认检查阶段 1=Spec 设计），失败时把约束提示注入 System Prompt
         self._barrier_task_start(prompt)
@@ -459,7 +460,8 @@ class AgentLoop:
         run_span = self.tracer.start_span("run", "run", prompt=prompt)
 
         # MCP 集成：连接服务器 -> 工具合并 -> 资源注入（失败容忍）
-        if self.config.mcp.enabled and not self._mcp_connected:
+        if (self.config.mcp.enabled and not self._mcp_connected
+                and not dry_run):
             connected = await self.mcp.ensure_connected()
             if connected:
                 await self._register_mcp_tools()
@@ -472,7 +474,7 @@ class AgentLoop:
             )
 
         # Docker 沙箱：会话级容器启动（失败自动降级到本地工具）
-        if self.config.sandbox.docker_enabled:
+        if self.config.sandbox.docker_enabled and not dry_run:
             await self.docker.start(self.config.sandbox.workspace)
             self._decision.record(
                 "docker_enabled", "sandbox.docker_enabled", True,
@@ -481,7 +483,8 @@ class AgentLoop:
 
         # 多实例互斥：项目锁（另一实例持有时明确拒绝启动）
         if (self.config.agent.project_lock_enabled
-                and self.project_lock is None):
+                and self.project_lock is None
+                and not dry_run):
             lock = ProjectLock(
                 project_dir=self.config.sandbox.workspace,
                 holder=self.config.agent.project_lock_holder or "",
@@ -559,7 +562,8 @@ class AgentLoop:
         # 方向一 3.1/3.4：issue→文件推荐 + 相关测试自动选择（配置门控）
         self._init_issue_recommendations(prompt)
         # 主线一 1.1/1.2：项目状态感知 + 会话连续性（差异注入 / 续接提示）
-        self._begin_persistent_session(prompt, resume)
+        if not dry_run:
+            self._begin_persistent_session(prompt, resume)
         skill = self._build_injected_context(prompt)
         if skill:
             self.prompt_builder.set_skill(skill)
@@ -621,6 +625,9 @@ class AgentLoop:
         self._emit("plan_created", total=len(plan),
                    tasks=[t.instruction for t in plan])
         self.state.transition(AgentPhase.READY)
+        if dry_run:
+            # 干跑模式（CLI --dry-run）：只输出执行计划预览，不进入执行阶段
+            return self._finish_dry_run(prompt, plan, run_span)
 
         # 执行 -> RUNNING
         self.state.transition(AgentPhase.RUNNING)
@@ -640,6 +647,7 @@ class AgentLoop:
             self._maybe_self_improve(prompt, result)
             self._maybe_extract_benchmark(prompt, result)
             self._last_result = result
+            self._maybe_phase_barrier_epilogue(prompt, result)
             self._end_persistent_session(prompt, result)
             return result
 
@@ -677,6 +685,7 @@ class AgentLoop:
         self._maybe_self_improve(prompt, result)
         self._maybe_extract_benchmark(prompt, result)
         self._last_result = result
+        self._maybe_phase_barrier_epilogue(prompt, result)
         self._end_persistent_session(prompt, result)
         return result
 
@@ -1458,6 +1467,118 @@ class AgentLoop:
                     metadata={"gate": "test", "stage": stage},
                 )
         return None
+
+    # ---- phase-barrier 深化：干跑收尾 / 门禁汇总与记忆联动 / 状态快照 ----
+    def _finish_dry_run(self, prompt: str, plan: List[Task],
+                        run_span: Any) -> LoopResult:
+        """干跑模式收尾（CLI --dry-run）：生成计划预览即返回，不执行任何工具。"""
+        preview = "\n".join(
+            "  - [%s] %s%s%s" % (
+                t.id,
+                t.instruction,
+                ("（依赖: %s）" % ",".join(t.dependencies))
+                if t.dependencies else "",
+                (" priority=%d" % t.priority) if t.priority else "",
+            )
+            for t in plan
+        )
+        self._decision.record(
+            "dry_run", "cli.dry_run", True,
+            "干跑模式：仅生成执行计划（%d 个子任务），未执行任何工具/写入"
+            % len(plan),
+        )
+        self._emit("dry_run_plan", total=len(plan),
+                   tasks=[t.instruction for t in plan])
+        self.metrics.set("phase", "dry_run")
+        self.metrics.set("tasks_total", len(plan))
+        self.tracer.end_span(run_span, status="ok", dry_run=True,
+                             total_rounds=0, plan_size=len(plan))
+        self._safe_trace_export()
+        result = LoopResult(
+            final_answer="[dry-run] 执行计划预览（未执行，共 %d 个子任务）:\n%s"
+            % (len(plan), preview),
+            phase=AgentPhase.COMPLETED,
+            tasks=plan,
+            events=self.events,
+        )
+        self._last_result = result
+        return result
+
+    def _maybe_phase_barrier_epilogue(self, prompt: str,
+                                      result: LoopResult) -> None:
+        """会话收尾：启用了阶段门禁时，把门禁结论写入长期记忆并发出汇总事件。"""
+        bridge = self._barrier_bridge
+        if bridge is None:
+            return
+        try:
+            records = [
+                r for r in self._decision.records()
+                if str(r.get("name", "")).startswith("phase_barrier.")
+            ]
+            blocked = sum(
+                1 for r in records
+                if str(r.get("name", "")) == "phase_barrier.blocked"
+                or "拦截" in str(r.get("decision", "")))
+            total = len(records)
+            status = "passed" if result.ok else "failed"
+            text = (
+                "phase-barrier 门禁结论: 任务%s，门禁决策 %d 条"
+                "（放行 %d / 拦截 %d）。"
+                % (status, total, total - blocked, blocked)
+            )
+            if blocked:
+                names = sorted({
+                    r.get("name", "") for r in records
+                    if "拦截" in str(r.get("decision", ""))
+                    or str(r.get("name", "")) == "phase_barrier.blocked"
+                })
+                text += " 拦截点: " + "、".join(names[:5]) + "。"
+            self._decision.record(
+                "phase_barrier.summary", "phase_barrier.enabled", True,
+                "门禁决策 %d 条（放行 %d / 拦截 %d），任务状态 %s"
+                % (total, total - blocked, blocked, status),
+            )
+            inspect: Dict[str, Any] = {}
+            try:
+                inspect = bridge.inspect()
+            except Exception:
+                inspect = {"current_stage": None}
+            self._emit("phase_barrier_summary", status=status,
+                       decisions=total, blocked=blocked,
+                       current_stage=inspect.get("current_stage"),
+                       complete=bool(inspect.get("complete")))
+            # 记忆联动：长期记忆可用且本次确有门禁活动时写入项目知识
+            if total > 0 and not getattr(self.memory, "disabled", True):
+                self.memory.remember(
+                    "phase_barrier_outcome", text,
+                    metadata={
+                        "outcome": status, "blocked": blocked,
+                        "decisions": total, "gate": "phase_barrier",
+                        "prompt": str(prompt)[:200],
+                    },
+                )
+                self._decision.record(
+                    "phase_barrier.memory", "memory.backend",
+                    self.config.memory.backend,
+                    "门禁结论已写入长期记忆（kind=phase_barrier_outcome）",
+                )
+        except Exception as e:
+            logger.warning("phase-barrier 收尾汇总失败（不影响任务）: %s", e)
+
+    def pb_status(self) -> Dict[str, Any]:
+        """门禁状态快照（供 CLI JSON / TUI / Web 面板可视化；未启用时为空）。"""
+        if self._barrier_bridge is None:
+            return {"enabled": False, "available": False}
+        try:
+            info = self._barrier_bridge.inspect()
+            return {
+                "enabled": True,
+                "available": bool(info.get("skip") is False),
+                "template": getattr(self.config.phase_barrier, "template", ""),
+                **info,
+            }
+        except Exception as e:
+            return {"enabled": True, "available": False, "error": str(e)}
 
     async def _run_tool(self, name: str, params: Dict[str, Any],
                         task: Task) -> ToolResult:
