@@ -56,7 +56,10 @@ jobs:
           SOAK_HOURS: ${{ inputs.soak_hours || '1' }}
           SOAK_SESSIONS_PER_BATCH: ${{ inputs.sessions_per_batch || '12' }}
         run: |
-          python -X utf8 scripts/run_soak_long.py             --hours "${SOAK_HOURS}"             --sessions-per-batch "${SOAK_SESSIONS_PER_BATCH}"             --report-dir logs/soak/ci
+          python -X utf8 scripts/run_soak_long.py \
+            --hours "${SOAK_HOURS}" \
+            --sessions-per-batch "${SOAK_SESSIONS_PER_BATCH}" \
+            --report-dir logs/soak/ci
 
       - name: Offline soak boundedness tests
         env:
@@ -64,7 +67,8 @@ jobs:
           SOAK_CONCURRENCY: "3"
           SOAK_PER_STREAM: "10"
         run: |
-          python -X utf8 -m pytest tests/test_soak.py -q             -p no:cacheprovider --durations=8
+          python -X utf8 -m pytest tests/test_soak.py -q \
+            -p no:cacheprovider --durations=8
 
       - name: Upload soak report
         if: always()

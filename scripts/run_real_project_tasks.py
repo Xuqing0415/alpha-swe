@@ -223,6 +223,9 @@ def run_task(task: BenchTask, docker: bool, timeout: int, max_cost: float,
     ws = TASK_WORKSPACE_ROOT / task.id
     if ws.exists():
         _rmtree(ws)
+        if ws.exists():
+            raise RuntimeError("无法清理旧任务工作区: %s"
+                               "（目录/文件可能被占用或权限受限）" % ws)
     _copy_tree(SAMPLE_PROJECT, ws)
     record: Dict[str, object] = {
         "id": task.id, "level": task.level, "note": task.note,

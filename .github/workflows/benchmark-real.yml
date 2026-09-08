@@ -53,10 +53,26 @@ jobs:
       - name: Negative-control harness check (no LLM key)
         if: env.HAS_DEEPSEEK_KEY != 'true'
         run: |
-          # 每个任务在未修改的干净副本上完成标准必须判为失败，
-          # 说明判定器能识别缺陷（回归保护），预期退出码非 0。
-          python -X utf8 scripts/run_real_project_tasks.py --skip-llm || true
-
+          # 在 8 个干净副本上跑完成标准判定器（不消耗 LLM）：
+          # - 判定器正常：全部判失败（passed=0）；
+          # - 判定器回归：把缺陷项目判成通过（passed>0），CI 报错；
+          # - 执行器崩溃：报告缺失或未跑满 8 个任务，CI 报错。
+          set +e
+          python -X utf8 scripts/run_real_project_tasks.py --skip-llm
+          code=$?
+          set -e
+          echo "skip-llm exit=$code (预期非 0)"
+          python -X utf8 - <<'PY'
+          import json
+          with open('logs/real_project_report.json', encoding='utf-8') as fh:
+              report = json.load(fh)
+          total, passed = report.get('total', -1), report.get('passed', -1)
+          print('negative-control: total=%d passed=%d' % (total, passed))
+          if passed != 0:
+              raise SystemExit('阴性对照不应通过：干净副本被判为完成（判定器疑似回归）')
+          if total != 8:
+              raise SystemExit('阴性对照未完整执行：total=%d，预期 8' % total)
+          PY
       - name: Upload benchmark report
         if: always()
         uses: actions/upload-artifact@v4
