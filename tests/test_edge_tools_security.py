@@ -64,7 +64,7 @@ def spawn_pipe():
     try:
         asyncio.run(_probe())
         return True
-    except (PermissionError, OSError) as e:
+    except OSError as e:
         pytest.skip("当前沙箱禁止 asyncio+PIPE 子进程创建（%s），跳过真实进程用例" % e)
 
 
@@ -175,7 +175,7 @@ async def test_terminal_giant_output_truncated_to_configured_cap(ws_tmp, spawn_p
     assert "已压缩" in obs
     assert len(obs) < len(raw)
     outputs = ws_tmp / "logs" / "outputs"
-    archived = [f for f in outputs.glob("*.txt")] if outputs.is_dir() else []
+    archived = list(outputs.glob("*.txt")) if outputs.is_dir() else []
     assert any(len(f.read_text(encoding="utf-8")) >= len(raw) for f in archived)
 
 
