@@ -4,6 +4,10 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.12+-blue.svg)]()
 
+> [!WARNING]
+> 仓库中的 **旧版七层原型已整体迁移至 [`legacy/`](legacy/README.md)**，仅供对照参考、不再演进。
+> 新用户请使用新核心入口：`python -m agent run "任务"`（CLI）或 `python -m tui`（TUI）。
+
 基于设计文档落地的最小但可扩展的 SWE Agent 系统：核心通信完全异步（asyncio），
 任务以 DAG 调度，支持长期记忆、技能注入、上下文压缩、安全沙箱、多 Agent 协作与用户中断。
 
@@ -18,14 +22,14 @@
 
 ## 两套架构（重要）
 
-仓库同时存在两套独立实现，入口与默认配置不同，请勿混用：
+仓库中新核心与旧版原型严格分层，入口与默认配置不同：
 
 | 架构 | 入口 | 配置 | 状态 |
 | --- | --- | --- | --- |
 | **新核心（推荐）** | `python -m agent run "任务"`、`python -m tui` | `config/agent.yaml`（Pydantic 校验） | 主干，功能齐全 |
-| 旧版七层原型 | `main.py`、`test_all.py` | `config.yaml`（根目录，无校验） | 仅作对照参考，不再演进 |
+| 旧版七层原型 | `python legacy/main.py`（demo/multi_agent/-i）、`legacy/test_all.py` | `legacy/config.yaml`（无校验） | 仅作对照参考，不再演进 |
 
-完整说明（项目结构与设计与实现对应关系）见 [docs/architecture.md](docs/architecture.md)。
+详细说明（目录结构、设计与实现对应关系）见 [docs/architecture.md](docs/architecture.md)；旧版参见 [legacy/README.md](legacy/README.md)。
 
 ## 快速开始
 
@@ -59,6 +63,7 @@ python -m tui --web "任务提示词"   # 打开 http://127.0.0.1:8765
 - [docs/architecture.md](docs/architecture.md) — 架构总览与设计实现对应关系
 - [docs/configuration.md](docs/configuration.md) — 配置系统与决策日志分析
 - [docs/status.md](docs/status.md) — 项目现状核对（2026-08 审计）与真实项目验证
+- [docs/edge-cases.md](docs/edge-cases.md) — 边界场景与故障排查
 - `docs/features/` — 记忆、代码语义、多语言、技能/插件、多 Agent、沙箱、MCP、可观测性、TUI
 - `docs/01`-`09` — Docker/并发/真实项目/SWE-bench/产品化/代码质量/多语言/开源准备等历史验证报告
 
@@ -88,10 +93,8 @@ phase_barrier:
 ## 项目状态
 
 全量测试通过；真实 LLM（litellm）与真实 Docker 沙箱均已端到端验证，细节见
-[docs/status.md](docs/status.md)。路线图 [ROADMAP.md](ROADMAP.md) · 变更日志
-[CHANGELOG.md](CHANGELOG.md)。
+[docs/status.md](docs/status.md)。路线图 [ROADMAP.md](ROADMAP.md) · 变更日志 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 贡献
 
-贡献指南见 [CONTRIBUTING.md](CONTRIBUTING.md)（Conventional Commits）；本项目使用
-[MIT 许可证](LICENSE)。
+贡献指南见 [CONTRIBUTING.md](CONTRIBUTING.md)（Conventional Commits）；本项目使用 [MIT 许可证](LICENSE)。
