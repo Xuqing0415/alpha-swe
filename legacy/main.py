@@ -19,8 +19,12 @@ import argparse
 import time
 from datetime import datetime
 
-# 确保项目根目录在 path 中
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_REPO_ROOT = os.path.dirname(_HERE)
+# legacy/ 与仓库根目录都加入 path：平铺模块相互 import，agent 包在根目录
+for _p in (_HERE, _REPO_ROOT):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from loop import Loop
 from terminal_ui import TerminalUI, HAS_RICH
@@ -145,7 +149,7 @@ def main():
     parser.add_argument("--mode", "-m", type=str, default="standard",
                         choices=["standard", "multi_agent", "demo"],
                         help="运行模式: standard/multi_agent/demo")
-    parser.add_argument("--config", "-c", type=str, default="config.yaml",
+    parser.add_argument("--config", "-c", type=str, default=os.path.join(_HERE, "config.yaml"),
                         help="MCP 配置文件路径")
     parser.add_argument("--no-ui", action="store_true",
                         help="禁用 Terminal UI")

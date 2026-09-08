@@ -7,7 +7,7 @@
 
 对照全量复盘清单逐项核对后的更正（详见 `../logs/FIX_REPORT.md` 与历次提交）：
 
-- **测试总量**：`tests/` 全量 569 passed / 0 failed；旧原型 `test_all.py` 13 passed / 0 failed（清单的「351+」
+- **测试总量**：`tests/` 全量 569 passed / 0 failed；旧原型 `legacy/test_all.py` 13 passed / 0 failed（清单的「351+」
   已过时）。
 - **基准集路径**：清单写的 `tests/benchmarks/` 不存在；实际在 `tests/test_benchmark_suite.py`（28 例）+
   `tests/test_real_project_suite.py`（18 例）+ `tests/test_long_task_suite.py`（4 例），共 50 例。

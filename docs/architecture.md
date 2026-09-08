@@ -2,7 +2,7 @@
 
 > 本文档从根 README 迁移，保留「目录结构」「两套架构」与「设计与实现的对应关系」。
 >
-> **新旧架构边界**：顶层 `loop.py`、`scheduler.py`、`main.py` 等为旧版七层原型（仅作对照参考，不再演进）；真正主干在 `agent/` 包内。
+> **新旧架构边界**：`legacy/` 目录为旧版七层原型（仅作对照参考，不再演进）；真正主干在 `agent/` 包内。更多说明见 [`legacy/README.md`](../legacy/README.md)。
 
 ## 目录结构
 
@@ -31,8 +31,8 @@ config/
 └── aggressive.yaml     A/B 对比激进配置（17 项关键参数取反）
 scripts/analyze_decisions.py  决策日志分析：列出已生效/未生效配置项
 examples/quick_demo.py  脚本化 LLM 的端到端演示
-tests/                  新核心测试（760 项，含故障注入/浸泡/混沌/基准集）
-loop.py, scheduler.py, ... 旧版七层原型（保留，作为对照参考）
+tests/                  新核心测试（全量通过，含故障注入/浸泡/混沌/基准集）
+legacy/                 旧版七层原型（保留，作为对照参考；入口 legacy/main.py）
 ```
 
 
@@ -43,7 +43,7 @@ loop.py, scheduler.py, ... 旧版七层原型（保留，作为对照参考）
 | 架构 | 入口 | 配置 | 状态 |
 | --- | --- | --- | --- |
 | **新核心（推荐）** | `python -m agent run "任务"`、`python -m tui` | `config/agent.yaml`（Pydantic 校验） | 主干，功能齐全 |
-| 旧版七层原型 | `main.py`、`test_all.py` | `config.yaml`（根目录，无校验） | 仅作对照参考，不再演进 |
+| 旧版七层原型 | `python legacy/main.py`（demo/multi_agent/-i）、`legacy/test_all.py` | `legacy/config.yaml`（无校验） | 仅作对照参考，不再演进 |
 
 两套默认值不一致（记忆后端、LLM provider 等）：新核心默认 `memory.backend: hybrid`
 （本地 SQLite + TF-IDF，离线持久），旧原型默认可能指向 Chroma/在线模型。任务级配置以

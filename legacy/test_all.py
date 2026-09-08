@@ -1,6 +1,7 @@
 """Alpha-SWE 七层集成测试（pytest 版）
 
 运行方式:
+    cd legacy
     python -X utf8 -m pytest test_all.py -v
 （无需 --basetemp；测试数据写入 gitignored 的 test_workspace/）
 """
@@ -24,6 +25,9 @@ from recovery import ErrorRecovery, RetryConfig
 from critic_agent import CriticAgent
 from structured_log import new_trace, setup_structured_logging
 from tools.base import ToolResult
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+LEGACY_CONFIG = os.path.join(_HERE, "config.yaml")
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -112,7 +116,7 @@ def test_sandbox_blocking():
 
 def test_mcp_config_isolated():
     """第七关：MCP 配置加载（load() 返回副本，不污染内部配置）"""
-    mcp = MCPConfigLoader("config.yaml")
+    mcp = MCPConfigLoader(LEGACY_CONFIG)
     config = mcp.load()
     assert mcp.is_tool_enabled("terminal_execute") is True
     assert mcp.is_tool_enabled("git") is False
@@ -194,7 +198,7 @@ def test_structured_logging():
 
 def test_full_loop_demo():
     """全流程集成：搜索 console.log -> 生成报告 -> 读取报告（Windows 可跑通）"""
-    loop = Loop(config_path="config.yaml", skills_dir="./skills")
+    loop = Loop(config_path=LEGACY_CONFIG, skills_dir="./skills")
     try:
         result = loop.run(
             "请帮我读取 src/ 下所有 .ts 文件，找出所有的 console.log，"
@@ -214,7 +218,7 @@ def test_full_loop_demo():
 
 def test_multi_agent_mode():
     """Multi-Agent 模式（Planner + Executor + Critic + Recovery）"""
-    loop = Loop(config_path="config.yaml", skills_dir="./skills")
+    loop = Loop(config_path=LEGACY_CONFIG, skills_dir="./skills")
     try:
         result = loop.run_with_multi_agent("请列出当前目录的所有文件")
         assert "success" in result

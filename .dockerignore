@@ -37,7 +37,7 @@ models
 
 # ===== 开发/测试/文档（镜像只跑服务，不需要）=====
 tests
-test_all.py
+legacy
 scripts
 swe_eval
 examples
