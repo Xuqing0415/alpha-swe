@@ -54,3 +54,47 @@
 
 - 新分支建议前缀 `feat/` 或 `fix/`；提交前先跑相关单测与 flake8。
 - PR 需通过 CI（`quality-gate.yml`：flake8 + pytest）才能合并。
+
+
+## 代码结构导读
+
+| 路径 | 说明 |
+| --- | --- |
+| `agent/core/` | 新核心：异步状态机、Task/DAG 调度、决策日志 |
+| `agent/planner/`、`agent/prompt/`、`agent/parser/` | 规划 / Prompt 构建 / 输出解析 |
+| `agent/tools/`、`agent/code/` | 工具层与代码语义理解 |
+| `agent/memory/`、`agent/context/` | 记忆闭环、技能/插件与上下文压缩 |
+| `agent/sandbox/`、`agent/observability/`、`agent/mcp/` | 沙箱、可观测性、MCP |
+| `tui/`、`server/`、`swe_eval/` | TUI、HTTP 服务、SWE-bench 评估 |
+| `legacy/` | 旧版七层原型，仅供对照，不再演进 |
+| `config/*.yaml`、`docs/` | 配置样例与文档（导航见 `docs/index.md`） |
+
+新代码一律写入 `agent/`（新核心）对应子包，不要写进 `legacy/`。
+
+## 调试指南
+
+- CLI 直接跑：`python -m agent run "任务" --config config/offline.yaml`（离线 MockLLM，可复现）。
+- TUI：`python -m tui --config config/agent.yaml "任务"`；`--web` 打开观测面板，`--replay` 回放会话档案。
+- 决策日志：任务运行后查看 `logs/decision_log*.jsonl`，或用 `python -X utf8 scripts/analyze_decisions.py` 聚合。
+- Trace / 会话：`logs/traces/`（JSONL）与 `logs/sessions/`（会话档案）。
+- 建议先写最小离线复现（`tests/` 内），再断点调试，避免直接依赖真实 LLM。
+
+## PR 模板
+
+提交 PR 时请复制以下模板，取消更新无关分支后填写：
+
+```markdown
+## 变更说明
+<!-- 一句话说明改了什么、为什么 -->
+
+## 关联 issue
+<!-- #12 -->
+
+## 影响范围
+- [ ] agent 核心 / 工具 / 记忆 / 沙箱 / 可观测 / TUI / server / 文档
+- [ ] 已同步更新 docs/ 对应文档
+
+## 验证
+- [ ] 相关单测通过：python -X utf8 -m pytest tests/<file> -q
+- [ ] flake8 通过：flake8 agent/ --jobs=1
+```

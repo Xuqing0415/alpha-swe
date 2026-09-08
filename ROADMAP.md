@@ -1,6 +1,6 @@
 # 路线图
 
-## v0.2 —— 多语言与工具增强（进行中）
+## v0.2 —— 多语言与工具增强（已发布 0.2.0，下列收尾项随后续版本）
 - [x] 多语言符号/调用图提取（Java、Go、Rust、C/C++、C#、Ruby、PHP，正则回退）
 - [x] 测试运行器扩展（Maven、Gradle、go test、cargo test、CTest）
 - [x] 依赖清单识别（pom.xml、build.gradle、go.mod、Cargo.toml、CMakeLists.txt 等）
@@ -19,6 +19,16 @@
 - [ ] Web 面板任务回放、决策轨迹可视化
 - [ ] 多模态输入评估（截图理解 UI/架构图）
 
+## v0.5 —— 收敛与生态（规划）
+
+- [ ] >8h 连续运行稳定性现场验证（在 `tests/test_soak.py` 基础上扩展，适时接入 CI 定时任务）
+- [ ] 真实项目基准完成率复测与 L3/L4 失败根因收集
+- [ ] 文档链接检查 CI（docs-check）
+- [ ] Issue 模板与标签体系（`.github/ISSUE_TEMPLATE/`）
+- [ ] 示例配方库 `examples/recipes/`（fast-fix / deep-refactor / multi-agent）
+- [ ] PyPI 发布评估（`pip install alpha-swe`）
+
 ## 长期
+
 - [ ] 多语言 SWE-bench 扩展（SWE-bench Multilingual 等）
 - [ ] 团队级记忆与技能共享
