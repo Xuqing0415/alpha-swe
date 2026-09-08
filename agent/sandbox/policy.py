@@ -126,8 +126,11 @@ class SandboxPolicy:
             if blocked.lower() in lowered:
                 self._violate(f"命令含危险关键字: {blocked}")
                 return False, f"禁止执行危险命令（包含 {blocked}）"
-        # 受保护路径防删（rm / del / Remove-Item）
+        # 受保护路径防删（rm / del / Remove-Item），根目录删除一律拦截
         for target in self._deleted_paths(command):
+            if self._is_root_delete_target(target):
+                self._violate(f"删除根目录/空路径: {target}")
+                return False, f"禁止删除根目录/空路径: {target}"
             if self._is_protected(target):
                 self._violate(f"删除受保护路径: {target}")
                 if self.decision_logger is not None:
@@ -192,12 +195,30 @@ class SandboxPolicy:
             rest = next((g for g in reversed(groups) if g), m.group(0))
             # 去掉选项，取第一个非选项 token 作为删除目标
             strip_chars = chr(39) + chr(96) + chr(34)  # ' " `
-            for tok in rest.replace("\\", "/").split():
-                if tok.startswith("-"):
+            # 同时按空白与 shell 分隔符切分，避免 ';'、'&&'、'|'、反引号、
+            # '$()' 等包裹使删除目标带上尾随元字符而漏检
+            for tok in re.split(r"[\s;&|()<>`]+", rest.replace("\\", "/")):
+                if not tok or tok.startswith("-"):
                     continue
                 targets.append(tok.strip(strip_chars))
                 break
         return targets
+
+    @staticmethod
+    def _is_root_delete_target(target: str) -> bool:
+        """删除目标指向文件系统根（'/'、'/*'、Windows 盘根如 C:/）时拦截。
+
+        覆盖 'rm -rf  /'（多余空白）、'rm -fr /'、'rm -rfv /'、
+        'rm --recursive --force /' 等黑名单子串漏网变体。
+        """
+        t = str(target).strip("'\"` \t").rstrip(";|&")
+        norm = t.rstrip("/\\")
+        if norm == "" or norm == "/*":
+            return True
+        if os.name == "nt" and re.fullmatch(r"[A-Za-z]:|(?:[A-Za-z]:)?/\*", norm):
+            # C:、C:\\、C:/、C:/* 均视为盘根删除
+            return True
+        return False
 
     def _is_protected(self, path: str) -> bool:
         norm = str(path).replace("\\", "/").strip("\"'` ")
