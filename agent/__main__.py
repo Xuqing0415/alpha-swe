@@ -121,6 +121,10 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                        help="开启 MCP 服务器连接（CLI 默认关闭）")
     run_p.add_argument("--self-check", action="store_true",
                        help="仅运行启动自检并退出（0=关键检查全部通过）")
+    run_p.add_argument("--dry-run", action="store_true",
+                       help="干跑模式：生成执行计划并预览，不执行任何工具/写入")
+    run_p.add_argument("--resume", action="store_true",
+                       help="断点续跑：从最近任务快照恢复（无快照则重新规划）")
     run_p.add_argument("--version", action="version",
                        version="alpha-swe " + _version())
     return parser.parse_args(argv)
@@ -181,15 +185,17 @@ def estimate_cost(counters: Dict[str, Any], rate_per_1k: float) -> float:
 def make_payload(result: Optional[LoopResult], loop: AgentLoop,
                  exit_code: int, elapsed_s: float,
                  rate_per_1k: float,
-                 error: Optional[str] = None) -> Dict[str, Any]:
+                 error: Optional[str] = None,
+                 dry_run: bool = False) -> Dict[str, Any]:
     """组装稳定的机器可读输出 schema（不随内部实现变化）。"""
     snap = loop.metrics.snapshot()
     counters = snap.get("counters", {})
     gauges = snap.get("gauges", {})
     tokens = int(counters.get("token_usage", 0.0) or 0.0)
+    status = "dry_run" if dry_run else _STATUS_NAMES.get(exit_code, "failed")
     payload: Dict[str, Any] = {
         "ok": exit_code == EXIT_OK,
-        "status": _STATUS_NAMES.get(exit_code, "failed"),
+        "status": status,
         "final_answer": (result.final_answer if result else "")
                         or (error or ""),
         "rounds": (result.total_rounds if result
@@ -209,6 +215,25 @@ def make_payload(result: Optional[LoopResult], loop: AgentLoop,
     }
     if error:
         payload["error"] = error
+    if dry_run and result is not None and result.tasks:
+        payload["plan"] = [
+            {
+                "id": t.id,
+                "instruction": t.instruction,
+                "dependencies": list(t.dependencies),
+                "priority": t.priority,
+                "role": t.role,
+                "criticality": t.criticality,
+                "status": t.status.value,
+            }
+            for t in result.tasks
+        ]
+    try:
+        pb = loop.pb_status()
+        if pb.get("enabled"):
+            payload["phase_barrier"] = pb
+    except Exception:
+        pass
     if exit_code != EXIT_OK:
         # 收敛期 P2：失败任务附带归因类别与改进建议（供复盘 / CI 分析）
         try:
@@ -233,15 +258,16 @@ def _default_loop_factory(cfg: AppConfig) -> AgentLoop:
 
 
 async def _drive(loop: AgentLoop, prompt: str, timeout: Optional[float],
-                 max_cost: Optional[float],
-                 rate_per_1k: float
+                 max_cost: Optional[float], rate_per_1k: float,
+                 resume: bool = False, dry_run: bool = False
                  ) -> Tuple[int, Optional[LoopResult], Optional[str]]:
     """驱动 loop.run，处理超时与预算熔断；返回 (退出码, 结果, 错误信息)。
 
     预算熔断：后台监控任务轮询 metrics 的 token_usage，超过 --max-cost
     即取消运行任务（与超时同级的硬中断），保证长任务不会无限消耗 token。
     """
-    run_task = asyncio.create_task(loop.run(prompt))
+    run_task = asyncio.create_task(
+        loop.run(prompt, resume=resume, dry_run=dry_run))
     budget_exceeded = asyncio.Event()
     monitor: Optional[asyncio.Task] = None
     if max_cost and max_cost > 0:
@@ -296,11 +322,12 @@ async def _drive(loop: AgentLoop, prompt: str, timeout: Optional[float],
 
 
 async def _run(loop: AgentLoop, prompt: str, timeout: Optional[float],
-               max_cost: Optional[float],
-               rate_per_1k: float) -> Tuple[int, Optional[LoopResult],
-                                           Optional[str]]:
+               max_cost: Optional[float], rate_per_1k: float,
+               resume: bool = False, dry_run: bool = False
+               ) -> Tuple[int, Optional[LoopResult], Optional[str]]:
     try:
-        return await _drive(loop, prompt, timeout, max_cost, rate_per_1k)
+        return await _drive(loop, prompt, timeout, max_cost, rate_per_1k,
+                            resume=resume, dry_run=dry_run)
     finally:
         await loop.close()
 
@@ -324,6 +351,13 @@ def _emit(payload: Dict[str, Any], output_format: str) -> None:
                 "任务: %s 个（完成 %s / 失败 %s / 跳过 %s）"
                 % (tasks["total"], tasks["completed"],
                    tasks["failed"], tasks["skipped"]))
+        if payload.get("plan"):
+            lines.append("执行计划（dry-run，未执行）:")
+            for t in payload["plan"]:
+                dep = ("（依赖: %s）" % ",".join(t["dependencies"])
+                       ) if t.get("dependencies") else ""
+                lines.append("  - [%s] %s%s" % (t["id"], t["instruction"],
+                                                dep))
         if payload.get("files_modified"):
             lines.append("修改文件:")
             lines.extend("  - %s" % p for p in payload["files_modified"])
@@ -360,6 +394,10 @@ def run_cli(args: argparse.Namespace,
             loop_factory: Optional[Callable[[AppConfig], AgentLoop]] = None
             ) -> int:
     """解析后执行 CLI；返回进程退出码。"""
+    if (getattr(args, "dry_run", False)
+            and getattr(args, "resume", False)):
+        print("用法错误: --dry-run 与 --resume 不能同时使用", file=sys.stderr)
+        return EXIT_INTERRUPT
     factory = loop_factory or _default_loop_factory
     try:
         cfg = build_config(args)
@@ -395,15 +433,18 @@ def run_cli(args: argparse.Namespace,
     try:
         exit_code, result, error = asyncio.run(
             _run(loop, prompt, args.timeout, args.max_cost,
-                 args.cost_per_1k_tokens))
+                 args.cost_per_1k_tokens,
+                 resume=bool(getattr(args, "resume", False)),
+                 dry_run=bool(getattr(args, "dry_run", False))))
     except KeyboardInterrupt:
         raise
     except Exception as e:
         _report_fatal(e, args, phase="run")
         return EXIT_FAILED
     elapsed = time.time() - started
-    payload = make_payload(result, loop, exit_code, elapsed,
-                           args.cost_per_1k_tokens, error)
+    payload = make_payload(
+        result, loop, exit_code, elapsed, args.cost_per_1k_tokens, error,
+        dry_run=bool(getattr(args, "dry_run", False)))
     _emit(payload, args.output)
     return exit_code
 
