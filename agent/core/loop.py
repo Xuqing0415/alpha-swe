@@ -769,6 +769,15 @@ class AgentLoop:
             return [], False
         try:
             dag = TaskDAG.from_snapshot(snapshot)
+            if not dag.all():
+                # 快照中没有可恢复任务（如 tasks 字段缺失/内容为空）：
+                # 视同无快照，记录 no_snapshot 决策并回退重新规划。
+                self._decision.record(
+                    "resume.no_snapshot", "agent.snapshot_enabled", True,
+                    "快照中无任务可恢复（字段缺失或内容损坏），重新规划任务",
+                )
+                logger.warning("快照中无任务可恢复，回退重新规划")
+                return [], False
             terminal = (TaskStatus.COMPLETED, TaskStatus.FAILED,
                         TaskStatus.SKIPPED)
             for t in dag.all():

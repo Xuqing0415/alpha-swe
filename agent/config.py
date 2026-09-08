@@ -426,9 +426,22 @@ def load_config(path: Optional[str] = None) -> AppConfig:
     candidates.append(CONFIG_FILE)
     for cfg_path in candidates:
         data = _read_yaml_safe(cfg_path, "agent")
-        if data is not None:
+        if data is None:
+            continue
+        try:
             cfg = AppConfig.from_dict(data)
-            return _apply_phase_barrier_template(cfg)
+        except Exception as e:
+            # 字段类型错误 / 越界取值（Pydantic ValidationError 等）同样降级：
+            # 记录原因并尝试下一层候选，任何情况下都不让配置加载抛异常。
+            CONFIG_FALLBACKS.append({
+                "module": "agent",
+                "path": str(cfg_path),
+                "reason": "配置字段类型/取值非法: %s" % str(e)[:120],
+            })
+            logger.warning("agent 配置降级: %s（字段类型/取值非法: %s）",
+                           cfg_path, str(e)[:120])
+            continue
+        return _apply_phase_barrier_template(cfg)
     return AppConfig()
 
 

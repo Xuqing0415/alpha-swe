@@ -60,6 +60,10 @@ EXIT_BUDGET = 4
 BUDGET_POLL_INTERVAL = 0.5
 DEFAULT_COST_PER_1K = 0.002
 
+# 任务描述长度上限（字符）：超出视为用法错误（CLI 退出码 2），
+# 防止把大文件/失控文本误当任务描述喂给模型。
+MAX_PROMPT_CHARS = 200_000
+
 _STATUS_NAMES = {
     EXIT_OK: "completed",
     EXIT_FAILED: "failed",
@@ -157,7 +161,7 @@ def build_config(args: argparse.Namespace) -> AppConfig:
 def read_prompt(args: argparse.Namespace) -> str:
     """任务描述来源：位置参数 > stdin（省略参数或传 `-`）。"""
     if args.prompt and args.prompt != "-":
-        return args.prompt
+        return _check_prompt_length(args.prompt)
     data = sys.stdin.read()
     prompt = data.strip().lstrip("\ufeff")
     # Windows PowerShell 5.1 管道默认 $OutputEncoding=US-ASCII，
@@ -173,6 +177,16 @@ def read_prompt(args: argparse.Namespace) -> str:
         )
     if not prompt:
         raise UsageError("未提供任务描述：请传位置参数，或通过 stdin 输入")
+    return _check_prompt_length(prompt)
+
+
+def _check_prompt_length(prompt: str) -> str:
+    """任务描述长度上限校验：超过 MAX_PROMPT_CHARS 抛 UsageError（退出码 2）。"""
+    if len(prompt) > MAX_PROMPT_CHARS:
+        raise UsageError(
+            "任务描述过长：%d 字符，超过上限 %d 字符（200k）"
+            % (len(prompt), MAX_PROMPT_CHARS)
+        )
     return prompt
 
 
