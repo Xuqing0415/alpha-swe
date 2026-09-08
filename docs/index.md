@@ -8,6 +8,7 @@
 - [configuration.md](configuration.md) — 配置系统、配置到运行时数据流与决策日志分析
 - [architecture.md](architecture.md) — 目录结构、两套架构与设计与实现对应关系
 - [edge-cases.md](edge-cases.md) — 边界场景与故障排查（超长任务/网络中断/资源耗尽/LLM 不可用等）
+- [edge-hardening.md](edge-hardening.md) — 边界打磨审计结论与加固记录（输入/状态机/命令安全/并发锁/密钥脱敏）
 
 ## 功能模块
 

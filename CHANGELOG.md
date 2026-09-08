@@ -3,10 +3,27 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-# 更新日志
+## [Unreleased]
 
-本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
-版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
+### 新增
+- CLI `python -m agent run --dry-run`（计划预览、不执行任何工具/写入，JSON 附带 plan 与
+  phase_barrier 字段）与 `--resume`（从最近任务快照断点续跑）；两者互斥（退出码 2）。
+- phase-barrier 深化：`config/phase_barrier/{bug-fix,feature-add,refactor}.yaml` 模板预设
+  （`phase_barrier.template` 自动合并）；会话收尾把门禁结论写入决策日志与长期记忆
+  （`phase_barrier_outcome`）；`pb_status()` 状态快照供 CLI/TUI/Web 可视化。
+- 长时间浸泡打卡工具 `scripts/run_soak_long.py`（RSS/句柄线性回归判泄漏，短跑/采样不足
+  判 warmup 不误报）与 `tests/test_soak_script_judge.py`；每日浸泡 CI、每周真实项目
+  L1-L4 基准复测工作流。
+- `.github/ISSUE_TEMPLATE/`（bug/feature/question）与 `examples/recipes/` 场景配置模板。
+- 边界打磨：CLI 任务描述长度上限（200k，退出码 2）；损坏快照 resume 降级重新规划；
+  配置字段类型/越界值逐层降级；`policy.py` 封堵根目录/盘根删除与 shell 分隔符绕过；
+  `project_lock.py` 残留锁/损坏 pid 安全接管；新增 `agent/redact.py` 保守脱敏工具。
+  详见 [docs/edge-hardening.md](docs/edge-hardening.md)。
+
+### 修复
+- CI：quality-gate lint 失败（soak 脚本 F821 `Tuple`）；benchmark-real 用 secrets 上下文
+  导致 workflow 解析失败；soak-daily job 超时 60→90min；benchmark 阴性对照改为读报告断言
+  `passed=0,total=8`（暴露判定器回归与执行器崩溃），soak 命令改为规范多行续行。
 
 ## [0.3.0] - 2026-08-30
 
