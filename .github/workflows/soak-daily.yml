@@ -1,0 +1,74 @@
+name: soak-daily
+
+# 12h 浸泡测试「CI 定时」侧：
+# - 托管 runner 单任务上限约 6h，无法容纳整段 12h；因此本工作流分两档：
+#   1) schedule（UTC 20:00，每日）跑 1 小时短浸泡探针 + 离线 soak 测试，
+#      快速发现内存/句柄泄漏回归；
+#   2) workflow_dispatch 支持 soak_hours 输入；要真正打卡 12h 浸泡，请在
+#      自托管 runner（job runs-on 可自行改 label）上 dispatch soak_hours=12。
+# 本地快速打卡：python -X utf8 scripts/run_soak_long.py --hours 0.05
+on:
+  workflow_dispatch:
+    inputs:
+      soak_hours:
+        description: 浸泡时长（小时）；12h 请用自托管 runner
+        required: false
+        default: "1"
+      sessions_per_batch:
+        description: 每批次会话数
+        required: false
+        default: "12"
+  schedule:
+    # UTC 20:00 = 北京时间次日 04:00
+    - cron: "0 20 * * *"
+
+concurrency:
+  group: soak-daily-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  soak:
+    name: Soak probe + boundedness
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-server.txt
+          pip install pytest pytest-asyncio rich textual numpy scikit-learn mcp jinja2 psutil
+
+      - name: Long soak run
+        env:
+          SOAK_HOURS: ${{ inputs.soak_hours || '1' }}
+          SOAK_SESSIONS_PER_BATCH: ${{ inputs.sessions_per_batch || '12' }}
+        run: |
+          python -X utf8 scripts/run_soak_long.py             --hours "${SOAK_HOURS}"             --sessions-per-batch "${SOAK_SESSIONS_PER_BATCH}"             --report-dir logs/soak/ci
+
+      - name: Offline soak boundedness tests
+        env:
+          SOAK_SESSIONS: "40"
+          SOAK_CONCURRENCY: "3"
+          SOAK_PER_STREAM: "10"
+        run: |
+          python -X utf8 -m pytest tests/test_soak.py -q             -p no:cacheprovider --durations=8
+
+      - name: Upload soak report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: soak-report
+          path: logs/soak/
+          if-no-files-found: warn

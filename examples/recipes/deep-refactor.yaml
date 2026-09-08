@@ -1,0 +1,21 @@
+# 场景：深度重构（行为保持不变）
+# 取舍：开 phase-barrier 门禁模板 + 回归检查，按 spec->测试->重构->回归 推进；
+# 预算放大，允许长任务。
+agent:
+  max_rounds: 60
+  max_retries: 4
+  regression_check_enabled: true
+  regression_timeout: 120.0
+  auto_testgen: true
+  self_improve_enabled: true
+planner:
+  max_plan_steps: 12
+  allow_parallel: false
+phase_barrier:
+  template: refactor
+sandbox:
+  docker_enabled: false
+memory:
+  backend: sqlite
+llm:
+  temperature: 0.2

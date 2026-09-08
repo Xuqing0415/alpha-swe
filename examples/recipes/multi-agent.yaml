@@ -1,0 +1,18 @@
+# 场景：多 Agent 协作（Planner/Executor/Critic）
+# 前提：config/team.yaml 存在对应角色定义；worker 数量按任务复杂度调。
+agent:
+  max_rounds: 40
+  max_retries: 3
+  parallel_tool_calls: true
+  preemption_enabled: true
+team:
+  enabled: true
+  roles:
+    planner: {}
+    executor: {}
+    critic: {}
+  max_concurrent_agents: 4
+llm:
+  temperature: 0.3
+memory:
+  backend: sqlite

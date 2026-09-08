@@ -1,0 +1,15 @@
+# 场景：快速修复小 bug
+# 取舍：低轮次/低预算；禁自进化后台开销；回归与语法校验仍开，保证不修坏。
+agent:
+  max_rounds: 15
+  max_retries: 2
+  auto_testgen: false
+  mutation_check_enabled: false
+  regression_check_enabled: true
+  self_improve_enabled: false
+llm:
+  temperature: 0.1
+sandbox:
+  docker_enabled: false
+memory:
+  backend: sqlite

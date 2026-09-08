@@ -1,0 +1,63 @@
+name: benchmark-real-project
+
+# L1-L4 真实项目基准复测（含 L3/L4）。
+# - 配置了 DEEPSEEK_API_KEY secret 时：真实 LLM 全量复测（每天/每周）；
+# - 未配置时：以 --skip-llm 阴性对照跑一遍（校验完成标准判定器本身无回归），
+#   不消耗 LLM，也不把「预期失败」当工作流失败。
+# 复测报告上传为 artifact（logs/real_project_report.json）。
+on:
+  workflow_dispatch:
+  schedule:
+    # UTC 周日 01:00 = 北京时间周日 09:00，每周一次真实复测
+    - cron: "0 1 * * 0"
+
+concurrency:
+  group: benchmark-real-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    name: Real-project L1-L4 rerun
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-server.txt
+          pip install pytest pytest-asyncio rich textual numpy scikit-learn mcp jinja2 psutil
+
+      - name: Full benchmark rerun (real LLM)
+        if: ${{ secrets.DEEPSEEK_API_KEY != '' }}
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          python -X utf8 scripts/run_real_project_tasks.py \
+            --timeout 1500 --max-cost 2.0 || true
+
+      - name: Negative-control harness check (no LLM key)
+        if: ${{ secrets.DEEPSEEK_API_KEY == '' }}
+        run: |
+          # 每个任务在未修改的干净副本上完成标准必须判为失败，
+          # 说明判定器能识别缺陷（回归保护），预期退出码非 0。
+          python -X utf8 scripts/run_real_project_tasks.py --skip-llm || true
+
+      - name: Upload benchmark report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-project-report
+          path: logs/real_project_report.json
+          if-no-files-found: warn
