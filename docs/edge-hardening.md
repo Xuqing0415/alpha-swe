@@ -75,4 +75,17 @@
     `degenerate_abort` 提到最前固定归 tool，新增
     `test_classify_degenerate_abort_beats_premature_compression` 锁定。
 - 修复后本地（Windows）`test_loop_resume` + `test_p2_stability_attribution`
-  合计 32 passed；toxiproxy 网络故障注入留作后续。
+  合计 32 passed。
+
+## 5. 真实网络故障注入（toxiproxy，chaos.yml）
+
+- 新增 `tests/test_chaos_toxiproxy.py`（3 例，`pytest.mark.chaos`）：用真实 TCP 代理
+  `toxiproxy-server`（v2.12.0，chaos.yml 显式安装 linux-amd64 二进制）包裹本地 HTTP
+  上游，验证 TerminalTool 在真实网络故障下的降级行为，而非仅 mock：
+  - 基线：curl 经代理正常拿到上游响应；
+  - 延迟注入（latency toxic 4000ms）：curl 等待超过 TerminalTool 超时即被
+    terminate->kill，返回 TRANSIENT 结构化错误；移除 toxic 后立即恢复；
+  - 断开注入（删除代理）：curl 快速失败返回明确错误，不挂起、不误报超时。
+- 本地用真实 `toxiproxy-server`（Windows 版）自检 3 passed；缺少二进制时自动跳过，
+  不影响离线收集。quality-gate 三平台离线套件显式忽略该模块（保持集合不变），
+  混沌阶段由 chaos.yml 统一承载。

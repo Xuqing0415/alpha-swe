@@ -18,6 +18,10 @@
 - CI：quality-gate pytest 离线测试套件扩展 ubuntu / windows / macos 三平台
   矩阵（windows/macos 安装与测试 step 显式 `shell: bash`；`fail-fast: false`），
   lint 与 docker 构建保持 ubuntu 单跑。
+- 真实网络故障注入：`tests/test_chaos_toxiproxy.py` 用 toxiproxy-server（v2.12.0）
+  包裹本地 HTTP 上游，验证 TerminalTool 对延迟注入超时熔断（TRANSIENT、
+  terminate->kill）与代理断开快速失败不挂起；chaos.yml 安装 toxiproxy 并纳入
+  混沌阶段，quality-gate 三平台离线套件显式忽略该模块（集合保持不变）。
 - 边界打磨：CLI 任务描述长度上限（200k，退出码 2）；损坏快照 resume 降级重新规划；
   配置字段类型/越界值逐层降级；`policy.py` 封堵根目录/盘根删除与 shell 分隔符绕过；
   `project_lock.py` 残留锁/损坏 pid 安全接管；新增 `agent/redact.py` 保守脱敏工具。

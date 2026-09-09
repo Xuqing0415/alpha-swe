@@ -110,6 +110,7 @@ jobs:
         run: |
           python -X utf8 -m pytest -q -p no:cacheprovider --durations=10 \
             --ignore=tests/test_chaos_smoke.py \
+            --ignore=tests/test_chaos_toxiproxy.py \
             --ignore=tests/test_fault_injection.py \
             --ignore=tests/test_benchmark_suite.py \
             --ignore=tests/test_real_project_e2e.py \
