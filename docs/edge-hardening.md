@@ -36,18 +36,22 @@
 - `project_lock.py`：损坏 pid/时间戳不再崩溃；持有者进程已死的残留锁立即接管
   （原实现要求 age>5s，刚崩溃锁无法在 timeout=0 下回收）；回收前 TOCTOU 二次校验。
 - 同 db 两个 asyncio 任务并发 remember+search 不崩不丢。
-- 新增 `agent/redact.py`：`redact_secrets()`/`redact_dict()` 保守脱敏
-  （`sk-` 长串、`Bearer`、authorization 头、URL 内嵌凭据、敏感键名整段值），
-  词元边界匹配避免误伤 `monkey/keyboard/keyword` 与普通中英文。
-  当前仅作为工具提供，未接入主流程，接入点由调用方决定，例如：
-  ```python
-  from agent.redact import redact_dict
-  payload = redact_dict(response)   # 嵌套 dict 也会递归脱敏
-  ```
+- 新增 `agent/redact.py`：`redact_secrets()`/`redact_dict()`/`redact_value()`
+  保守脱敏（`sk-` 长串、`Bearer`、authorization 头、URL 内嵌凭据、敏感键名
+  整段值），词元边界匹配避免误伤 `monkey/keyboard/keyword` 与普通中英文。
+  并已接入主流程：
+  - `python -m agent run` 组装完 payload 后先整体脱敏再 `_emit`——`--output
+    json|text` 的 stdout、失败时的 stderr 都不会回显最终答复/错误/归因文本中
+    夹带的真实密钥；
+  - 统一错误出口 `write_error_log`/`print_error` 落盘与打印内容（异常消息、
+    上下文值、traceback）过同一套脱敏规则，`logs/cli_error_*.log` 不泄漏密钥。
 
 ## 3. 验证与已知限制
 - 新测试本地合计：43 passed / 5 skipped（skip 为沙箱禁止 asyncio+PIPE 子进程的
   环境限制，对应真实子进程路径已在升级权限探针中单独验证；CI ubuntu 无此限制）。
+- 脱敏接入回归 `tests/test_redact_wiring.py`（3 例）与既有
+  `test_errorlog` / `test_cli_dryrun_resume` 等相邻回归本地通过（仅 1 个 config
+  用例因沙箱 ACL 禁写 `%TEMP%` 的 pytest `tmp_path` 无法本地跑，CI ubuntu 无此限制）。
 - 回归：`test_state` / `test_loop_resume` / `test_cli_dryrun_resume` /
   `test_long_task_cli` / `test_output_truncation` / `test_concurrency_multi` /
   `test_config` / `test_sandbox_security` 合计 56 passed；仅 2 个既有

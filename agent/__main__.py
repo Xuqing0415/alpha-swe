@@ -45,6 +45,7 @@ from agent.attribution import classify_failure
 from agent.config import AppConfig, load_config
 from agent.core.loop import AgentLoop, LoopResult
 from agent.errorlog import print_error, write_error_log
+from agent.redact import redact_value
 from agent.observability.archive import (
     files_modified_from_events as extract_files_modified,
 )
@@ -385,6 +386,15 @@ def _emit(payload: Dict[str, Any], output_format: str) -> None:
               file=sys.stderr)
 
 
+def _sanitize_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """输出前统一脱敏：递归清理 final_answer / error / attribution。
+
+    保证 --output json|text、stderr 与 CI 日志不会回显模型或工具
+    输出中夹带的真实密钥（sk- 长串 / Bearer / URL 内嵌凭据）。
+    """
+    return redact_value(payload)
+
+
 def _cli_context(args: argparse.Namespace) -> Dict[str, Any]:
     """错误日志上下文：入口参数摘要（不含敏感值）。"""
     return {
@@ -459,6 +469,7 @@ def run_cli(args: argparse.Namespace,
     payload = make_payload(
         result, loop, exit_code, elapsed, args.cost_per_1k_tokens, error,
         dry_run=bool(getattr(args, "dry_run", False)))
+    payload = _sanitize_payload(payload)
     _emit(payload, args.output)
     return exit_code
 

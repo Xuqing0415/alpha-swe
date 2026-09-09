@@ -23,7 +23,7 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, Sequence, Tuple
 
-__all__ = ["redact_secrets", "redact_dict"]
+__all__ = ["redact_secrets", "redact_dict", "redact_value"]
 
 _REDACTED = "***REDACTED***"
 
@@ -118,3 +118,18 @@ def redact_dict(obj: Dict[str, Any],
               else _redact_node(value, sensitive_keys, redacted))
         for key, value in obj.items()
     }
+
+
+def redact_value(
+    obj: Any,
+    sensitive_keys: Sequence[str] = (
+        "api_key", "token", "secret", "password", "authorization"),
+    redacted: str = _REDACTED,
+) -> Any:
+    """递归脱敏任意对象（顶层可为 dict / list / str / 标量）。
+
+    规则与 redact_dict 一致：字典按敏感键名整段替换，其余字符串值再做
+    文本层扫描。供调用方对结构不确定的载荷（CLI JSON 输出、错误日志
+    上下文等）整体脱敏，避免泄漏真实密钥。
+    """
+    return _redact_node(obj, sensitive_keys, redacted)

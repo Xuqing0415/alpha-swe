@@ -19,6 +19,10 @@
   配置字段类型/越界值逐层降级；`policy.py` 封堵根目录/盘根删除与 shell 分隔符绕过；
   `project_lock.py` 残留锁/损坏 pid 安全接管；新增 `agent/redact.py` 保守脱敏工具。
   详见 [docs/edge-hardening.md](docs/edge-hardening.md)。
+- 脱敏接入主流程：`python -m agent run` 的 `--output json|text` stdout、失败 stderr
+  与统一错误出口 `write_error_log`/`print_error` 的落盘/打印内容均先整体脱敏
+  （sk- 长串 / Bearer / authorization 头 / URL 内嵌凭据 / 敏感键名），普通文本不受
+  影响；新增 `tests/test_redact_wiring.py`（3 例）锁定行为。
 
 ### 修复
 - CI：quality-gate lint 失败（soak 脚本 F821 `Tuple`）；benchmark-real 用 secrets 上下文

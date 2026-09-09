@@ -17,7 +17,18 @@ import traceback
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from agent.redact import redact_secrets
+
 logger = logging.getLogger("alpha-swe.errorlog")
+
+
+def _mask_text(value: Any) -> Any:
+    """字符串值过一遍脱敏；非字符串原样返回。
+
+    统一错误出口落盘/打印的内容不应包含真实密钥（sk- 长串、Bearer
+    token、URL 内嵌凭据等由 redact_secrets 保守处理）。
+    """
+    return redact_secrets(value) if isinstance(value, str) else value
 
 
 def write_error_log(
@@ -40,17 +51,17 @@ def write_error_log(
         path = dir_path / (name + ".log")
         tb = "".join(traceback.format_exception(
             type(exc), exc, exc.__traceback__))
+        exc_label = type(exc).__module__ + "." + type(exc).__name__
         lines = [
             "time: %s" % time.strftime("%Y-%m-%d %H:%M:%S"),
-            "exception: %s: %s"
-            % (type(exc).__module__ + "." + type(exc).__name__, exc),
+            "exception: %s: %s" % (exc_label, _mask_text(str(exc))),
         ]
         if context:
             lines.append("context:")
             for key, value in context.items():
-                lines.append("  %s: %s" % (key, value))
+                lines.append("  %s: %s" % (key, _mask_text(value)))
         lines.append("traceback:")
-        lines.append(tb.rstrip("\n"))
+        lines.append(_mask_text(tb.rstrip("\n")))
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         return str(path)
     except Exception as e:  # 错误日志自身失败不能影响主流程
@@ -66,14 +77,15 @@ def print_error(
 ) -> None:
     """向 stderr 输出可读错误摘要 + 上下文 + 完整 traceback。"""
     out = sys.stderr
-    out.write("\n[致命错误] %s: %s\n" % (type(exc).__name__, exc))
+    out.write("\n[致命错误] %s: %s\n"
+              % (type(exc).__name__, _mask_text(str(exc))))
     if context:
         for key, value in context.items():
-            out.write("  %s: %s\n" % (key, value))
+            out.write("  %s: %s\n" % (key, _mask_text(value)))
     if log_path:
         out.write("  完整错误已写入: %s\n" % log_path)
-    out.write("".join(traceback.format_exception(
-        type(exc), exc, exc.__traceback__)))
+    out.write(_mask_text("".join(traceback.format_exception(
+        type(exc), exc, exc.__traceback__))))
     out.flush()
 
 
