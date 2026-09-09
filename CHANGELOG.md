@@ -36,6 +36,10 @@
   （sk- 长串 / Bearer / authorization 头 / URL 内嵌凭据 / 敏感键名），普通文本不受
   影响；新增 `tests/test_redact_wiring.py`（3 例）锁定行为。
 
+- 主线一 1.3A/1.3B（默认关闭）：`LayeredMemoryStore` 记忆 TTL 与严格晋升——`ttl_enabled=True` 后按文本 sha1 维护访问台账 `access.json`，命中记账 `access_count`/`last_accessed`，闲置超 `ttl_cold_days` 的冷记忆检索降权（score×`cold_penalty` + `cold` 标记与「（冷记忆）」展示）；`cleanup_candidates()`/`note_session_start()` 提示超 `ttl_cleanup_days` 待清理项目记忆；`strict_promotion=True` 时经验晋升需同时满足项目数≥阈值、`task_type` 一致、上下文相似度≥0.6、含 `after_failure` 恢复证据，`promotion_readiness()` 可查就绪度。
+- 主线二 2.1B/2.2：派发前角色权限预检——只读/无工具角色按确定性规则改派 coder 或升级人工介入，决策日志记 `role.preflight`；新增 `agent/multiagent/debate.py` 方案辩论协调器——分歧锚定 `open_debate(anchor, options)`、Critic 结构化评估（确定性 `criteria_scores` 或 llm JSON，输出 recommendation/confidence/key_reasons/unresolved_concerns）、2 轮上限后自动升级用户、`record_verification` 回溯验证与误判置信惩罚；`OrchestratorAgent` 的 `open_team_debate`/`critic_team_debate`/`verify_team_debate`/`debate_summary` 接线。
+- 主线三 3.2C：改进提议晋升后观察期——晋升即挂 `watch_window`（默认 10）观察窗，分开记账 `proposal_ok`/`system_fail`；系统失败占比达 `watch_disable_threshold`（默认 0.5，fail≥3 提前触发）临时禁用（`suspend`），`resume` 重开观察窗或 `demote` 降回 `LOCAL`（`demoted_reason=watch_regression`）；`watch_report()`/`watch_status()` 供决策日志/TUI 展示。
+
 ### 修复
 - CI：quality-gate lint 失败（soak 脚本 F821 `Tuple`）；benchmark-real 用 secrets 上下文
   导致 workflow 解析失败；soak-daily job 超时 60→90min；benchmark 阴性对照改为读报告断言
