@@ -15,6 +15,9 @@
   判 warmup 不误报）与 `tests/test_soak_script_judge.py`；每日浸泡 CI、每周真实项目
   L1-L4 基准复测工作流。
 - `.github/ISSUE_TEMPLATE/`（bug/feature/question）与 `examples/recipes/` 场景配置模板。
+- CI：quality-gate pytest 离线测试套件扩展 ubuntu / windows / macos 三平台
+  矩阵（windows/macos 安装与测试 step 显式 `shell: bash`；`fail-fast: false`），
+  lint 与 docker 构建保持 ubuntu 单跑。
 - 边界打磨：CLI 任务描述长度上限（200k，退出码 2）；损坏快照 resume 降级重新规划；
   配置字段类型/越界值逐层降级；`policy.py` 封堵根目录/盘根删除与 shell 分隔符绕过；
   `project_lock.py` 残留锁/损坏 pid 安全接管；新增 `agent/redact.py` 保守脱敏工具。
@@ -28,6 +31,9 @@
 - CI：quality-gate lint 失败（soak 脚本 F821 `Tuple`）；benchmark-real 用 secrets 上下文
   导致 workflow 解析失败；soak-daily job 超时 60→90min；benchmark 阴性对照改为读报告断言
   `passed=0,total=8`（暴露判定器回归与执行器崩溃），soak 命令改为规范多行续行。
+- Windows CI 矩阵复测修复：快照文件名时间戳改为严格单调递增（Windows 毫秒级
+  时钟下同刻连续保存不再同名覆盖）；失败归因把连续空参数中止（`degenerate_abort`）
+  提前固定归 tool，避免伴生过早压缩信号把空参数中止误判为 context。
 
 ## [0.3.0] - 2026-08-30
 

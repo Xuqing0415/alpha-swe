@@ -1,8 +1,11 @@
 """断点续跑测试（方案 1.3）：任务快照落盘 / 恢复 / 无快照回退重新规划。"""
 import json
+from datetime import datetime
 from pathlib import Path
 
 import pytest
+
+import agent.core.loop as loop_mod
 
 from agent.config import (MCPOptions, AgentConfig, AppConfig,
                           MemoryConfig, SandboxConfig)
@@ -112,6 +115,27 @@ def test_snapshot_filename_has_subsecond_precision(ws_tmp):
     files = sorted((ws_tmp / "snapshots").glob("task_*.json"))
     assert len(files) == 2
     assert files[0].name != files[1].name, "同秒保存快照不应互相覆盖"
+
+
+def test_snapshot_timestamp_monotonic_on_coarse_clock(monkeypatch):
+    """粗粒度时钟下紧邻两次生成不碰撞：时钟未前进则补 1 微秒。"""
+    fixed = datetime(2026, 9, 9, 0, 0, 0, 123456)
+
+    class FakeDatetime:
+        @classmethod
+        def now(cls):
+            return fixed
+
+        @classmethod
+        def strptime(cls, value, fmt):
+            return datetime.strptime(value, fmt)
+
+    monkeypatch.setattr(loop_mod, "datetime", FakeDatetime)
+    monkeypatch.setattr(loop_mod, "_snapshot_last_ts", "")
+    first = loop_mod._snapshot_timestamp()
+    second = loop_mod._snapshot_timestamp()
+    assert first == "20260909-000000123456"
+    assert second == "20260909-000000123457"
 
 
 @pytest.mark.asyncio

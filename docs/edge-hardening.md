@@ -57,4 +57,22 @@
   `test_config` / `test_sandbox_security` 合计 56 passed；仅 2 个既有
   circuit-breaker 用例在本沙箱因“启动进程 WinError 5”失败（环境 ACL，非改动回归）。
 - 仍建议在真实 CI（ubuntu）跑一遍 `test_edge_tools_security.py` 以覆盖 5 个
-  真实子进程用例；跨平台矩阵（windows/macos）与 toxiproxy 网络故障注入留作后续。
+  真实子进程用例。
+
+## 4. 跨平台 quality-gate 矩阵复测
+
+- `.github/workflows/quality-gate.yml` 的 pytest 离线套件扩为 ubuntu / windows /
+  macos 三平台矩阵（`fail-fast: false`；windows/macos 的安装与测试 step 显式
+  `shell: bash`），lint 与 docker 构建保持 ubuntu 单跑。
+- 首轮实测：ubuntu 3m6s ✅、macos 3m21s ✅、windows 4m21s ❌ 2 例——均非平台
+  业务差异，而是粗时钟 / 信号顺序两类边界：
+  - 快照文件名：Windows 时钟粒度毫秒级，紧邻两次 `_save_snapshot()` 取到相同
+    微秒值导致同名覆盖只剩 1 个文件。`_snapshot_timestamp()` 改为记录上次
+    返回值、时钟未前进则补 1 微秒（严格单调递增），并新增同刻度回归用例
+    `test_snapshot_timestamp_monotonic_on_coarse_clock`。
+  - 失败归因：`degenerate_abort`（连续空参数保护中止）此前排在“过早压缩 →
+    context”之后，Windows 运行伴生一次早期压缩即被误判 context。归因规则把
+    `degenerate_abort` 提到最前固定归 tool，新增
+    `test_classify_degenerate_abort_beats_premature_compression` 锁定。
+- 修复后本地（Windows）`test_loop_resume` + `test_p2_stability_attribution`
+  合计 32 passed；toxiproxy 网络故障注入留作后续。

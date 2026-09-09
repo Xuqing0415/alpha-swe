@@ -459,6 +459,26 @@ def test_classify_interrupt():
     assert attr["label"] == "用户中断"
 
 
+def test_classify_degenerate_abort_beats_premature_compression():
+    """连续空参数中止（degenerate_abort）优先于伴生的过早压缩信号归 tool。"""
+    events = [
+        {"type": "think", "ts": 0.1, "data": {"content": "x"}},
+        {"type": "tool_call", "ts": 1.0, "data": {
+            "tool": "file_ops", "success": False,
+            "params": {"action": "read"},
+            "output": "[file_ops] 参数错误: 缺少必需参数 ['path']"}},
+    ]
+    decisions = [
+        {"name": "compression_level", "timestamp": 1.5},
+        {"name": "degenerate_abort", "timestamp": 2.0},
+    ]
+    attr = classify_failure(
+        events=events, decisions=decisions,
+        metrics={"counters": {"compressions": 1, "tool_failures": 3}})
+    assert attr["category"] == "tool"
+    assert "degenerate_abort" in attr["reason"]
+
+
 def test_agentloop_degenerate_abort_counts_metrics(ws_tmp):
     """空参数连续 3 次触发保护性中止：metrics 计数、决策点与归因一致。"""
     ws = ws_tmp / "ws"

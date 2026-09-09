@@ -150,7 +150,7 @@ def classify_failure(events: Optional[List[Dict[str, Any]]] = None,
                      prompt: str = "") -> Dict[str, Any]:
     """规则式失败归因：返回 {category, label, reason, suggestions}。
 
-    优先级：记忆 > 上下文（过早压缩）> 检索 > 测试 > 工具 > 规划 > 中断 > 理解 > 未知。
+    优先级：工具中止（degenerate_abort）> 记忆 > 上下文（过早压缩）> 检索 > 测试 > 工具 > 规划 > 中断 > 理解 > 未知。
     工具失败信号同时来自 counters.tool_failures 与 events 中的
     tool_call success=False（空参数保护等路径只发事件、不计 metrics）。
     """
@@ -165,6 +165,13 @@ def classify_failure(events: Optional[List[Dict[str, Any]]] = None,
     tool_failures = int(counters.get("tool_failures", 0) or 0)
     retries = int(counters.get("retries", 0) or 0)
     compressions = int(counters.get("compressions", 0) or 0)
+
+    # 0) 工具失败（保护性中止）：连续空/缺参数触发 degenerate_abort。
+    #    这是确定性的工具层信号，优先于可能伴生的过早压缩等上下文噪声。
+    if "degenerate_abort" in names:
+        return _mk(
+            "tool",
+            "连续空参数工具调用触发保护性中止（degenerate_abort），工具调用未产生有效动作")
 
     # 1) 记忆失败：记忆检索/写入降级
     if "retrieval_error" in names:

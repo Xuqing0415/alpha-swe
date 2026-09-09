@@ -14,7 +14,7 @@ import logging
 import os
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -93,9 +93,22 @@ class LoopResult:
         return self.phase == AgentPhase.COMPLETED
 
 
+_snapshot_last_ts: str = ""
+
+
 def _snapshot_timestamp() -> str:
-    """快照文件名时间戳（亚秒精度，避免同秒多步互相覆盖）。"""
-    return datetime.now().strftime("%Y%m%d-%H%M%S%f")
+    """快照文件名时间戳：亚秒精度且严格递增。
+
+    Windows 等平台时钟粒度可能达毫秒级，紧邻两次调用会拿到相同
+    微秒值导致同名覆盖；记录上一次返回值，若未前进则补 1 微秒。
+    """
+    global _snapshot_last_ts
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S%f")
+    if _snapshot_last_ts and ts <= _snapshot_last_ts:
+        last = datetime.strptime(_snapshot_last_ts, "%Y%m%d-%H%M%S%f")
+        ts = (last + timedelta(microseconds=1)).strftime("%Y%m%d-%H%M%S%f")
+    _snapshot_last_ts = ts
+    return ts
 
 
 class AgentLoop:
