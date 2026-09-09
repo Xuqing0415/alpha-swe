@@ -2,7 +2,9 @@
 
 - 用 LLM 生成带角色的子任务 DAG（TeamPlanner）；
 - 复用 Scheduler 按依赖/优先级调度，并发派发给各 Worker；
-- Reviewer 返回 retry 时触发仲裁：带评审反馈重建 coder 任务并复审（最多 N 轮）。
+- Reviewer 返回 retry 时触发仲裁：带评审反馈重建 coder 任务并复审（最多 N 轮）；
+- 主线二 2.1B：派发前角色权限预检（只读/无工具改派）；主线二 2.2：
+  可选方案辩论协调器接线（懒创建，不自动参与调度流程）。
 """
 from __future__ import annotations
 
@@ -18,6 +20,8 @@ from agent.core.scheduler import Scheduler
 from agent.core.task import Task, TaskDAG, TaskStatus
 from agent.llm import BaseLLM
 from agent.multiagent.blackboard import Blackboard
+from agent.multiagent.debate import (DebateCoordinator, DebateSession,
+                                     CriticVerdict)
 from agent.multiagent.messages import Message, MsgType
 from agent.multiagent.workers import WorkerAgent
 from agent.selfimprove.capability import CapabilityProfile
@@ -46,6 +50,33 @@ _DEFAULT_ROLE_KEYWORDS = {
     "ops": ["部署", "ci", "构建", "环境配置", "docker", "deploy", "build"],
     "coder": ["实现", "编写", "修改", "implement", "write code"],
 }
+
+# 主线二 2.1B：角色权限预检——写意图词（指令命中即视为需要写权限）
+_WRITE_INTENT_KEYWORDS = (
+    "修改", "新增", "创建", "写入", "删除", "重构",
+    "修复", "实现", "编辑", "补", "调整",
+)
+
+
+def _has_write_intent(text: str) -> bool:
+    """指令文本是否含写意图词（确定性，供只读角色预检）。"""
+    return any(keyword in (text or "") for keyword in _WRITE_INTENT_KEYWORDS)
+
+
+def _role_registered_tools(tools: List[str]) -> List[str]:
+    """镜像 WorkerAgent._role_tools 的注册语义，返回实际能注册的工具名。
+
+    Worker 只识别 terminal_execute / file_ops / file_search（file_search
+    仍注册到 file_ops 名下）；工具清单经注册后为空即视为配置不足。
+    """
+    wanted = set(tools or [])
+    registered: List[str] = []
+    if "terminal_execute" in wanted:
+        registered.append("terminal_execute")
+    if "file_ops" in wanted or "file_search" in wanted:
+        registered.append("file_ops")
+    return registered
+
 
 TEAM_PLAN_PROMPT = """你是多 Agent 团队规划器。可用的 Worker 角色（含职责）：
 {roles}
@@ -244,6 +275,7 @@ class OrchestratorAgent:
         max_review_retries: Optional[int] = None,
         concurrency: Optional[int] = None,
         decision_logger: Optional[DecisionLogger] = None,
+        debate_coordinator: Optional[DebateCoordinator] = None,
     ) -> None:
         self.config = config or AppConfig()
         self.llm = llm
@@ -269,6 +301,8 @@ class OrchestratorAgent:
         self.decision_logger = decision_logger or DecisionLogger(
             log_path=self.config.decision_log_path or None,
         )
+        # 主线二 2.2：可选方案辩论协调器（未传入时首次使用时懒创建）
+        self._debate_coordinator = debate_coordinator
         # 规划器默认使用完整角色库（而非仅已实例化 Worker），
         # 让 Planner 可以挑选 debugger/documenter/architect 等角色
         # 交叉集成：能力画像 x 角色分配——每个角色独立持久化画像
@@ -292,6 +326,37 @@ class OrchestratorAgent:
         self._retries: Dict[str, int] = {}
         self.review_log: List[ReviewRecord] = []
         self.needs_intervention = False
+
+    # ---- 主线二 2.2：方案辩论协调器接线 ----
+    def _debate(self) -> DebateCoordinator:
+        """懒创建默认辩论协调器（共享本编排器的决策日志）。"""
+        if self._debate_coordinator is None:
+            self._debate_coordinator = DebateCoordinator(
+                decision_logger=self.decision_logger)
+        return self._debate_coordinator
+
+    def open_team_debate(self, anchor: str, options: List[Any],
+                         question: str = "") -> DebateSession:
+        """锚定核心分歧开启一场团队方案辩论（2.2A）。"""
+        return self._debate().open_debate(anchor, options, question)
+
+    def critic_team_debate(
+        self,
+        session_id: str,
+        criteria_scores: Optional[Dict[str, Dict[str, int]]] = None,
+    ) -> CriticVerdict:
+        """对已开启的团队辩论做一轮 Critic 结构化评估（2.2B）。"""
+        return self._debate().critic_evaluate(
+            session_id, criteria_scores=criteria_scores)
+
+    def verify_team_debate(self, session_id: str,
+                           outcome_ok: bool) -> Dict[str, Any]:
+        """记录一次回溯验证（2.2C）。"""
+        return self._debate().record_verification(session_id, outcome_ok)
+
+    def debate_summary(self) -> Dict[str, Any]:
+        """返回全部团队辩论的会话与验证聚合摘要。"""
+        return self._debate().debate_summary()
 
     # ---- 主入口 ----
     async def run(self, prompt: str) -> TeamResult:
@@ -363,6 +428,29 @@ class OrchestratorAgent:
                     f"角色 {role} 未配置，按指令分类回退到 {fallback_role}",
                 )
                 role = fallback_role
+        # 主线二 2.1B：角色权限预检——最终角色确定后、派发执行前；
+        # 预检可能把角色改派为 coder；配置不可用且无 coder 时直接 FAILED。
+        role = self._preflight_role(task, role)
+        if task.status == TaskStatus.FAILED:
+            return
+        if worker is None or worker.role.name != role:
+            # 预检改派：按最终角色重新取 Worker（缺失则按角色库懒创建）
+            worker = self.workers.get(role)
+            if worker is None:
+                role_cfg = self._role_map.get(role)
+                if role_cfg is not None:
+                    worker = WorkerAgent(
+                        role_cfg, config=self.config, llm=self.llm,
+                        blackboard=self.blackboard)
+                    self.workers[role] = worker
+                    self.decision_logger.record(
+                        "role.routing", "team.roles", role,
+                        f"预检改派到角色 {role}，已按角色库自动实例化 Worker",
+                    )
+                else:
+                    task.mark(TaskStatus.FAILED,
+                              error=f"预检改派目标角色不可用: {role}")
+                    return
         if worker.decision_logger is None:
             worker.decision_logger = self.decision_logger
         self.blackboard.post(Message(
@@ -386,6 +474,63 @@ class OrchestratorAgent:
         else:
             task.mark(TaskStatus.FAILED,
                       error=result.error or f"{role} 任务执行失败")
+
+    # ---- 主线二 2.1B：角色权限预检 ----
+    def _preflight_role(self, task: Task, role: str) -> str:
+        """派发前对最终角色做确定性权限预检，返回可执行的角色（可能改派）。
+
+        规则：
+        1. 角色不在角色库（回退链已处理过）不重复预检；
+        2. 该角色无法注册任何工具：有 coder 改派 coder，否则
+           needs_intervention=True 并以清晰错误 FAILED 任务；
+        3. 只读角色收到写意图指令：reviewer 放行（只读评审是本职），
+           其余改派 coder；coder 不可用时 needs_intervention=True + FAILED；
+        4. 其余情况原样返回。
+        """
+        role_cfg = self._role_map.get(role)
+        if role_cfg is None:
+            return role  # 规则 1：不在角色库，路由回退已处理，不重复预检
+        if not _role_registered_tools(role_cfg.tools):
+            if self._coder_available():
+                self.decision_logger.record(
+                    "role.preflight", "team.roles", role,
+                    f"角色 {role} 无可用工具（tools={role_cfg.tools}），"
+                    "预检改派 coder",
+                )
+                return "coder"
+            self.needs_intervention = True
+            task.mark(TaskStatus.FAILED,
+                      error=f"角色 {role} 无可用工具且 coder 不可用，需人工介入")
+            self.decision_logger.record(
+                "role.preflight", "team.roles", role,
+                f"角色 {role} 无可用工具且无 coder 可改派，"
+                "升级人工介入并终止任务",
+            )
+            return role
+        if role_cfg.read_only and _has_write_intent(task.instruction):
+            if role == "reviewer":
+                return role  # 规则 3：只读评审是 reviewer 本职，放行
+            if self._coder_available():
+                self.decision_logger.record(
+                    "role.preflight", "team.roles", role,
+                    f"只读角色 {role} 收到写意图指令，预检改派 coder",
+                )
+                return "coder"
+            self.needs_intervention = True
+            task.mark(TaskStatus.FAILED,
+                      error=f"只读角色 {role} 无法执行写意图任务且无 coder "
+                            "可改派，需人工介入")
+            self.decision_logger.record(
+                "role.preflight", "team.roles", role,
+                f"只读角色 {role} 无法执行写意图任务且无 coder 可改派，"
+                "升级人工介入并终止任务",
+            )
+            return role
+        return role  # 规则 4：其余情况原样返回
+
+    def _coder_available(self) -> bool:
+        """coder 是否可用：已实例化 Worker 或在角色库中可懒创建。"""
+        return "coder" in self.workers or "coder" in self._role_map
 
     async def _run_reviewer(self, task: Task, worker: WorkerAgent) -> None:
         coder = self._find_reviewed_coder(task)

@@ -4,6 +4,12 @@
 共享 Blackboard 承载成果与消息日志。
 """
 from agent.multiagent.blackboard import Artifact, Blackboard
+from agent.multiagent.debate import (
+    CriticVerdict,
+    DebateCoordinator,
+    DebateOption,
+    DebateSession,
+)
 from agent.multiagent.messages import Message, MsgType
 from agent.multiagent.orchestrator import (
     OrchestratorAgent,
@@ -16,6 +22,10 @@ from agent.multiagent.workers import WorkerAgent, WorkerResult
 __all__ = [
     "Artifact",
     "Blackboard",
+    "CriticVerdict",
+    "DebateCoordinator",
+    "DebateOption",
+    "DebateSession",
     "Message",
     "MsgType",
     "OrchestratorAgent",
