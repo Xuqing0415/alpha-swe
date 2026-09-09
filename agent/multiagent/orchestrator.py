@@ -23,6 +23,7 @@ from agent.multiagent.blackboard import Blackboard
 from agent.multiagent.debate import (DebateCoordinator, DebateSession,
                                      CriticVerdict)
 from agent.multiagent.messages import Message, MsgType
+from agent.multiagent.user_role import UserMilestone, UserRole
 from agent.multiagent.workers import WorkerAgent
 from agent.selfimprove.capability import CapabilityProfile
 
@@ -120,6 +121,7 @@ class TeamResult:
     messages: List[Dict[str, Any]] = field(default_factory=list)
     blackboard_summary: Dict[str, Any] = field(default_factory=dict)
     needs_intervention: bool = False  # 评审耗尽/无法仲裁时升级人工介入
+    user_milestones: List[Dict[str, Any]] = field(default_factory=list)  # 用户关键决策里程碑（主线二 2.3）
 
 
 class TeamPlanner:
@@ -276,6 +278,7 @@ class OrchestratorAgent:
         concurrency: Optional[int] = None,
         decision_logger: Optional[DecisionLogger] = None,
         debate_coordinator: Optional[DebateCoordinator] = None,
+        user_role: Optional[UserRole] = None,
     ) -> None:
         self.config = config or AppConfig()
         self.llm = llm
@@ -303,6 +306,7 @@ class OrchestratorAgent:
         )
         # 主线二 2.2：可选方案辩论协调器（未传入时首次使用时懒创建）
         self._debate_coordinator = debate_coordinator
+        self._user_role = user_role
         # 规划器默认使用完整角色库（而非仅已实例化 Worker），
         # 让 Planner 可以挑选 debugger/documenter/architect 等角色
         # 交叉集成：能力画像 x 角色分配——每个角色独立持久化画像
@@ -326,6 +330,49 @@ class OrchestratorAgent:
         self._retries: Dict[str, int] = {}
         self.review_log: List[ReviewRecord] = []
         self.needs_intervention = False
+
+    # ---- 主线二 2.3：用户超级角色 ----
+    @property
+    def user_role(self) -> UserRole:
+        """用户超级角色控制器（懒创建，共享黑板与决策日志）。"""
+        if self._user_role is None:
+            self._user_role = UserRole(
+                blackboard=self.blackboard,
+                decision_logger=self.decision_logger,
+            )
+        return self._user_role
+
+
+    def _retry_blocked_by_user_veto(self, root_id: str,
+                                    task_id: str) -> bool:
+        """用户否决是否阻断评审自动重试（按根任务或当前任务 id 判定）。"""
+        return self.user_role.is_vetoed(root_id or task_id)
+
+    def veto_task(self, action_ref: str, reason: str,
+                  note: str = "") -> UserMilestone:
+        """用户否决某团队操作（原因来自 VetoReason），记录里程碑。"""
+        return self.user_role.veto(action_ref, reason, note=note)
+
+    def approve_task(self, action_ref: str, note: str = "") -> UserMilestone:
+        """用户批准（同时解除否决），记录里程碑。"""
+        return self.user_role.approve(action_ref, note=note)
+
+    def reassign_task(self, action_ref: str, target_role: str,
+                      note: str = "") -> UserMilestone:
+        """用户把某操作改派给目标角色，记录里程碑。"""
+        return self.user_role.reassign(action_ref, target_role, note=note)
+
+    def interrupt_task(self, action_ref: str, note: str = "") -> UserMilestone:
+        """用户中断某操作，记录里程碑。"""
+        return self.user_role.interrupt(action_ref, note=note)
+
+    def user_milestones(self) -> List[Dict[str, Any]]:
+        """全部用户决策里程碑（供 TUI/Web/回放关键节点跳转）。"""
+        return self.user_role.milestones()
+
+    def pending_user_inputs(self, consumer: str = "*") -> List[Dict[str, Any]]:
+        """某收听者待处理的用户消息（读走即消费）。"""
+        return self.user_role.pending_inputs(consumer)
 
     # ---- 主线二 2.2：方案辩论协调器接线 ----
     def _debate(self) -> DebateCoordinator:
@@ -556,6 +603,16 @@ class OrchestratorAgent:
             return
         # 仲裁：retry -> 重建 coder + reviewer（计数锚定根 coder，避免新任务绕过上限）
         retries = self._retries.get(root_id, 0) if root_id else 0
+        # 主线二 2.3：用户否决后不再盲目自动重试（停止重建 coder/reviewer）
+        if self._retry_blocked_by_user_veto(root_id, task.id):
+            reason = (self.user_role.veto_reason(root_id or task.id)
+                      or "unknown")
+            task.mark(TaskStatus.FAILED,
+                      error=f"用户否决（原因: {reason}），已停止自动重试")
+            self.decision_logger.record(
+                "review.vetoed", "team.users", reason,
+                f"根任务 {root_id} 被用户否决，不再自动重试")
+            return
         if retries < self.max_review_retries:
             self._retries[root_id] = retries + 1
             self._spawn_retry_pair(coder, suggestion, root_id=root_id)
@@ -680,6 +737,7 @@ class OrchestratorAgent:
             messages=[m.to_dict() for m in self.blackboard.messages()],
             blackboard_summary=self.blackboard.summary(),
             needs_intervention=self.needs_intervention,
+            user_milestones=self.user_role.milestones(),
         )
 
 

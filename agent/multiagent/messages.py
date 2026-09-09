@@ -11,6 +11,9 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, Optional
 
+USER_SENDER = "user"          # 用户超级角色固定发送者名
+USER_PRIORITY = 1000          # 用户消息优先级（高于普通团队消息）
+
 
 class MsgType(str, Enum):
     TASK_ASSIGN = "task_assign"          # orchestrator -> worker
@@ -19,6 +22,8 @@ class MsgType(str, Enum):
     QUERY_RESULT = "query_result"
     REVIEW_REQUEST = "review_request"    # orchestrator -> reviewer
     REVIEW_RESULT = "review_result"      # reviewer -> orchestrator
+    USER_MESSAGE = "user_message"      # user -> *（插话，最高优先级）
+    USER_DECISION = "user_decision"    # user -> *（否决/批准/改派等正式决策）
     RETRY = "retry"                      # orchestrator -> worker（带反馈）
     DONE = "done"                        # orchestrator -> 团队会话结束
     ERROR = "error"
@@ -50,3 +55,4 @@ class Message:
 
 
 __all__ = ["Message", "MsgType"]
+__all__ = ["Message", "MsgType", "USER_SENDER", "USER_PRIORITY"]

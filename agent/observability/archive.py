@@ -116,7 +116,20 @@ class SessionReplay:
     def __len__(self) -> int:
         return len(self.timeline())
 
+
+    def milestones(self) -> List[Dict[str, Any]]:
+        """时间线上的用户关键决策标记（否决/批准/改派/中断等），供快速跳转。
+
+        判定规则：decision 行且 name 以 user. 开头（user.milestone 等）。
+        """
+        return [
+            row for row in self.timeline()
+            if row.get("kind") == "decision"
+            and str(row.get("payload", {}).get("name", ""))
+            .startswith("user.")
+        ]
     def step(self, index: int) -> Dict[str, Any]:
+
         """取第 index 条时间线（越界返回空 dict）。"""
         rows = self.timeline()
         if not 0 <= index < len(rows):

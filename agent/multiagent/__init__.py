@@ -17,6 +17,12 @@ from agent.multiagent.orchestrator import (
     TeamPlanner,
     TeamResult,
 )
+from agent.multiagent.user_role import (
+    MilestoneKind,
+    UserMilestone,
+    UserRole,
+    VetoReason,
+)
 from agent.multiagent.workers import WorkerAgent, WorkerResult
 
 __all__ = [
@@ -27,11 +33,15 @@ __all__ = [
     "DebateOption",
     "DebateSession",
     "Message",
+    "MilestoneKind",
     "MsgType",
     "OrchestratorAgent",
     "ReviewRecord",
     "TeamPlanner",
     "TeamResult",
+    "UserMilestone",
+    "UserRole",
+    "VetoReason",
     "WorkerAgent",
     "WorkerResult",
 ]

@@ -1,4 +1,4 @@
-﻿"""黑板（Shared Blackboard）—— 对应设计第 8 节。
+"""黑板（Shared Blackboard）—— 对应设计第 8 节。
 
 内存共享状态：Worker 发布成果（diff / 测试报告 / 文件清单），Orchestrator 汇总。
 接口与 Redis Pub/Sub 对齐：publish / get / subscribe，便于将来替换实现。
@@ -10,7 +10,8 @@ import os
 import time
 from typing import Any, Callable, Dict, List, Optional
 
-from agent.multiagent.messages import Message, MsgType
+from agent.multiagent.messages import (Message, MsgType, USER_PRIORITY,
+                              USER_SENDER)
 
 logger = logging.getLogger("alpha-swe.multiagent.blackboard")
 
@@ -26,6 +27,9 @@ class Blackboard:
         self._subscribers: Dict[str, List[Callable[[Artifact], None]]] = {}
         # 主线二 2.1A：文件级写锁——同一文件同一时刻只允许一个 Agent 写入
         self._file_locks: Dict[str, Dict[str, Any]] = {}
+        # 主线二 2.3：用户超级角色消息通道（独立于普通团队消息日志）
+        self._user_messages: List[Message] = []
+        self._user_cursor: Dict[str, int] = {}
 
     # ---- 成果（Artifact） ----
     def publish(self, key: str, value: Artifact) -> None:
@@ -124,10 +128,50 @@ class Blackboard:
         ]
 
     # ---- 统计 ----
+    # ---- 主线二 2.3：用户超级角色消息通道 ----
+    def post_user(self, message: Message) -> None:
+        """用户消息入通道：强制 sender=user、置最高优先级，全员可见。"""
+        if message.sender != USER_SENDER:
+            message.sender = USER_SENDER
+        message.priority = max(int(message.priority or 0), USER_PRIORITY)
+        if not message.receiver:
+            message.receiver = "*"
+        self._messages.append(message)
+        self._user_messages.append(message)
+        logger.info("[blackboard] post_user %s -> %s", message.type,
+                    message.receiver)
+
+    def user_messages(self) -> List[Message]:
+        """用户通道全量消息（回放/审计用，不消费）。"""
+        return list(self._user_messages)
+
+    def pending_user_messages(self, consumer: str) -> List[Message]:
+        """返回某收听者尚未读过的用户消息（读走即消费）。
+
+        规则：consumer == "*" 收听全部用户消息；否则仅接收投递给自己的
+        消息与广播 "*"。每收听者独立游标、互不影响，未投递给自己的消息
+        不阻塞后续投递。
+        """
+        cursor = int(self._user_cursor.get(consumer, 0))
+        out: List[Message] = []
+        last = cursor - 1
+        for i, m in enumerate(self._user_messages[cursor:], start=cursor):
+            if consumer == "*" or m.receiver in (consumer, "*"):
+                out.append(m)
+                last = i
+        if out:
+            self._user_cursor[consumer] = last + 1
+        return out
+
+    def reset_user_delivery(self, consumer: str) -> None:
+        """重置某收听者的投递游标（回放/调试用）。"""
+        self._user_cursor.pop(consumer, None)
+
     def summary(self) -> Dict[str, Any]:
         return {
             "artifacts": len(self._artifacts),
             "messages": len(self._messages),
+            "user_messages": len(self._user_messages),
             "file_locks": len(self._file_locks),
             "by_type": {
                 t.value: sum(1 for m in self._messages if m.type == t.value)
