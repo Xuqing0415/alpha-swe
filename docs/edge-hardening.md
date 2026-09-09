@@ -89,3 +89,18 @@
 - 本地用真实 `toxiproxy-server`（Windows 版）自检 3 passed；缺少二进制时自动跳过，
   不影响离线收集。quality-gate 三平台离线套件显式忽略该模块（保持集合不变），
   混沌阶段由 chaos.yml 统一承载。
+
+## 6. 属性测试与性能基线（hypothesis / pytest-benchmark，chaos.yml）
+
+- `tests/test_property_fuzz.py`（6 例，hypothesis，`derandomize=True` 固定种子）：
+  对解析/策略/路径/配置入口喂任意输入验证「不崩溃 + 不变量」——
+  输出解析器 loose/strict 任意文本、沙箱终端命令与文件路径任意串、
+  `resolve_workspace_path` 成功结果必须锚定工作区内（只允许 ValueError/OSError），
+  以及 `load_config` 对任意 YAML 内容永不抛异常（三层降级契约）。
+- `tests/test_perf_baseline.py` + `scripts/check_perf_baseline.py`（pytest-benchmark）：
+  对状态机推进 / JSON 解析 / 命令识别 / 路径校验四条热路径建立 mean 耗时基线；
+  chaos.yml 以 `--benchmark-json` 落盘后由脚本按宽松上限（默认 1000ms，远高于
+  本地实测 1.7-77ms）断言，防数量级回归且抗 runner 抖动。
+- 本地实测（Windows py3.14）：属性测试 6 passed；性能基线 state 1.7ms / parser
+  4.4ms / policy 22ms / path 77ms，脚本判定 PASS。quality-gate 三平台离线套件
+  显式忽略这两个模块（hypothesis/pytest-benchmark 仅在 chaos-stage 安装）。

@@ -46,3 +46,6 @@ server.db-wal
 vscode-extension/node_modules/
 vscode-extension/out/
 vscode-extension/*.vsix
+# pytest-benchmark / hypothesis 本地副产物
+.benchmarks/
+.hypothesis/

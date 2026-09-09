@@ -25,6 +25,8 @@ on:
       - "tests/test_fault_injection.py"
       - "tests/test_chaos_smoke.py"
       - "tests/test_chaos_toxiproxy.py"
+      - "tests/test_property_fuzz.py"
+      - "tests/test_perf_baseline.py"
       - "tests/test_real_project_e2e.py"
       - "tests/test_soak.py"
       - ".github/workflows/chaos.yml"
@@ -35,6 +37,8 @@ on:
       - "tests/test_fault_injection.py"
       - "tests/test_chaos_smoke.py"
       - "tests/test_chaos_toxiproxy.py"
+      - "tests/test_property_fuzz.py"
+      - "tests/test_perf_baseline.py"
       - "tests/test_real_project_e2e.py"
       - "tests/test_soak.py"
       - ".github/workflows/chaos.yml"
@@ -74,7 +78,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-server.txt
           pip install pytest pytest-asyncio pytest-cov rich textual numpy \
-            scikit-learn mcp jinja2 psutil
+            scikit-learn mcp jinja2 psutil hypothesis pytest-benchmark
 
       - name: Chaos stage - benchmark + fault injection + random chaos + soak
         env:
@@ -90,6 +94,21 @@ jobs:
             tests/test_fault_injection.py \
             tests/test_chaos_smoke.py \
             tests/test_chaos_toxiproxy.py \
+            tests/test_property_fuzz.py \
             tests/test_real_project_e2e.py \
             tests/test_soak.py \
             -q -p no:cacheprovider --durations=10
+
+      - name: Perf baseline (pytest-benchmark)
+        run: |
+          python -X utf8 -m pytest tests/test_perf_baseline.py \
+            -q -p no:cacheprovider \
+            --benchmark-autosave \
+            --benchmark-json="$RUNNER_TEMP/perf-baseline.json"
+
+      - name: Assert perf ceilings
+        env:
+          PERF_CEILING_MS: "1000"
+        run: |
+          python -X utf8 scripts/check_perf_baseline.py \
+            "$RUNNER_TEMP/perf-baseline.json"

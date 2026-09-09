@@ -22,6 +22,11 @@
   包裹本地 HTTP 上游，验证 TerminalTool 对延迟注入超时熔断（TRANSIENT、
   terminate->kill）与代理断开快速失败不挂起；chaos.yml 安装 toxiproxy 并纳入
   混沌阶段，quality-gate 三平台离线套件显式忽略该模块（集合保持不变）。
+- hypothesis 属性测试与 pytest-benchmark 性能基线：`tests/test_property_fuzz.py`
+  对解析器/沙箱策略/路径解析/配置加载喂任意输入验证不崩溃与不变量（derandomize
+  固定种子）；`tests/test_perf_baseline.py` 对状态推进/解析/命令识别/路径校验建立
+  mean 耗时基线，`scripts/check_perf_baseline.py` 按宽松上限断言；两者仅在
+  chaos-stage 运行，quality-gate 三平台离线套件显式忽略。
 - 边界打磨：CLI 任务描述长度上限（200k，退出码 2）；损坏快照 resume 降级重新规划；
   配置字段类型/越界值逐层降级；`policy.py` 封堵根目录/盘根删除与 shell 分隔符绕过；
   `project_lock.py` 残留锁/损坏 pid 安全接管；新增 `agent/redact.py` 保守脱敏工具。
