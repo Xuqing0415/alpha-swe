@@ -6,6 +6,15 @@
 连续 N 次（默认 3）晋升为「自学策略」；应用 M 次（默认 5）仍未达标则丢弃。
 提议可被用户否决（reject）；晋升/丢弃均记录决策日志。
 
+3.2C 晋升后观察期：提议晋升为「自学策略」后挂 watch_window 次应用的观察期；
+观察期内分开记账「提议自身成败」（proposal_ok）与「系统整体成败」
+（system_fail，缺省取 proposal_ok）。即使提议本身被应用成功，只要观察期内
+系统整体失败占比 >= watch_disable_threshold（默认 0.5，system_fail>=3 可提前
+触发）就临时禁用（watch.phase="suspended"），由上层回溯对比后决定 resume
+（重开观察窗）或 demote（降回 STATUS_LOCAL，供决策日志/TUI 标记「自学策略
+降级」）。本模块只提供纯 API，观察期的应用、上报与回溯接线留给上层
+（agent/core/loop.py 不改）。
+
 持久化：~/.swe-agent/proposals.json
 """
 from __future__ import annotations
@@ -98,7 +107,9 @@ class ProposalStore:
                  promote_threshold: int = 3, reject_after: int = 5,
                  require_generalization: bool = True,
                  conflict_threshold: int = 5,
-                 conflict_detector: Optional[Callable] = None) -> None:
+                 conflict_detector: Optional[Callable] = None,
+                 watch_window: int = 10,
+                 watch_disable_threshold: float = 0.5) -> None:
         self.enabled = enabled
         self.path = Path(path).expanduser() if path else None
         self.promote_threshold = max(1, int(promote_threshold))
@@ -107,6 +118,9 @@ class ProposalStore:
         # 3.2B：与已晋升策略冲突时需更高层级验证（默认 5 次成功）才能覆盖
         self.conflict_threshold = max(1, int(conflict_threshold))
         self.conflict_detector = conflict_detector
+        # 3.2C：晋升后观察期窗口长度与系统整体失败占比回溯阈值
+        self.watch_window = max(1, int(watch_window))
+        self.watch_disable_threshold = float(watch_disable_threshold)
         self._data: Dict[str, Any] = self._load()
 
     def _load(self) -> Dict[str, Any]:
@@ -269,6 +283,7 @@ class ProposalStore:
                         return STATUS_PENDING
                 p["status"] = STATUS_PROMOTED
                 p["promoted_at"] = time.time()
+                self._init_watch(p)
                 self._save()
                 return STATUS_PROMOTED
         if int(p.get("applied_count", 0)) >= self.reject_after:
@@ -304,6 +319,139 @@ class ProposalStore:
             "generalized": self._generalized(p),
         }
 
+    # ---- 3.2C 晋升后观察期 ----
+    def _init_watch(self, p: Dict[str, Any]) -> Dict[str, Any]:
+        """为晋升提议补观察期台账（无则新建，兼容旧持久化数据）。"""
+        watch = p.get("watch")
+        if not isinstance(watch, dict):
+            watch = {
+                "window": self.watch_window,
+                "applied": 0,
+                "proposal_ok": 0,
+                "system_fail": 0,
+                "started_at": time.time(),
+                "phase": "watching",
+                "suspended": False,
+                "completed": False,
+                "suspended_at": None,
+                "regression": False,
+            }
+            p["watch"] = watch
+        return watch
+
+    def observe_application(self, pid: str, proposal_ok: bool,
+                            system_ok: Optional[bool] = None
+                            ) -> Dict[str, Any]:
+        """观察期记账：提议自身成败与系统整体成败分开累计。
+
+        仅 status==STATUS_PROMOTED 且 watch.phase=="watching" 时生效；
+        system_ok 缺省取 proposal_ok；每次记账后做回溯判定并返回 watch 状态。
+        """
+        p = self._data["proposals"].get(pid)
+        if p is None or p.get("status") != STATUS_PROMOTED:
+            return {}
+        watch = p.get("watch")
+        if not isinstance(watch, dict) or watch.get("phase") != "watching":
+            return dict(watch) if isinstance(watch, dict) else {}
+        watch["applied"] = int(watch.get("applied", 0)) + 1
+        if proposal_ok:
+            watch["proposal_ok"] = int(watch.get("proposal_ok", 0)) + 1
+        if system_ok is None:
+            system_ok = proposal_ok
+        if not system_ok:
+            watch["system_fail"] = int(watch.get("system_fail", 0)) + 1
+        self._watch_check(pid, watch)
+        self._save()
+        return watch
+
+    def _watch_check(self, pid: str, watch: Dict[str, Any]) -> None:
+        """观察期结束判定：满窗或 system_fail>=3 提前触发时结算失败占比。"""
+        applied = int(watch.get("applied", 0))
+        fails = int(watch.get("system_fail", 0))
+        if (applied < int(watch.get("window", self.watch_window))
+                and fails < 3):
+            return
+        if applied > 0 and (fails / applied) >= self.watch_disable_threshold:
+            self.suspend(pid)
+        else:
+            watch["phase"] = "completed"
+            watch["completed"] = True
+
+    def suspend(self, pid: str) -> bool:
+        """临时禁用已晋升提议（观察期阈值回溯触发，或上层显式调用）。"""
+        p = self._data["proposals"].get(pid)
+        if p is None or p.get("status") != STATUS_PROMOTED:
+            return False
+        watch = self._init_watch(p)
+        watch["phase"] = "suspended"
+        watch["suspended"] = True
+        watch["suspended_at"] = time.time()
+        watch["regression"] = True
+        self._save()
+        return True
+
+    def resume(self, pid: str) -> bool:
+        """解除临时禁用：重开观察窗（计数清零），与 demote 分流。"""
+        p = self._data["proposals"].get(pid)
+        if p is None or p.get("status") != STATUS_PROMOTED:
+            return False
+        watch = p.get("watch")
+        if not isinstance(watch, dict) or watch.get("phase") != "suspended":
+            return False
+        watch["applied"] = 0
+        watch["proposal_ok"] = 0
+        watch["system_fail"] = 0
+        watch["started_at"] = time.time()
+        watch["phase"] = "watching"
+        watch["suspended"] = False
+        watch["completed"] = False
+        watch["suspended_at"] = None
+        watch["regression"] = False
+        self._save()
+        return True
+
+    def demote(self, pid: str, reason: str = "watch_regression") -> bool:
+        """把已晋升策略降回项目级经验（供决策日志/TUI 标记「自学策略降级」）。"""
+        p = self._data["proposals"].get(pid)
+        if p is None or p.get("status") != STATUS_PROMOTED:
+            return False
+        p["status"] = STATUS_LOCAL
+        p["demoted_at"] = time.time()
+        p["demoted_reason"] = reason
+        self._save()
+        return True
+
+    def watch_report(self) -> List[Dict[str, Any]]:
+        """晋升后观察期报告（供决策日志 / TUI / Web 面板展示）。"""
+        out: List[Dict[str, Any]] = []
+        for p in sorted(self._data["proposals"].values(),
+                        key=lambda q: q.get("seq", 0)):
+            if p.get("status") != STATUS_PROMOTED:
+                continue
+            watch = p.get("watch")
+            if not isinstance(watch, dict):
+                continue
+            out.append({
+                "pid": p.get("id"),
+                "category": p.get("category"),
+                "phase": watch.get("phase"),
+                "suspended": bool(watch.get("suspended")),
+                "applied": int(watch.get("applied", 0)),
+                "proposal_ok": int(watch.get("proposal_ok", 0)),
+                "system_fail": int(watch.get("system_fail", 0)),
+                "window": int(watch.get("window", self.watch_window)),
+                "regression": bool(watch.get("regression", False)),
+            })
+        return out
+
+    def watch_status(self, pid: str) -> Dict[str, Any]:
+        """单条提议的观察期状态。"""
+        p = self._data["proposals"].get(pid)
+        if p is None:
+            return {}
+        watch = p.get("watch")
+        return dict(watch) if isinstance(watch, dict) else {}
+
     # ---- 用户否决 / 手动晋升 ----
     def reject(self, pid: str) -> bool:
         p = self._data["proposals"].get(pid)
@@ -321,6 +469,7 @@ class ProposalStore:
             return False
         p["status"] = STATUS_PROMOTED
         p["promoted_at"] = time.time()
+        self._init_watch(p)
         self._save()
         return True
 
