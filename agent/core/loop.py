@@ -27,6 +27,8 @@ from agent.core.decision_logger import DecisionLogger
 from agent.core.scheduler import Scheduler
 from agent.core.state import AgentPhase, StateMachine
 from agent.core.task import Task, TaskDAG, TaskStatus
+from agent.core import events as session_events
+from agent.core.session_state import SessionState, record_defense_checks
 from agent.llm import BaseLLM, build_llm
 from agent.mcp.manager import MCPManager
 from agent.observability import MetricsRegistry, SessionArchive, Tracer
@@ -140,6 +142,9 @@ class AgentLoop:
         self.config = config or load_config()
         # phase-barrier 阶段门禁（alpha-swe#1）：默认关闭；开启后任务启动 / 工具调用走门禁钩子
         self._barrier_bridge = self._build_barrier_bridge()
+        # 主线一 1.3C：会话状态显式生命周期（阶段 / 防线 / 风险 / 最近事件）
+        self.session_state: Optional[SessionState] = None
+        self._session_restored = False
         self.state = StateMachine()
         self.cancel_event = asyncio.Event()
         self.events: List[Dict[str, Any]] = []
@@ -462,6 +467,8 @@ class AgentLoop:
     async def run(self, prompt: str, resume: bool = False,
                    dry_run: bool = False) -> LoopResult:
         self._current_prompt = prompt
+        # 主线一 1.3C：会话状态显式生命周期——新建 / 从 .agent_gate 恢复
+        self.session_state = self._init_session_state(prompt, resume)
         # phase-barrier 门禁：任务启动钩子（默认检查阶段 1=Spec 设计），失败时把约束提示注入 System Prompt
         self._barrier_task_start(prompt)
         # 配置降级记录（决策日志/TUI 可见，去重）
@@ -1584,6 +1591,26 @@ class AgentLoop:
                     self.config.memory.backend,
                     "门禁结论已写入长期记忆（kind=phase_barrier_outcome）",
                 )
+            # 会话状态显式生命周期：收尾落盘（阶段对齐 + finished 标记）
+            try:
+                state = self.session_state
+                if state is not None and state.gate_enabled:
+                    info = bridge.inspect()
+                    state.sync_from_gate(info.get("current_stage"))
+                    state.mark_finished(
+                        result.ok,
+                        error="" if result.ok
+                        else str(getattr(result, "phase", "failed").value),
+                    )
+                    self._emit_session_state(
+                        "finished",
+                        f"门禁会话结束: {'已交付' if result.ok else '未交付'}"
+                        f"（阶段 {int(state.stage)} "
+                        f"{state.stage.label}）",
+                        complete=bool(result.ok),
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("会话状态收尾失败（不影响任务）: %s", exc)
         except Exception as e:
             logger.warning("phase-barrier 收尾汇总失败（不影响任务）: %s", e)
 
@@ -1601,6 +1628,216 @@ class AgentLoop:
             }
         except Exception as e:
             return {"enabled": True, "available": False, "error": str(e)}
+
+    # ---- 会话状态显式生命周期（主线一 1.3C）----
+
+    def session_snapshot(self) -> Dict[str, Any]:
+        """会话 + 门禁状态快照（CLI JSON / TUI 门禁视图 / Web 面板用）。"""
+        base = self.pb_status()
+        state = self.session_state
+        base["session_id"] = state.session_id if state is not None else ""
+        base["session_state"] = state.to_dict() if state is not None else None
+        base["session_restored"] = bool(self._session_restored)
+        return base
+
+    def _session_gate_workspace(self) -> str:
+        """会话状态工作区：门禁 workdir 优先，其次沙箱工作区。"""
+        if self._barrier_bridge is not None:
+            ws = getattr(self._barrier_bridge, "workspace", "")
+            if ws:
+                return str(ws)
+        return str(self.config.sandbox.workspace)
+
+    def _init_session_state(self, prompt: str,
+                            resume: bool = False) -> SessionState:
+        """会话开始：新建 SessionState，或从中断前的 .agent_gate 恢复。
+
+        恢复条件（全部满足）：
+        - 快照文件存在且未 finished；
+        - 未超过 7 天（stale 即视为新会话）；
+        - ``resume=True`` 或记录的 prompt 与本次一致（重启 TUI 同 prompt 可续）。
+        """
+        workspace = self._session_gate_workspace()
+        gate_enabled = self._barrier_bridge is not None
+        restored: Optional[SessionState] = None
+        if gate_enabled or resume:
+            try:
+                candidate = SessionState.load(workspace)
+                if candidate is not None and not candidate.finished:
+                    latest = max(candidate.updated_at or 0,
+                                 candidate.started_at or 0)
+                    stale = time.time() - latest > 7 * 86400
+                    prompt_ok = (resume or not candidate.prompt
+                                 or candidate.prompt == str(prompt)[:200])
+                    if not stale and prompt_ok and candidate.gate_enabled:
+                        restored = candidate
+            except Exception:  # noqa: BLE001 - 恢复失败降级为新会话
+                restored = None
+        if restored is not None:
+            state = restored
+            state.gate_enabled = gate_enabled
+            state.workspace = workspace
+            self._session_restored = True
+        else:
+            state = SessionState(
+                workspace=workspace,
+                prompt=str(prompt)[:200],
+                gate_enabled=gate_enabled,
+            )
+            self._session_restored = False
+        if gate_enabled:
+            try:
+                info = self._barrier_bridge.inspect()
+                state.sync_from_gate(info.get("current_stage"))
+            except Exception:  # noqa: BLE001
+                pass
+            state.save()
+            if self._session_restored:
+                self._emit(
+                    "session_state",
+                    kind="restored",
+                    message=(f"从 .agent_gate 恢复门禁会话 "
+                             f"{state.session_id}（阶段 "
+                             f"{int(state.stage)} {state.stage.label}）"),
+                    session_id=state.session_id,
+                    state=state.to_dict(),
+                )
+        return state
+
+    def _emit_session_state(self, kind: str, message: str,
+                            **extra: Any) -> None:
+        """广播一次会话状态变更并落盘 .agent_gate 快照。"""
+        state = self.session_state
+        if state is None:
+            return
+        try:
+            session_events.notify_tui(state)
+            self._emit(
+                "session_state",
+                kind=kind,
+                message=message,
+                session_id=state.session_id,
+                **extra,
+                state=state.to_dict(),
+            )
+            if state.gate_enabled:
+                state.save()
+        except Exception:  # noqa: BLE001 - 观测层异常不影响主流程
+            logger.exception("会话状态事件广播失败")
+
+    def _record_gate_stage(self, stage: Any) -> None:
+        """阶段推进 / 回退 / 拦截后，把门禁当前阶段同步到会话状态。"""
+        state = self.session_state
+        if state is None or not state.gate_enabled:
+            return
+        try:
+            if state.sync_from_gate(stage):
+                self._emit_session_state(
+                    "stage",
+                    f"门禁阶段: {int(state.stage)}（{state.stage.label}）",
+                )
+        except Exception:  # noqa: BLE001
+            logger.warning("会话阶段同步失败: %s", stage)
+
+    def _apply_gate_defense_evidence(self,
+                                     evidence: Dict[str, Any]) -> None:
+        """把 advance 返回的 ``defense_checks`` 写入防线状态并广播。"""
+        state = self.session_state
+        if state is None or not state.gate_enabled:
+            return
+        if not isinstance(evidence, dict):
+            return
+        defense = evidence.get("defense")
+        if not isinstance(defense, dict):
+            return
+        checks = defense.get("defense_checks")
+        if not isinstance(checks, list) or not checks:
+            return
+        try:
+            outcome = record_defense_checks(state, checks,
+                                            workspace=state.workspace)
+            for summary in outcome["summaries"]:
+                self._emit_session_state("defense", summary)
+            if outcome["waiting_review"]:
+                d5 = state.defense(5)
+                self._emit_session_state(
+                    "review_required",
+                    "防线 5 人工复核命中抽样：等待人工批准——"
+                    f"{outcome['review_hint']}",
+                    request_id=d5.request_id,
+                )
+        except Exception:  # noqa: BLE001
+            logger.exception("防线证据同步失败")
+
+    def _sync_session_from_gate_tool(self, params: Dict[str, Any],
+                                     result: ToolResult) -> None:
+        """phase_barrier_gate 工具执行后：阶段 / 防线结果同步到会话状态。"""
+        state = self.session_state
+        if state is None or not state.gate_enabled:
+            return
+        meta = result.metadata if isinstance(result.metadata, dict) else {}
+        try:
+            if meta.get("skip"):
+                state.add_event(
+                    "gate",
+                    str(result.output or "门禁不可用，降级放行")[:200],
+                )
+                state.save()
+                return
+            target = meta.get("stage")
+            if isinstance(target, int) and int(state.stage) != target:
+                self._record_gate_stage(target)
+            current = meta.get("current_stage")
+            if isinstance(current, int) and int(state.stage) != current:
+                self._record_gate_stage(current)
+            evidence = meta.get("evidence")
+            if isinstance(evidence, dict):
+                self._apply_gate_defense_evidence(evidence)
+            if not result.success:
+                state.add_event(
+                    "gate_blocked",
+                    str(result.error or result.output or "门禁拦截")[:200],
+                )
+                state.save()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("会话状态同步失败（不影响主流程）: %s", exc)
+
+    def _note_gate_intercept(self, name: str, params: Dict[str, Any],
+                             gate_result: ToolResult) -> None:
+        """工具级门禁拦截（写文件 / 命令 / 跑测）写入会话最近事件。"""
+        state = self.session_state
+        if state is None or not state.gate_enabled:
+            return
+        try:
+            state.add_event(
+                "gate_blocked",
+                f"门禁拦截 {name}: {(gate_result.error or '')[:120]}",
+            )
+            state.save()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _note_session_tool_trace(self, name: str, params: Dict[str, Any],
+                                 result: ToolResult) -> None:
+        """门禁会话下把关键工具轨迹写入最近事件（仅面板可见，不广播）。"""
+        state = self.session_state
+        if state is None or not state.gate_enabled or not result.success:
+            return
+        try:
+            if name == "file_ops":
+                action = str(params.get("action") or "")
+                if action in WRITE_ACTIONS:
+                    state.add_event(
+                        "tool",
+                        f"{action} {params.get('path', '')}",
+                    )
+            elif name == "run_tests":
+                state.add_event(
+                    "tool",
+                    "运行测试通过" if result.success else "运行测试未通过",
+                )
+        except Exception:  # noqa: BLE001
+            pass
 
     async def _run_tool(self, name: str, params: Dict[str, Any],
                         task: Task) -> ToolResult:
@@ -1623,6 +1860,7 @@ class AgentLoop:
                     "phase_barrier.blocked", "phase_barrier.enabled", True,
                     f"{name} 被门禁拦截: {gate_result.error}",
                 )
+                self._note_gate_intercept(name, params, gate_result)
                 self.tracer.end_span(span, status="error",
                                      error=gate_result.error or "")
                 return gate_result
@@ -1664,6 +1902,10 @@ class AgentLoop:
                     "exit_code": 0 if result.success else 1,
                     "output": result.output or "",
                 })
+            # 主线一 1.3C：gate 工具执行后同步阶段 / 防线状态到会话
+            if name == "phase_barrier_gate":
+                self._sync_session_from_gate_tool(params, result)
+            self._note_session_tool_trace(name, params, result)
             if result.metadata.get("timed_out"):
                 self._track_timeout(name, params, task, result)
             if result.error_category == ErrorCategory.PERMISSION:

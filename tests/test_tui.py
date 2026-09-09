@@ -14,6 +14,7 @@ from agent.tools.base import ExecutionContext
 from agent.tools.terminal import TerminalTool
 from tui.formatting import format_event
 from tui.app import (AlphaSWEApp, CommandInput, RegressionScreen)
+from tui.gate_view import render_gate_panel
 from tui.messages import AgentEventMessage
 from textual.widgets import Input, Static
 
@@ -141,6 +142,37 @@ def test_format_event_unknown_type():
     assert "weird" in text.plain
 
 
+def test_render_gate_panel_disabled():
+    text = render_gate_panel(None, enabled=False)
+    assert "未启用" in text and "phase_barrier.enabled" in text
+
+
+def test_render_gate_panel_defense_status():
+    state = {
+        "session_id": "abc123",
+        "stage": 2,
+        "stage_name": "测试编写",
+        "gate_enabled": True,
+        "defenses": {
+            "1": {"status": "passed", "detail": ""},
+            "2": {"status": "failed", "detail": "spec 弱化约束"},
+            "5": {"status": "waiting_review", "request_id": "req_9"},
+        },
+        "risk_score": 88,
+        "recent_events": [
+            {"ts": 0, "message": "防线 2 双模型复核 失败"},
+        ],
+        "finished": False,
+        "complete": False,
+    }
+    text = render_gate_panel(state, enabled=True, available=True)
+    assert "测试编写" in text and "(2/7)" in text
+    assert "防线 1 需求模板" in text and "通过" in text
+    assert "防线 2 双模型复核" in text and "失败" in text
+    assert "等待人工复核" in text and "review-approve" in text
+    assert "88/100" in text and "防线 2 双模型复核 失败" in text
+
+
 # ---- AgentLoop 事件订阅 ----
 @pytest.mark.asyncio
 async def test_loop_subscribe_receives_events(ws_tmp):
@@ -231,6 +263,33 @@ async def test_tui_streams_events_and_finishes(ws_tmp):
 
 
 
+# ---- 门禁视图（主线一 1.3C）：F5 轮换可达 + 内容渲染 ----
+@pytest.mark.asyncio
+async def test_tui_gate_view_renders(ws_tmp):
+    cfg = make_config(ws_tmp)
+    llm = ScriptedLLM('{"final_answer": "门禁视图完成"}')
+    app = AlphaSWEApp("门禁视图测试", config=cfg, llm=llm,
+                      planner=StubPlanner())
+    async with app.run_test(size=(120, 40)) as pilot:
+        for _ in range(100):
+            await pilot.pause(0.05)
+            if app._finished is not None:
+                break
+        assert app._finished is not None and app._finished.ok
+        # F5 轮换到门禁视图（含 gate 的完整视图表内）
+        for _ in range(len(__import__("tui.app",
+                                      fromlist=["_MAIN_VIEWS"])._MAIN_VIEWS)):
+            await pilot.press("f5")
+            if app.query_one("#gate-view", Static).display:
+                break
+        assert app.query_one("#gate-view", Static).display is True
+        app.refresh_views()
+        rendered = str(app.query_one("#gate-view", Static).render())
+        assert "门禁" in rendered and "未启用" in rendered
+        # 状态栏门禁摘要 / 紧凑头不因 session_snapshot 崩溃
+        app.refresh_status()
+
+
 # ---- 多视图与任务面板（F5 主区视图 + F2/F4 布局） ----
 @pytest.mark.asyncio
 async def test_tui_cycle_views_and_render(ws_tmp):
@@ -271,6 +330,8 @@ async def test_tui_cycle_views_and_render(ws_tmp):
         # F5 轮换含后台视图：时间线 -> 后台 -> 日志
         await pilot.press("f5")
         assert app.query_one("#bg-view").display is True
+        await pilot.press("f5")
+        assert app.query_one("#gate-view").display is True
         await pilot.press("f5")
         assert app.query_one("#main-log").display is True
         # F2 隐藏任务面板

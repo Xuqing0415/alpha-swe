@@ -6,6 +6,17 @@
 ## [Unreleased]
 
 ### 新增
+- 主线一 1.3C：会话状态显式生命周期接线到 TUI 与新 API（接入 `loop.py` 主流程）——
+  `agent/core/session_state.py` 提供 0-6 阶段 / 五道防线 / 风险评分 / 最近事件的
+  `SessionState`（JSON 落盘 `workspace/.agent_gate/alpha_swe_session.json`），
+  `agent/core/events.py` 提供轻量事件总线；`AgentLoop.run()` 创建 / 从 `.agent_gate`
+  恢复会话，`phase_barrier_gate` 工具执行后把阶段与 `defense_checks` 结果同步进
+  `SessionState` 并广播 `session_state` 事件，收尾落盘 finished 状态；新增
+  `loop.session_snapshot()` 查询 API。TUI 新增 F5「门禁」主区视图
+  （`tui/gate_view.py`：阶段 / 防线状态 / 风险 / 复核命令提示），状态栏与紧凑头
+  展示 `门禁 n/7 <阶段>`，防线 5 等待人工复核时提示运行
+  `python -m anti_shortcut review-approve --request-id <id>`。
+  测试：`tests/test_session_state.py`（9 例）+ `tests/test_tui.py` 门禁视图用例。
 - CLI `python -m agent run --dry-run`（计划预览、不执行任何工具/写入，JSON 附带 plan 与
   phase_barrier 字段）与 `--resume`（从最近任务快照断点续跑）；两者互斥（退出码 2）。
 - phase-barrier 深化：`config/phase_barrier/{bug-fix,feature-add,refactor}.yaml` 模板预设

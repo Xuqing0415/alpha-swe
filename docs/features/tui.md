@@ -6,7 +6,8 @@
 - 纯终端 UI 设计（无 emoji / 无 256 色）：左栏任务面板（任务名 / 阶段 / 任务树 / 进度条 / 耗时，F6 可切换文件树）、
   主日志区（DataTable 三列虚拟滚动，`[HH:MM:SS] TYPE 内容` 八类语义色）、
   终端输出区（6 行，F3 全屏，D 键在原始输出与 diff 间切换）、底部状态栏（右对齐：tokens / round / mem / session）与输入栏；
-- `F5` 轮换主区视图：主日志 / 文件变更（写操作渲染 unified diff）/ 监控（指标 + 告警）/ 时间线（span 耗时分布）；
+- `F5` 轮换主区视图：主日志 / 文件变更（写操作渲染 unified diff）/ 监控（指标 + 告警）/
+  时间线（span 耗时分布）/ 后台任务 / 门禁（主线一 1.3C 会话状态与五道防线）；
 - 窄屏（<100 列）自动降级为单栏（紧凑头 + 主日志），`F4` 手动宽/窄切换，`F2` 隐藏任务面板；
 - 输入栏支持 `/pause` `/resume` `/status` `/retry` `/skip` `/quit` 命令与上下箭头历史；
 - 高风险工具确认弹窗：命中 `agent.require_confirmation` 时弹出，支持
@@ -14,6 +15,22 @@
   `e:{"path":"..."}`（编辑参数后执行）；确认回调契约见 `tui/bridge.py` 的 `_on_confirmation`。
 
 验证见 `tests/test_observability.py` 与 `tests/test_tui.py`。
+
+### 门禁视图：会话状态显式生命周期（主线一 1.3C）
+- 显式会话对象 `agent/core/session_state.py`：`SessionState`（session_id / 阶段 0-6 /
+  防线 1-5 状态 / 风险评分 / 证据引用 / 最近事件 / 时间戳），JSON 序列化并落盘
+  `workspace/.agent_gate/alpha_swe_session.json`；`agent/core/events.py` 提供轻量
+  事件总线（`subscribe` / `unsubscribe` / `notify_tui`）。
+- `AgentLoop` 接线：`run()` 创建 / 恢复会话（prompt 一致或 `--resume` 时从
+  `.agent_gate` 续接）；`phase_barrier_gate` 工具每次执行后把阶段与
+  `defense_checks`（防线通过 / 失败 / 待人工复核）同步进 `SessionState`，并广播
+  `session_state` 事件；会话收尾标记 finished 并落盘。查询入口
+  `loop.session_snapshot()` / `pb_status()`。
+- `F5` 轮换到「门禁」视图（`tui/gate_view.py` 纯函数渲染）：当前阶段 `(n/7)`、
+  防线 1-5 状态（通过 / 失败 / 待人工复核 / 未触发）、风险评分、最近事件与复核命令提示；
+  状态栏追加 `门禁 n/7 <阶段名>`，命中人工复核时高亮「复核」。
+- 状态持久化验收：任务中断后重启（同 prompt 或 `--resume`），门禁视图可从
+  `.agent_gate/alpha_swe_session.json` 恢复会话 ID、阶段与防线状态。
 
 
 ## Textual TUI（第 14.1 节）
@@ -41,4 +58,3 @@ python -m tui --config config/agent.yaml "修复失败的测试"
 实现要点：`AgentLoop.subscribe()` 实时事件订阅、`ExecutionContext.output_callback`
 把命令输出逐行转发给右栏、Textual worker 在事件循环内跑 Agent 主循环
 （`tui/bridge.py`、`tui/app.py`）。
-

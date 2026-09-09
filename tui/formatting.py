@@ -42,6 +42,7 @@ _LOG_TYPES: Dict[str, Tuple[str, str]] = {
     "workspace_context_updated": ("INFO", "bright_black"),
     "mutation_analyzed": ("MUT", "yellow"),
     "counterfactual_stored": ("MEM", "bright_black"),
+    "session_state": ("GATE", "magenta"),
     # 预留：记忆操作 / 观察结果
     "memory": ("MEM", "bright_black"),
     "obs": ("OBS", ""),
@@ -183,6 +184,12 @@ def _format_body(etype: str, data: Dict[str, Any]) -> str:
         return (f"反事实教训{'写入' if data.get('stored') else '去重跳过'}: "
                 f"归因={data.get('category', '')}，"
                 f"转折点={_truncate(str(data.get('turning_point', '')), 100)}")
+    if etype == "session_state":
+        message = str(data.get("message") or "").strip()
+        if message:
+            return message
+        kind = str(data.get("kind") or "state")
+        return f"会话状态更新 [{kind}]"
     return f"{etype}: {_truncate(str(data), 160)}"
 
 

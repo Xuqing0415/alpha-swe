@@ -44,6 +44,7 @@ from agent.prompt.builder import estimate_tokens
 from tui.bridge import AgentRunner
 from tui.formatting import format_event
 from tui.vlog import VirtualLog
+from tui.gate_view import gate_stage_short, render_gate_panel
 from tui.diff_renderer import diff_summary, render_unified_diff
 from tui.logbridge import TuiLogHandler
 from tui.file_tree import FileTreeView
@@ -58,7 +59,7 @@ _NARROW_WIDTH = 100
 # 排查方案 3.2：高频事件下状态刷新节流（≤ 每 0.1s 一次），
 # 渲染仍由 0.5s 定时器兜底，避免突发事件导致 TUI 卡顿。
 _EVENT_REFRESH_MIN_INTERVAL = 0.1
-_MAIN_VIEWS = ["log", "diff", "metrics", "timeline", "bg"]
+_MAIN_VIEWS = ["log", "diff", "metrics", "timeline", "bg", "gate"]
 # diff 主区有界缓冲：视图隐藏时不直写 RichLog（否则 deferred renders 无限累积）
 _DIFF_BUFFER_MAX = 1000
 _PHASE_COLORS = {
@@ -128,11 +129,11 @@ Screen {
     layout: vertical;
 }
 
-#main-log, #diff-log, #metrics-view, #timeline-view {
+#main-log, #diff-log, #metrics-view, #timeline-view, #gate-view {
     height: 1fr;
 }
 
-#diff-log, #metrics-view, #timeline-view {
+#diff-log, #metrics-view, #timeline-view, #gate-view {
     display: none;
 }
 
@@ -599,6 +600,7 @@ class AlphaSWEApp(App[None]):
                     yield Static("", id="metrics-view", markup=True)
                     yield TimelineView(id="timeline-view")
                     yield Static("", id="bg-view", markup=True)
+                    yield Static("", id="gate-view", markup=True)
                     with Vertical(id="terminal-box"):
                         yield Label("终端输出", id="terminal-title")
                         yield RichLog(id="terminal-log", highlight=True,
@@ -924,7 +926,7 @@ class AlphaSWEApp(App[None]):
         r_style = "yellow" if (max_rounds and rounds / max_rounds >= 0.9) else "white"
         view_names = {"log": "日志", "diff": "变更",
                       "metrics": "监控", "timeline": "时间线",
-                      "bg": "后台"}
+                      "bg": "后台", "gate": "门禁"}
         view_hint = f"[{view_names.get(self._main_view, self._main_view)}]"
         if self._main_view == "log":
             try:
@@ -961,8 +963,31 @@ class AlphaSWEApp(App[None]):
             f"round: [{r_style}]{rounds}/{max_rounds}[/] | "
             f"mem: {self._memory_usage()} | session: {self._session_id}"
             f" | 活跃: {active}{budget_hint} | {left_hint} | {view_hint}"
+            + self._gate_status_hint()
             + self._bg_status_hint()
         )
+
+    def _gate_status_hint(self) -> str:
+        """状态栏门禁摘要：``| 门禁 3/7 实现代码``；复核中追加高亮标记。"""
+        runner = self.runner
+        if runner is None or runner.loop is None:
+            return ""
+        try:
+            snap = runner.loop.session_snapshot()
+            if not snap.get("enabled"):
+                return ""
+            state = snap.get("session_state") or {}
+            if not state:
+                return ""
+            stage = int(state.get("stage") or 0)
+            name = str(state.get("stage_name") or "")
+            hint = f" | [magenta]门禁 {stage}/7 {name}[/magenta]"
+            d5 = (state.get("defenses") or {}).get("5") or {}
+            if d5.get("status") == "waiting_review":
+                hint += " [bold yellow]复核[/bold yellow]"
+            return hint
+        except Exception:
+            return ""
 
     def _update_compact_header(self) -> None:
         header = self.query_one("#compact-header", Static)
@@ -973,8 +998,14 @@ class AlphaSWEApp(App[None]):
         summary = runner.dag_summary().get("by_status", {}) if runner else {}
         done = summary.get("completed", 0)
         total = sum(summary.values())
+        gate = ""
+        if loop is not None:
+            state = getattr(loop, "session_state", None)
+            if state is not None and state.gate_enabled:
+                gate = " | " + gate_stage_short(state.to_dict())
         header.update(
-            f"阶段: {phase.upper()} | 任务: {done}/{total} | 轮次: {rounds}")
+            f"阶段: {phase.upper()} | 任务: {done}/{total} | 轮次: {rounds}"
+            + gate)
 
     def _memory_usage(self) -> str:
         runner = self.runner
@@ -1033,6 +1064,26 @@ class AlphaSWEApp(App[None]):
             self._update_timeline()
         if self._main_view == "bg":
             self._update_bg_view()
+        if self._main_view == "gate":
+            self._update_gate_view()
+
+    def _update_gate_view(self) -> None:
+        """刷新主区「门禁」视图（会话阶段 / 五道防线 / 风险 / 最近事件）。"""
+        try:
+            runner = self.runner
+            if runner is None or runner.loop is None:
+                return
+            snap = runner.loop.session_snapshot()
+            view = self.query_one("#gate-view", Static)
+            view.update(render_gate_panel(
+                snap.get("session_state"),
+                enabled=bool(snap.get("enabled")),
+                available=bool(snap.get("available")),
+                template=str(snap.get("template") or ""),
+                restored=bool(snap.get("session_restored")),
+            ))
+        except Exception:
+            pass  # 视图刷新失败不打断主流程
 
     def _update_timeline(self) -> None:
         """把 tracer span 渲染为 ASCII 时间线（宽屏横向 / 窄屏瀑布）。"""
@@ -1536,6 +1587,7 @@ class AlphaSWEApp(App[None]):
         self.query_one("#timeline-view", TimelineView).display = (
             self._main_view == "timeline")
         self.query_one("#bg-view", Static).display = self._main_view == "bg"
+        self.query_one("#gate-view", Static).display = self._main_view == "gate"
         if self._main_view == "timeline":
             self.query_one("#timeline-view", TimelineView).focus()
         elif prev == "timeline":
