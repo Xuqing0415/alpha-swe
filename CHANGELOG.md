@@ -55,7 +55,11 @@
 - 统一事件流 schema（功能扩展 P0）：新增 `agent/observability/event_schema.py`——`EventKind` 分组枚举（lifecycle/task/thought/tool/state/budget/barrier/error/other）、覆盖 21 个已知事件类型的 `EVENT_TYPES` 表、`normalize_event()`（不修改入参、缺省字段补齐）、`validate_event()`/`is_valid()`、与 `server/events.py` 格式一致的 `to_sse()`（含 ping 特例）、`describe()` 单行摘要与 `known_types()`，供 TUI / Web / SSE / CLI 共用同一套事件定义。测试：`tests/test_event_schema.py`（46 例）。
 - Goal 目标驱动基础（功能扩展 P0）：新增 `agent/core/goal.py`——`GoalStatus` 生命周期与合法迁移表（pending→approved→in_progress→completed/failed，failed 可回到 in_progress）、`Goal` 数据模型（受控迁移、子目标树、进度推导、递归序列化、`goal_prompt_block()` Prompt 注入、`to_tasks()` 转 `List[Task]`）、`GoalStore` JSON 原子持久化台账（损坏回退、`enabled=False` 纯内存）；暂不接线 AgentLoop，`to_tasks()` 产物即 Planner 接口所需类型。测试：`tests/test_goal.py`（12 例）。
 
+- 统一事件流 schema 接线：`server/events.py` 的 SSE 生成器改用 `to_sse()` 序列化并新增 `strict_validation`（默认关闭；开启时逐条 `validate_event()` 记警告但仍发送，`ping`/`done` 控制帧跳过）；`agent/observability/web.py` 的 `_push()`/`events()`/SSE 统一经 `normalize_event()` 归一化并附 `kind` 分组字段，事件页新增按 `EventKind` 分组筛选；`tui/formatting.py` 中未登记 `_LOG_TYPES` 的已知事件改为按 `EventKind` 分组着色、正文用 `describe()` 兜底（已登记类型行为逐字不变）。文档：`docs/event-schema.md`。测试：`tests/test_event_schema_wiring.py`（18 例）、`tests/test_tui_event_schema.py`（26 例）。
+
 ### 修复
+- soak 探针内存误报（2026-09-27 CI）：`scripts/run_soak_long.py` 复用共享 `DecisionLogger` 时传入 `max_memory_records=None`，决策内存副本随会话数无界累积（实测 RSS 斜率 69.6 MB/h，略超阈值 64），与句柄/事件有界无关；改为有界（默认保留最近 2000 条，新增 `--decision-log-memory-records`，<=0 保留对照），报告新增 `decision_log_max_memory_records` 字段，并补回归测试。
+- Web 观测面板内联 JS 两处引号语法错误（`liSpan` 的 `class="span-`、`renderSessions` 的 `href="/api/sessions/`）会让整段 `<script>` 解析失败、面板交互全部失效；改用单引号后 `node --check` 通过。
 - CI：quality-gate lint 失败（soak 脚本 F821 `Tuple`）；benchmark-real 用 secrets 上下文
   导致 workflow 解析失败；soak-daily job 超时 60→90min；benchmark 阴性对照改为读报告断言
   `passed=0,total=8`（暴露判定器回归与执行器崩溃），soak 命令改为规范多行续行。
