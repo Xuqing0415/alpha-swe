@@ -12,6 +12,10 @@
 - <report_dir>/soak_heartbeat.jsonl  每分钟心跳（时间戳/RSS/句柄/会话数/斜率）
 - <report_dir>/soak_report_<ts>.json 最终报告（含结论与斜率）
 
+浸泡全程复用同一个 DecisionLogger，其内存副本必须有界（默认只保留最近
+2000 条，更早的已写进 decision.jsonl）；否则决策记录随会话数线性增长，
+会把探针自身的内存占用算进 RSS 斜率而误报泄漏。
+
 示例（CI 每日探针 / 本地打卡）:
     python -X utf8 scripts/run_soak_long.py --hours 1
     python -X utf8 scripts/run_soak_long.py --hours 12 --report-dir logs/soak/12h
@@ -42,6 +46,9 @@ from agent.core.task import Task
 from agent.llm import MockLLM
 
 DEFAULT_SESSIONS_PER_BATCH = 12
+# 决策日志内存副本上限（超出部分已落盘 JSONL）：长跑复用同一个
+# DecisionLogger，无界累积会被 RSS 斜率误判成内存泄漏（2026-09-27 CI 实证）。
+DEFAULT_DECISION_LOG_MEMORY_RECORDS = 2000
 WARMUP_SECONDS = 600            # 运行不足 10 分钟视为预热探测，不按回归判定泄漏
 MIN_FIT_SAMPLES = 12            # 斜率回归所需最少采样点数
 REGRESSION_WINDOW = 60          # 参与斜率回归的最近采样点数
@@ -140,6 +147,13 @@ def _linear_fit(points: List[Dict[str, float]],
             "ok": bool(ok), "samples": len(points)}
 
 
+def _build_decision_logger(path: Path,
+                           max_memory_records: int) -> DecisionLogger:
+    """构建浸泡用决策日志：内存副本有界（<=0 表示不裁剪，仅供对照）。"""
+    cap = max_memory_records if max_memory_records > 0 else None
+    return DecisionLogger(str(path), max_memory_records=cap)
+
+
 async def _run_batch(cfg: AppConfig, dl: DecisionLogger,
                      base: int, count: int,
                      work_root: Path) -> List[int]:
@@ -188,6 +202,9 @@ def main() -> int:
     ap.add_argument("--max-rss-grow-mb-per-hour", type=float, default=64.0)
     ap.add_argument("--max-handle-grow-per-hour", type=float, default=4000.0)
     ap.add_argument("--max-events-per-session", type=int, default=50)
+    ap.add_argument("--decision-log-memory-records", type=int,
+                    default=DEFAULT_DECISION_LOG_MEMORY_RECORDS,
+                    help="决策日志内存副本上限（<=0 表示不裁剪）")
     args = ap.parse_args()
 
     report_dir = Path(args.report_dir)
@@ -195,7 +212,8 @@ def main() -> int:
     work_root = report_dir / "work"
     cfg = _build_config(work_root)
     decision_path = report_dir / "decision.jsonl"
-    dl = DecisionLogger(str(decision_path), max_memory_records=None)
+    dl = _build_decision_logger(decision_path,
+                               args.decision_log_memory_records)
     proc = psutil.Process()
     started = time.time()
     deadline = started + args.hours * 3600.0
@@ -268,6 +286,7 @@ def main() -> int:
         "handle_fit": handle_fit,
         "ok": bool(ok),
         "decision_log": str(decision_path),
+        "decision_log_max_memory_records": dl.max_memory_records,
     }
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
     out_path = report_dir / ("soak_report_%s.json" % ts)

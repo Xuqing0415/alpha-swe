@@ -65,3 +65,24 @@ def test_constants_set_for_long_runs():
     assert _MOD.WARMUP_SECONDS >= 600
     assert _MOD.MIN_FIT_SAMPLES >= 5
     assert _MOD.REGRESSION_WINDOW >= _MOD.MIN_FIT_SAMPLES
+
+
+# ---- 决策日志内存副本必须与产品路径一致地有界（soak 误报修复） ----
+
+def test_soak_default_memory_records_is_bounded():
+    """默认上限为正数：长跑不得让内存决策副本随会话数线性增长。"""
+    assert _MOD.DEFAULT_DECISION_LOG_MEMORY_RECORDS > 0
+
+
+def test_soak_decision_logger_memory_is_bounded(ws_tmp):
+    dl = _MOD._build_decision_logger(ws_tmp / "decision.jsonl", 200)
+    for i in range(260):
+        dl.record("soak", "key_%d" % i, "value", "decision")
+    assert dl.max_memory_records == 200
+    assert len(dl.records()) == 200, "内存副本应裁剪到上限"
+
+
+def test_soak_decision_logger_cap_can_be_disabled_for_ab(ws_tmp):
+    """<=0 表示不裁剪，保留 A/B 对照能力。"""
+    dl = _MOD._build_decision_logger(ws_tmp / "decision.jsonl", 0)
+    assert dl.max_memory_records is None
