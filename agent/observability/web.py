@@ -18,6 +18,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from agent.observability.event_schema import kind_of, normalize_event
+
 logger = logging.getLogger("alpha-swe.obs.web")
 
 _HTML_PAGE = """<!doctype html>
@@ -49,6 +51,10 @@ _HTML_PAGE = """<!doctype html>
                padding:6px 14px; cursor:pointer; font:inherit; }
   nav button.active { color:var(--fg); border-color:var(--border);
                       border-bottom:2px solid var(--accent); }
+  .kinds { display:flex; flex-wrap:wrap; gap:4px; margin:6px 0; }
+  .kind-filter { background:none; border:1px solid var(--border); color:var(--muted);
+                 padding:2px 10px; cursor:pointer; font:inherit; font-size:12px; }
+  .kind-filter.active { color:var(--fg); border-color:var(--accent); }
   main { padding:12px 16px; }
   section { display:none; }
   section.active { display:block; }
@@ -117,7 +123,22 @@ _HTML_PAGE = """<!doctype html>
     <h3>决策明细</h3>
     <div id="decision-table"></div>
   </section>
-  <section id="events"><h3>事件流</h3><div id="events-full" class="log"></div></section>
+  <section id="events">
+    <h3>事件流</h3>
+    <div class="kinds" id="event-kinds">
+      <button class="kind-filter active" data-kind="all">全部</button>
+      <button class="kind-filter" data-kind="lifecycle">lifecycle</button>
+      <button class="kind-filter" data-kind="task">task</button>
+      <button class="kind-filter" data-kind="thought">thought</button>
+      <button class="kind-filter" data-kind="tool">tool</button>
+      <button class="kind-filter" data-kind="state">state</button>
+      <button class="kind-filter" data-kind="budget">budget</button>
+      <button class="kind-filter" data-kind="barrier">barrier</button>
+      <button class="kind-filter" data-kind="error">error</button>
+      <button class="kind-filter" data-kind="other">other</button>
+    </div>
+    <div id="events-full" class="log"></div>
+  </section>
   <section id="sessions"><h3>会话档案</h3><div id="session-table"></div></section>
   <section id="selfimprove">
     <h3>能力画像（95% 置信区间）</h3>
@@ -139,6 +160,7 @@ var esc = function(s){ return String(s==null?"":s).replace(/[&<>"]/g, function(c
 
 function rowHtml(e){
   var type = e.type || "info";
+  var kind = e.kind || "other";
   var data = e.data || {};
   var text;
   if(type === "think"){ text = data.content || ""; }
@@ -151,7 +173,8 @@ function rowHtml(e){
   else if(type === "run_done"){ text = "会话结束"; }
   else if(type === "run_error"){ text = "会话错误: " + (data.error || ""); }
   else { text = type + " " + JSON.stringify(data).slice(0,120); }
-  return '<div class="row ev-' + esc(type) + '"><span class="muted">' +
+  return '<div class="row ev-' + esc(type) + ' evk-' + esc(kind) +
+         '" data-kind="' + esc(kind) + '"><span class="muted">' +
          esc(new Date((e.ts||0)*1000).toLocaleTimeString()) + "</span> [" +
          esc(type) + "] " + esc(text) + "</div>";
 }
@@ -202,7 +225,7 @@ function renderTimeline(spans){
 }
 
 function liSpan(s){
-  return "<li><span class="span-" + s.status + "">[" + esc(s.kind) + "]</span> " +
+  return "<li><span class='span-" + s.status + "'>[" + esc(s.kind) + "]</span> " +
     '<span class="span-name">' + esc(s.name) + "</span> " +
     '<span class="span-meta">' + (s.duration_ms/1000).toFixed(2) + "s" +
     (s.error ? " " + esc(s.error) : "") + "</span>" +
@@ -291,8 +314,8 @@ function renderSessions(sessions){
   $("session-table").innerHTML = rows.length
     ? "<tr><th>文件</th><th>大小</th><th>修改时间</th></tr>" +
       rows.map(function(s){
-        return "<tr><td><a href="/api/sessions/" + encodeURIComponent(s.name) +
-               "">" + esc(s.name) + "</a></td><td>" + fmt(s.size) +
+        return "<tr><td><a href='/api/sessions/" + encodeURIComponent(s.name) +
+               "'>" + esc(s.name) + "</a></td><td>" + fmt(s.size) +
                "</td><td>" + esc(new Date(s.mtime*1000).toLocaleString()) + "</td></tr>";
       }).join("")
     : '<div class="muted">暂无会话档案</div>';
@@ -301,7 +324,26 @@ function renderSessions(sessions){
 function renderEvents(events, target){
   if(!events) return;
   target.innerHTML = events.slice().reverse().map(rowHtml).join("");
+  applyKindFilter();
 }
+
+var activeKind = "all";
+function applyKindFilter(){
+  document.querySelectorAll(".log .row").forEach(function(row){
+    var k = row.getAttribute("data-kind") || "other";
+    row.style.display = (activeKind === "all" || k === activeKind) ? "" : "none";
+  });
+}
+
+document.querySelectorAll("#event-kinds button").forEach(function(b){
+  b.addEventListener("click", function(){
+    activeKind = b.dataset.kind || "all";
+    document.querySelectorAll("#event-kinds button").forEach(function(x){
+      x.classList.toggle("active", x === b);
+    });
+    applyKindFilter();
+  });
+});
 
 document.querySelectorAll("nav button").forEach(function(b){
   b.addEventListener("click", function(){
@@ -338,12 +380,20 @@ es.addEventListener("event", function(ev){
     var html = rowHtml(rec);
     $("events").insertAdjacentHTML("afterbegin", html);
     $("events-full").insertAdjacentHTML("afterbegin", html);
+    applyKindFilter();
   } catch(e){}
 });
 </script>
 </body>
 </html>
 """
+
+
+def _decorate(record: Any) -> Dict[str, Any]:
+    """归一化事件记录并附带分组字段 ``kind``（返回新副本，不修改入参）。"""
+    event = normalize_event(record)
+    event["kind"] = kind_of(event.get("type", "")).value
+    return event
 
 
 class ObservabilityHub:
@@ -387,8 +437,9 @@ class ObservabilityHub:
         return loop
 
     def _push(self, record: Dict[str, Any]) -> None:
+        """归一化事件并入队；队列满时静默丢弃，不阻塞事件循环。"""
         try:
-            self._queue.put_nowait(record)
+            self._queue.put_nowait(_decorate(record))
         except queue.Full:
             pass
 
@@ -474,7 +525,10 @@ class ObservabilityHub:
         if loop is None:
             return []
         n = limit or self._max_events
-        return list(loop.events[-n:]) if loop.events else []
+        rows = list(loop.events[-n:]) if loop.events else []
+        # loop.events 里是 emit 的原始记录，这里统一补 type/data/ts 与 kind，
+        # 保证 /api/full、/api/events 与 SSE 三处的前端分组筛选一致。
+        return [_decorate(rec) for rec in rows]
 
     def sessions(self, limit: int = 50) -> List[Dict[str, Any]]:
         if self._archive_dir is None or not self._archive_dir.is_dir():
@@ -612,7 +666,9 @@ def _make_handler(hub: ObservabilityHub) -> type:
                     break
                 if rec is None:
                     continue
-                data = json.dumps(rec, ensure_ascii=False)
+                # 仍发送整条记录（前端 rowHtml 依赖 e.type / e.data / e.ts），
+                # 仅补 schema 结构（type/data/ts）与分组字段 kind。
+                data = json.dumps(_decorate(rec), ensure_ascii=False)
                 self.wfile.write(("event: event\ndata: " + data + "\n\n")
                                  .encode("utf-8"))
                 self.wfile.flush()
