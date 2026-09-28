@@ -7,6 +7,12 @@
 
 能力画像持久化到全局目录（~/.swe-agent/capability.json），规划时以
 [能力画像] 区块注入 Prompt，弱项维度提示 Agent 更谨慎。
+
+主线三 3.1A（任务难度校准，默认关闭）：record(..., difficulty=1~5) 显式标注
+任务难度后，简单任务（<=2）的成功计分权重更低、困难任务（>=4）的失败容错更高，
+避免「简单任务刷高分数」；不传 difficulty 时权重恒为 1.0，画像行为与既有版本
+完全一致。avg_difficulty()/easy_success_share()/calibration_bias() 用于识别
+「高分来自简单任务」的维度，calibration_adjusted_score() 给出折减后的保守分。
 """
 from __future__ import annotations
 
@@ -59,6 +65,21 @@ _MIN_CONFIDENCE_SAMPLES = 5
 _LOW_CONFIDENCE_SAMPLES = 10
 _Z95 = 1.96  # 95% 置信区间 z 值
 
+# 3.1A 任务难度校准：difficulty 取 1~5（None = 未标注，权重 1.0，保持既有行为）。
+# 单次尝试权重随难度线性上升：1 -> 0.6（简单任务成功加分少），5 -> 1.4（困难
+# 任务成功更有价值、失败更可容忍）；另记录难度分布供「靠简单任务刷分」识别。
+_DIFFICULTY_MIN = 1.0
+_DIFFICULTY_MAX = 5.0
+_DIFF_WEIGHT_LO = 0.6
+_DIFF_WEIGHT_HI = 1.4
+_DIFF_EASY_MAX = 2.0
+_DIFF_HARD_MIN = 4.0
+_DIFF_BIAS_MIN_SAMPLES = 3   # 触发偏倚提示所需的最少难度标注次数
+_DIFF_BIAS_AVG = 2.5         # 平均难度低于此值视为「偏简单」
+_DIFF_BIAS_EASY_SHARE = 0.8  # 简单样本占比高于此值视为「靠简单任务刷分」
+_DIFF_BIAS_SCORE = 0.7       # 分数高于此值才提示
+_DIFF_BIAS_DISCOUNT = 0.8    # 偏倚维度的保守分折减系数
+
 
 def _safe_identity(identity: str) -> str:
     """角色/Agent 身份安全文件名（仅保留字母数字与下划线）。"""
@@ -91,6 +112,19 @@ def _recent_window_score(history) -> float:
     total = sum(weights)
     return sum(w * (1.0 if ok else 0.0)
                for w, ok in zip(weights, recent)) / total
+
+
+def _difficulty_weight(difficulty: Optional[float]) -> float:
+    """任务难度 -> 单次尝试权重；None/非法值返回 1.0（保持既有行为）。"""
+    if difficulty is None:
+        return 1.0
+    try:
+        d = float(difficulty)
+    except (TypeError, ValueError):
+        return 1.0
+    d = min(max(d, _DIFFICULTY_MIN), _DIFFICULTY_MAX)
+    ratio = (d - _DIFFICULTY_MIN) / (_DIFFICULTY_MAX - _DIFFICULTY_MIN)
+    return _DIFF_WEIGHT_LO + (_DIFF_WEIGHT_HI - _DIFF_WEIGHT_LO) * ratio
 
 
 class CapabilityProfile:
@@ -198,16 +232,42 @@ class CapabilityProfile:
         return sum(self.effective_score(d, confidence_weight=confidence_weight)
                    for d in dims) / len(dims)
 
-    def record(self, instruction: str, ok: bool) -> List[str]:
-        """记录一次任务结果，返回受影响的能力维度。"""
+    @staticmethod
+    def _track_difficulty(cur: Dict[str, Any], difficulty: Any,
+                          ok: bool) -> None:
+        """累计某维度的难度分布（仅显式标注 difficulty 时调用）。"""
+        try:
+            d = float(difficulty)
+        except (TypeError, ValueError):
+            return
+        d = min(max(d, _DIFFICULTY_MIN), _DIFFICULTY_MAX)
+        stats = cur.setdefault("difficulty", {})
+        stats["count"] = int(stats.get("count", 0)) + 1
+        stats["sum"] = round(float(stats.get("sum", 0.0)) + d, 4)
+        if d <= _DIFF_EASY_MAX:
+            stats["easy"] = int(stats.get("easy", 0)) + 1
+            if ok:
+                stats["easy_success"] = int(stats.get("easy_success", 0)) + 1
+        if d >= _DIFF_HARD_MIN:
+            stats["hard"] = int(stats.get("hard", 0)) + 1
+
+    def record(self, instruction: str, ok: bool,
+               difficulty: Optional[float] = None) -> List[str]:
+        """记录一次任务结果，返回受影响的能力维度。
+
+        difficulty（1~5，可选）标注任务难度：简单任务成功权重更低、
+        困难任务成功权重更高；不传时权重 1.0，行为与既有版本一致。
+        """
         if not self.enabled:
             return []
         dims = _dimensions_for(instruction)
+        weight = _difficulty_weight(difficulty)
         for dim in dims:
             cur = self._data.setdefault(
                 dim, {"attempts": 0.0, "successes": 0.0, "history": []})
-            cur["attempts"] = cur["attempts"] * _DECAY + 1.0
-            cur["successes"] = cur["successes"] * _DECAY + (1.0 if ok else 0.0)
+            cur["attempts"] = cur["attempts"] * _DECAY + weight
+            cur["successes"] = cur["successes"] * _DECAY + (
+                weight if ok else 0.0)
             cur["overall"] = (round(cur["successes"] / cur["attempts"], 4)
                               if cur["attempts"] > 0 else 0.0)
             hist = cur.setdefault("history", [])
@@ -218,6 +278,8 @@ class CapabilityProfile:
             cur["score"] = round(
                 _RECENT_WEIGHT * _recent_window_score(hist)
                 + _OVERALL_WEIGHT * cur["overall"], 4)
+            if difficulty is not None:
+                self._track_difficulty(cur, difficulty, ok)
         self._save()
         return dims
 
@@ -257,6 +319,81 @@ class CapabilityProfile:
             "samples": self.samples(dim),
             "reliable": self.reliable(dim),
         }
+
+    # ---- 3.1A 任务难度校准 ----
+    def avg_difficulty(self, dim: str) -> Optional[float]:
+        """该维度显式标注难度的平均分；无标注返回 None。"""
+        stats = (self._data.get(dim) or {}).get("difficulty") or {}
+        count = int(stats.get("count", 0) or 0)
+        if count <= 0:
+            return None
+        return round(float(stats.get("sum", 0.0) or 0.0) / count, 4)
+
+    def easy_share(self, dim: str) -> Optional[float]:
+        """难度标注样本中简单任务（<=2）的占比；无标注返回 None。"""
+        stats = (self._data.get(dim) or {}).get("difficulty") or {}
+        count = int(stats.get("count", 0) or 0)
+        if count <= 0:
+            return None
+        return round(int(stats.get("easy", 0) or 0) / count, 4)
+
+    def easy_success_share(self, dim: str) -> Optional[float]:
+        """简单任务样本中的成功率；无简单样本返回 None。"""
+        stats = (self._data.get(dim) or {}).get("difficulty") or {}
+        easy = int(stats.get("easy", 0) or 0)
+        if easy <= 0:
+            return None
+        return round(int(stats.get("easy_success", 0) or 0) / easy, 4)
+
+    def _is_easy_biased(self, dim: str) -> bool:
+        """该维度是否「高分主要来自简单任务」（样本不足或非偏简单返回 False）。"""
+        stats = (self._data.get(dim) or {}).get("difficulty") or {}
+        if int(stats.get("count", 0) or 0) < _DIFF_BIAS_MIN_SAMPLES:
+            return False
+        avg = self.avg_difficulty(dim)
+        easy_share = self.easy_share(dim)
+        easy_ok = self.easy_success_share(dim)
+        if avg is None or easy_share is None or easy_ok is None:
+            return False
+        return (avg < _DIFF_BIAS_AVG
+                and easy_share >= _DIFF_BIAS_EASY_SHARE
+                and easy_ok >= _DIFF_BIAS_EASY_SHARE
+                and self.score(dim) >= _DIFF_BIAS_SCORE)
+
+    def calibration_bias(self) -> List[str]:
+        """识别「高分可能来自简单任务」的维度，返回提示文案列表。"""
+        out: List[str] = []
+        for dim, label in CAPABILITY_DIMENSIONS.items():
+            if not self._is_easy_biased(dim):
+                continue
+            stats = (self._data.get(dim) or {}).get("difficulty") or {}
+            out.append(
+                f"{label} 高分可能来自简单任务（平均难度 "
+                f"{self.avg_difficulty(dim):.1f}，简单任务成功 "
+                f"{stats.get('easy_success', 0)}/{stats.get('easy', 0)}），"
+                "评估可信度应打折")
+        return out
+
+    def calibration_adjusted_score(self, dim: str) -> float:
+        """难度校准后的保守分：偏倚维度按系数折减，其余返回原始分。"""
+        score = self.score(dim)
+        if self._is_easy_biased(dim):
+            return round(score * _DIFF_BIAS_DISCOUNT, 4)
+        return score
+
+    def calibration_report(self) -> List[str]:
+        """难度缩放报告：每个有标注维度一行「平均难度 / 简单占比」。"""
+        out: List[str] = []
+        for dim in sorted(self._data):
+            stats = (self._data.get(dim) or {}).get("difficulty") or {}
+            count = int(stats.get("count", 0) or 0)
+            if count <= 0:
+                continue
+            label = CAPABILITY_DIMENSIONS.get(dim, dim)
+            out.append(
+                f"{label} 平均难度 {self.avg_difficulty(dim):.1f}"
+                f"（{count} 次标注，简单 {stats.get('easy', 0)} 次）")
+        return out
 
     def confidence_text(self, dim: str) -> str:
         """置信度文案：<5 样本「数据不足」；5~9 样本「样本较少，可信度低」；

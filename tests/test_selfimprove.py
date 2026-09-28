@@ -375,3 +375,53 @@ def test_loop_failure_registers_proposal_and_capability(ws_tmp):
     assert prof is not None, "能力画像应被装配"
     assert "debug" in prof.summary(), "失败任务应记录调试维度"
     assert prof.score("debug") == 0.0, "单次失败的成功率应为 0"
+
+
+# ---- 3.1A 任务难度校准 ----
+
+def test_difficulty_weight_keeps_default_behavior():
+    from agent.selfimprove.capability import _difficulty_weight
+    assert _difficulty_weight(None) == 1.0
+    assert _difficulty_weight(1) < 1.0 < _difficulty_weight(5)
+    assert _difficulty_weight(0) == _difficulty_weight(1)
+    assert _difficulty_weight(9) == _difficulty_weight(5)
+    assert _difficulty_weight("bad") == 1.0
+
+
+def test_capability_difficulty_metadata_recorded(ws_tmp):
+    prof = CapabilityProfile(path=str(ws_tmp / "capability.json"))
+    prof.record("修复登录空指针崩溃", ok=True, difficulty=5)
+    prof.record("修复登录空指针崩溃", ok=False, difficulty=1)
+    assert prof.avg_difficulty("debug") == 3.0
+    assert prof.easy_share("debug") == 0.5
+    assert prof.easy_success_share("debug") == 0.0
+    prof.close()
+
+
+def test_capability_calibration_bias_flags_easy_success(ws_tmp):
+    prof = CapabilityProfile(path=str(ws_tmp / "capability.json"))
+    for _ in range(4):
+        prof.record("修复登录空指针崩溃", ok=True, difficulty=1)
+    assert prof.calibration_bias(), "简单任务刷分应给出偏倚提示"
+    assert prof.calibration_adjusted_score("debug") < prof.score("debug")
+    prof.close()
+
+
+def test_capability_calibration_no_bias_on_hard_tasks(ws_tmp):
+    prof = CapabilityProfile(path=str(ws_tmp / "capability.json"))
+    for _ in range(4):
+        prof.record("修复登录空指针崩溃", ok=True, difficulty=5)
+    assert prof.calibration_bias() == []
+    assert prof.calibration_adjusted_score("debug") == prof.score("debug")
+    assert any("平均难度" in line for line in prof.calibration_report())
+    prof.close()
+
+
+def test_capability_difficulty_absent_records_no_stats(ws_tmp):
+    prof = CapabilityProfile(path=str(ws_tmp / "capability.json"))
+    for _ in range(3):
+        prof.record("修复登录空指针崩溃", ok=True)
+    assert prof.avg_difficulty("debug") is None
+    assert prof.calibration_bias() == []
+    assert prof.calibration_report() == []
+    prof.close()
