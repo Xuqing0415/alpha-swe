@@ -2,14 +2,17 @@
 
 设计：`[HH:MM:SS] TYPE 内容`，TYPE 右对齐 5 列，8 种语义类型
 （THINK/ACT/OBS/INFO/WARN/ERROR/OK/MEM），只用终端原生色，
-不使用 emoji 与 256 色。
+不使用 emoji 与 256 色。`_LOG_TYPES` 未登记的已知事件类型按
+`EventKind` 分组着色（见 `_KIND_STYLES`），未知类型仍回退 INFO。
 """
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from rich.text import Text
+
+from agent.observability.event_schema import EventKind, describe, kind_of
 
 # 事件类型 -> (日志 TYPE, 颜色)
 _LOG_TYPES: Dict[str, Tuple[str, str]] = {
@@ -49,6 +52,20 @@ _LOG_TYPES: Dict[str, Tuple[str, str]] = {
     "observation": ("OBS", ""),
 }
 
+# 事件分组 -> (日志 TYPE, 颜色)。_LOG_TYPES 未登记的已知事件按分组兜底；
+# 未知类型归入 EventKind.OTHER，行为与历史回退 (INFO/bright_black) 一致。
+_KIND_STYLES: Dict[EventKind, Tuple[str, str]] = {
+    EventKind.THOUGHT: ("THINK", "cyan"),
+    EventKind.TOOL: ("ACT", "bold white"),
+    EventKind.LIFECYCLE: ("INFO", "bright_black"),
+    EventKind.TASK: ("TASK", "green"),
+    EventKind.STATE: ("GATE", "magenta"),
+    EventKind.BUDGET: ("WARN", "yellow"),
+    EventKind.BARRIER: ("GATE", "magenta"),
+    EventKind.ERROR: ("ERROR", "red"),
+    EventKind.OTHER: ("INFO", "bright_black"),
+}
+
 _TYPE_WIDTH = 5
 
 
@@ -56,11 +73,12 @@ def format_event(record: Dict[str, Any]) -> Text:
     """把一条事件记录渲染成 `[HH:MM:SS] TYPE 内容` 的 Rich Text。"""
     etype = str(record.get("type", "unknown"))
     data = record.get("data", {}) or {}
-    tag, color = _LOG_TYPES.get(etype, ("INFO", "bright_black"))
+    tag, color = _LOG_TYPES.get(
+        etype, _KIND_STYLES.get(kind_of(etype), ("INFO", "bright_black")))
     text = Text()
     text.append(f"[{_timestamp(record)}] ", style="bright_black")
     text.append(f"{tag.rjust(_TYPE_WIDTH)} ", style=color or "")
-    text.append(_format_body(etype, data))
+    text.append(_format_body(etype, data, record))
     return text
 
 
@@ -84,7 +102,8 @@ def _timestamp(record: Dict[str, Any]) -> str:
         return time.strftime("%H:%M:%S")
 
 
-def _format_body(etype: str, data: Dict[str, Any]) -> str:
+def _format_body(etype: str, data: Dict[str, Any],
+                 record: Optional[Dict[str, Any]] = None) -> str:
     if etype == "project_state_diff":
         text = str(data.get("text", "") or "").replace("\n", " ")
         return text or "项目状态无变化"
@@ -190,6 +209,9 @@ def _format_body(etype: str, data: Dict[str, Any]) -> str:
             return message
         kind = str(data.get("kind") or "state")
         return f"会话状态更新 [{kind}]"
+    if record is not None:
+        # 未命中具体类型：用统一事件流 schema 的单行摘要兜底
+        return describe(record)
     return f"{etype}: {_truncate(str(data), 160)}"
 
 
