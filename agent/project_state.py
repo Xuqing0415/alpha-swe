@@ -36,6 +36,21 @@ _SKIP_SUFFIXES = (".pyc", ".pyo", ".whl", ".egg-info")
 _MAX_RECENT = 200
 _MAX_HISTORY = 200
 _MAX_DIFF_FILES = 40
+_MAX_HASH_PATHS = 500
+
+# 内容哈希按需维护：只覆盖 Agent 写过的文件与关键配置。其余文件用
+# mtime/size 检测外部修改，避免在万级文件项目里每次会话全量读盘。
+_KEY_CONFIG_NAMES = frozenset({
+    "package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock",
+    "requirements.txt", "pyproject.toml", "poetry.lock", "Pipfile",
+    "Pipfile.lock", "Cargo.toml", "Cargo.lock", "go.mod", "go.sum",
+    "pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle",
+    "Gemfile", "Gemfile.lock", "composer.json", "composer.lock",
+    "Dockerfile", "docker-compose.yml", ".flake8", "pytest.ini",
+})
+_KEY_CONFIG_PATHS = frozenset({
+    "config/agent.yaml", "config/mcp.yaml", "config/team.yaml",
+})
 
 
 def _now() -> str:
@@ -141,6 +156,10 @@ class ProjectStateTracker:
         self._state: Dict[str, Any] = self._load()
         self._start_snapshot: Dict[str, Any] = {}
         self._agent_intended: Dict[str, Any] = {}
+        self._hash_paths = {
+            str(p) for p in (self._state.get("hash_paths") or [])
+            if isinstance(p, str)
+        }
         self._session_open = False
 
     # ---- 加载 / 保存 ----
@@ -182,8 +201,11 @@ class ProjectStateTracker:
             "schema": 1,
             "updated_at": "",
             "structure": {},
+            "dirs": {},
             "deps": {},
             "tech_stack": [],
+            "hash_policy": "incremental",
+            "hash_paths": [],
             "dependency_history": [],
             "recent_changes": [],
             "test_health": {"last_run_at": "", "passed": 0, "failed": 0,
@@ -211,10 +233,15 @@ class ProjectStateTracker:
         return self._state
 
     # ---- 快照扫描 ----
-    def scan(self) -> Dict[str, Any]:
-        """当前项目结构 + 依赖清单 + 技术栈。"""
+    def scan(self, full_hash: bool = False) -> Dict[str, Any]:
+        """当前项目结构 + 目录统计 + 依赖清单 + 技术栈。
+
+        默认只对 Agent 写过的文件与关键配置计算内容哈希；``full_hash=True``
+        供显式全量校验使用，但不会把全量路径写回增量哈希集合。
+        """
         root = Path(self.workspace)
         structure: Dict[str, Dict[str, Any]] = {}
+        dirs: Dict[str, Dict[str, int]] = {}
         if root.is_dir():
             for p in root.rglob("*"):
                 if not p.is_file():
@@ -229,12 +256,37 @@ class ProjectStateTracker:
                     st = p.stat()
                 except OSError:
                     continue
-                structure[rel] = {"mtime_ns": st.st_mtime_ns,
-                                  "size": st.st_size,
-                                  "sha1": _sha1_file(p)}
+                entry: Dict[str, Any] = {
+                    "mtime_ns": st.st_mtime_ns,
+                    "size": st.st_size,
+                }
+                if full_hash or self._should_hash(rel):
+                    try:
+                        entry["sha1"] = _sha1_file(p)
+                    except OSError:
+                        pass
+                structure[rel] = entry
+                parent = Path(rel).parent.as_posix()
+                while True:
+                    stats = dirs.setdefault(
+                        parent, {"files": 0, "bytes": 0, "mtime_ns": 0})
+                    stats["files"] += 1
+                    stats["bytes"] += st.st_size
+                    stats["mtime_ns"] = max(stats["mtime_ns"], st.st_mtime_ns)
+                    if parent == ".":
+                        break
+                    parent = Path(parent).parent.as_posix()
         deps = _collect_deps(root) if root.is_dir() else {}
-        return {"structure": structure, "deps": deps,
-                "tech_stack": self._tech_stack(root, list(structure))}
+        return {"structure": structure, "dirs": dirs, "deps": deps,
+                "tech_stack": self._tech_stack(root, list(structure)),
+                "hash_policy": "full" if full_hash else "incremental"}
+
+    def _should_hash(self, rel: str) -> bool:
+        """是否为此路径维护内容哈希（Agent 写入或关键配置）。"""
+        if rel in self._hash_paths:
+            return True
+        return (Path(rel).name in _KEY_CONFIG_NAMES
+                or rel in _KEY_CONFIG_PATHS)
 
     # ---- 主线一 1.1A：三层快照对比（Last_known / Current_disk / Agent_intended） ----
     def _tech_stack(self, root: Path,
@@ -264,6 +316,7 @@ class ProjectStateTracker:
             rel = raw.as_posix()
         if _skip(tuple(rel.split("/"))):
             return
+        self._hash_paths.add(rel)
         target = root / rel
         if not target.is_file():
             self._agent_intended[rel] = {"deleted": True}
@@ -390,8 +443,11 @@ class ProjectStateTracker:
         previous = self._state
         if not previous.get("structure") and not previous.get("deps"):
             self._state["structure"] = current["structure"]
+            self._state["dirs"] = current["dirs"]
             self._state["deps"] = current["deps"]
             self._state["tech_stack"] = current["tech_stack"]
+            self._state["hash_policy"] = "incremental"
+            self._state["hash_paths"] = list(self._hash_paths)[-_MAX_HASH_PATHS:]
             self.save()
             return {}
         diff = self._compute_diff(previous, current)
@@ -426,7 +482,10 @@ class ProjectStateTracker:
         changes["conflicts"] = conflicts
         changes["conflict_text"] = self._conflict_text(conflicts)
         self._state["structure"] = current["structure"]
+        self._state["dirs"] = current["dirs"]
         self._state["deps"] = current["deps"]
+        self._state["hash_policy"] = "incremental"
+        self._state["hash_paths"] = list(self._hash_paths)[-_MAX_HASH_PATHS:]
         if current["tech_stack"]:
             self._state["tech_stack"] = current["tech_stack"]
         self.save()
