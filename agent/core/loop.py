@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import time
+import uuid
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -24,6 +25,7 @@ from agent.context.manager import ContextManager
 from agent.context.plugin import PluginManager, ProjectContext
 from agent.context.skill import SkillLibrary
 from agent.core.decision_logger import DecisionLogger
+from agent.core.goal import Goal, GoalStatus, GoalStore
 from agent.core.scheduler import Scheduler
 from agent.core.state import AgentPhase, StateMachine
 from agent.core.task import Task, TaskDAG, TaskStatus
@@ -130,6 +132,7 @@ class AgentLoop:
         scheduler: Optional[Scheduler] = None,
         summarizer: Optional[ExperienceSummarizer] = None,
         mcp_manager: Optional[MCPManager] = None,
+        goal_store: Optional[GoalStore] = None,
         output_callback: Optional[Callable[[str], None]] = None,
         decision_logger: Optional[DecisionLogger] = None,
         confirmation_callback: Optional[
@@ -159,6 +162,17 @@ class AgentLoop:
         self._decision = decision_logger or DecisionLogger(
             log_path=self.config.decision_log_path or None,
         )
+        # 功能扩展：Goal 目标驱动台账（默认关闭；损坏文件由 GoalStore 自愈为空台账）
+        self.goal_store = goal_store
+        if self.goal_store is None and self.config.agent.goal_enabled:
+            goal_path = self._resolve_goal_path(
+                self.config.agent.goal_state_path)
+            self.goal_store = GoalStore(path=goal_path)
+            self._decision.record(
+                "goal.enabled", "agent.goal_enabled", True,
+                f"目标驱动开启（台账 {goal_path}）",
+            )
+        self._goal_continue_count = 0
         self.confirmation_callback = confirmation_callback
         self._max_rounds = (
             self.config.agent.max_loop_iterations or self.config.agent.max_rounds
@@ -287,6 +301,7 @@ class AgentLoop:
         # 方案 1.1：任务级重试包装（失败且有预算时 RETRYING -> READY 重跑）
         self.scheduler.set_worker(self._wrap_with_retry(worker))
         self.scheduler.set_on_task_failed(self._on_task_failed)
+        self.scheduler.set_on_task_done(self._on_goal_task_done)
         if self.config.agent.snapshot_enabled:
             # 方案 1.3：每完成一个子步骤自动落盘快照（断点续跑）
             self.scheduler.set_on_snapshot(self._save_snapshot)
@@ -349,6 +364,272 @@ class AgentLoop:
             return None
         workdir = str(getattr(cfg, "workdir", "") or self.config.sandbox.workspace or ".")
         return PhaseBarrierBridge(cfg, workspace=workdir)
+
+    # ---- Goal 目标驱动（功能扩展 P0：目标台账 -> 任务 DAG -> 进度回写） ----
+    def _resolve_goal_path(self, raw: str) -> str:
+        """把目标台账路径解析为绝对路径；相对路径以沙箱工作区为基准。"""
+        path = Path(str(raw or ".swe-agent/goals.json")).expanduser()
+        if not path.is_absolute():
+            path = Path(self.config.sandbox.workspace) / path
+        return str(path.resolve())
+
+    def _goal_path(self) -> str:
+        """当前生效的目标台账路径（未启用时也返回配置位置，供展示）。"""
+        return self._resolve_goal_path(self.config.agent.goal_state_path)
+
+    def active_goal(self) -> Optional[Goal]:
+        """当前活跃目标：优先进行中，其次已批准；同一时刻取最近更新的一条。"""
+        if self.goal_store is None:
+            return None
+        candidates = self.goal_store.list(status=GoalStatus.IN_PROGRESS)
+        if not candidates:
+            candidates = self.goal_store.list(status=GoalStatus.APPROVED)
+        if not candidates:
+            return None
+        return max(candidates, key=lambda item: item.updated_at or "")
+
+    @staticmethod
+    def _drive_goal_status(goal: Goal, target: GoalStatus) -> bool:
+        """沿合法迁移链把目标推到 target；无法推进时返回 False。"""
+        if goal.status is target:
+            return True
+        if target == GoalStatus.FAILED:
+            if goal.transition(GoalStatus.FAILED):
+                return True
+            # 已批准但未开始的目标可直接失败（状态机允许），其余保持原状
+            return False
+        if goal.status == GoalStatus.FAILED:
+            # 失败目标允许显式重新激活；只恢复到 in_progress，不直接判完成
+            return (target == GoalStatus.IN_PROGRESS
+                    and goal.transition(GoalStatus.IN_PROGRESS))
+        chain = [GoalStatus.PENDING, GoalStatus.APPROVED,
+                 GoalStatus.IN_PROGRESS, GoalStatus.COMPLETED]
+        try:
+            start = chain.index(goal.status)
+            end = chain.index(target)
+        except ValueError:
+            return False
+        if end < start:
+            return False
+        changed = False
+        for status in chain[start + 1:end + 1]:
+            if not goal.transition(status):
+                return changed
+            changed = True
+        return changed
+
+    def create_goal(self, description: str,
+                    sub_goals: Optional[List[str]] = None) -> Goal:
+        """创建并启动目标；子目标按给定顺序生成，返回根目标。"""
+        if self.goal_store is None:
+            self.config.agent.goal_enabled = True
+            self.goal_store = GoalStore(path=self._goal_path())
+        desc = str(description or "").strip()
+        if not desc:
+            raise ValueError("目标描述不能为空")
+        goal = Goal(id="goal_" + uuid.uuid4().hex[:10], description=desc,
+                    metadata={"source": "agent_loop"})
+        for idx, text in enumerate(sub_goals or []):
+            text = str(text or "").strip()
+            if not text:
+                continue
+            goal.add_sub_goal(Goal(
+                id="subgoal_" + uuid.uuid4().hex[:10], description=text,
+                metadata={"order": idx},
+            ))
+        self._drive_goal_status(goal, GoalStatus.IN_PROGRESS)
+        self.goal_store.upsert(goal)
+        self._decision.record(
+            "goal.created", "agent.goal_enabled", True,
+            f"创建目标 {goal.id}: {desc[:120]}"
+            + (f"（{len(goal.sub_goals)} 个子目标）" if goal.sub_goals else ""),
+        )
+        self._emit("goal_created", goal=goal.to_dict())
+        return goal
+
+    def activate_goal(self, goal_id: str) -> Optional[Goal]:
+        """激活一个已存在的目标（pending -> approved -> in_progress）。"""
+        if self.goal_store is None:
+            return None
+        goal = self.goal_store.get(str(goal_id))
+        if goal is None or goal.status == GoalStatus.COMPLETED:
+            return None
+        self._drive_goal_status(goal, GoalStatus.IN_PROGRESS)
+        self.goal_store.upsert(goal)
+        self._decision.record(
+            "goal.activated", "agent.goal_enabled", True,
+            f"激活目标 {goal.id}（进度 {goal.progress:.0%}）",
+        )
+        self._emit("goal_updated", goal=goal.to_dict())
+        return goal
+
+    def goal_snapshot(self) -> Dict[str, Any]:
+        """目标台账快照（CLI/TUI/Web 共用）。"""
+        if self.goal_store is None:
+            return {"enabled": bool(self.config.agent.goal_enabled),
+                    "available": False, "path": self._goal_path(),
+                    "active": None, "summary": {}, "goals": []}
+        active = self.active_goal()
+        return {
+            "enabled": bool(self.config.agent.goal_enabled),
+            "available": True,
+            "path": self._goal_path(),
+            "active": active.to_dict() if active else None,
+            "summary": self.goal_store.progress_summary(),
+            "goals": [goal.to_dict() for goal in self.goal_store.list()],
+        }
+
+    def _inject_goal_context(self) -> None:
+        """把当前进行中目标注入 System Prompt；无目标时清空，保持既有 prompt。"""
+        goal = self.active_goal()
+        self.prompt_builder.set_goal(
+            goal.goal_prompt_block() if goal is not None else "")
+
+    def _goal_plan(self, goal: Goal, persist: bool = True) -> List[Task]:
+        """由目标生成确定性子任务 DAG（子目标完成/失败后自动排除）。"""
+        self._drive_goal_status(goal, GoalStatus.IN_PROGRESS)
+        tasks = goal.to_tasks()
+        for task in tasks:
+            task.max_retries = int(self.config.agent.max_retries)
+        if persist:
+            self.goal_store.upsert(goal)
+        self._decision.record(
+            "goal.plan", "agent.goal_enabled", True,
+            f"目标 {goal.id} 生成 {len(tasks)} 个任务"
+            f"（子目标 {len(goal.sub_goals)}，进度 {goal.progress:.0%}）",
+        )
+        self._emit("goal_plan", goal_id=goal.id, total=len(tasks),
+                   tasks=[task.instruction for task in tasks])
+        return tasks
+
+    @staticmethod
+    def _goal_node(goal: Goal, node_id: str) -> Optional[Goal]:
+        if goal.id == node_id:
+            return goal
+        for item in goal.sub_goals:
+            if item.id == node_id:
+                return item
+            nested = AgentLoop._goal_node(item, node_id)
+            if nested is not None:
+                return nested
+        return None
+
+    def _finalize_goal(self, goal: Goal) -> None:
+        """按子目标结果收敛父目标状态（仅在全部子目标终结后生效）。"""
+        goal.recompute_progress()
+        if not goal.sub_goals:
+            return
+        if not all(item.is_terminal for item in goal.sub_goals):
+            self._drive_goal_status(goal, GoalStatus.IN_PROGRESS)
+            return
+        if all(item.status == GoalStatus.COMPLETED for item in goal.sub_goals):
+            self._drive_goal_status(goal, GoalStatus.COMPLETED)
+        else:
+            self._drive_goal_status(goal, GoalStatus.FAILED)
+
+    def _apply_task_status_to_goal(self, goal: Goal, task: Task) -> None:
+        """把单个任务终结状态回写到对应目标节点（不落盘）。"""
+        node = self._goal_node(goal, task.id)
+        if node is None:
+            return
+        if task.status == TaskStatus.COMPLETED:
+            node.progress = 1.0
+            self._drive_goal_status(node, GoalStatus.COMPLETED)
+        elif task.status in (TaskStatus.FAILED, TaskStatus.SKIPPED):
+            self._drive_goal_status(node, GoalStatus.FAILED)
+        elif task.status in (TaskStatus.RUNNING, TaskStatus.READY,
+                             TaskStatus.RETRYING):
+            self._drive_goal_status(node, GoalStatus.IN_PROGRESS)
+        self._finalize_goal(goal)
+
+    def _on_goal_task_done(self, task: Task) -> None:
+        """Scheduler 任务终结回调：同步目标进度并持久化（失败静默降级）。"""
+        if self.goal_store is None or not task.metadata.get("goal_id"):
+            return
+        try:
+            goal = self.goal_store.get(str(task.metadata["goal_id"]))
+            if goal is None:
+                return
+            self._apply_task_status_to_goal(goal, task)
+            self.goal_store.upsert(goal)
+            self._decision.record(
+                "goal.progress", "agent.goal_enabled", goal.progress,
+                f"目标 {goal.id} 进度 {goal.progress:.0%}，任务 {task.id}"
+                f" 状态 {task.status.value}",
+            )
+            self._emit("goal_updated", goal=goal.to_dict(),
+                       task_id=task.id, task_status=task.status.value)
+        except Exception as e:  # noqa: BLE001 - 目标回写不得影响任务收尾
+            logger.warning("目标进度回写失败（不影响任务）: %s", e)
+
+    def _mark_goal_task_started(self, task: Task) -> None:
+        """任务开始：把对应目标节点推进到 in_progress，并刷新 Prompt 目标块。"""
+        if self.goal_store is None:
+            return
+        goal_id = task.metadata.get("goal_id")
+        if not goal_id:
+            self._inject_goal_context()
+            return
+        try:
+            goal = self.goal_store.get(str(goal_id))
+            if goal is None:
+                return
+            node = self._goal_node(goal, task.id)
+            if node is not None:
+                self._drive_goal_status(node, GoalStatus.IN_PROGRESS)
+            self._finalize_goal(goal)
+            self.goal_store.upsert(goal)
+            self._inject_goal_context()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("目标任务启动回写失败（不影响任务）: %s", e)
+
+    def _refresh_goal_from_dag(self, goal: Goal) -> None:
+        """按当前 DAG 全量重算一次目标进度（用于续规划前对齐）。"""
+        for task in self.scheduler.dag.all():
+            if task.metadata.get("goal_id") == goal.id:
+                self._apply_task_status_to_goal(goal, task)
+        self.goal_store.upsert(goal)
+
+    async def _maybe_continue_goal(self, prompt: str) -> None:
+        """空闲继续：目标未完成但队列已空时重新规划，最多 N 轮防死循环。"""
+        if not self.config.agent.goal_idle_continue_enabled:
+            return
+        goal = self.active_goal()
+        if goal is None:
+            return
+        limit = max(0, int(self.config.agent.goal_idle_continue_limit))
+        for index in range(1, limit + 1):
+            self._refresh_goal_from_dag(goal)
+            if goal.is_terminal:
+                return
+            existing = {task.id for task in self.scheduler.dag.all()}
+            next_tasks = [task for task in goal.to_tasks()
+                          if task.id not in existing]
+            if not next_tasks:
+                if goal.sub_goals:
+                    # 子目标已全部终结，但父目标状态尚未收敛：按结果收口
+                    if all(item.is_terminal for item in goal.sub_goals):
+                        self._finalize_goal(goal)
+                        self.goal_store.upsert(goal)
+                        self._emit("goal_updated", goal=goal.to_dict())
+                    break
+                # 单目标且原任务已执行但未完成：用一个收敛任务收口
+                next_tasks = [Task(
+                    id=f"{goal.id}-finalize-{index}",
+                    instruction=(f"总结目标「{goal.description}」的完成情况；"
+                                 "若尚未完成，说明剩余工作并直接收敛"),
+                    metadata={"goal_id": goal.id, "goal_finalize": True},
+                    criticality="normal",
+                )]
+            self.scheduler.submit_plan(next_tasks)
+            self._emit("goal_idle_continue", goal_id=goal.id,
+                       iteration=index, total=len(next_tasks))
+            self._decision.record(
+                "goal.idle_continue", "agent.goal_idle_continue_limit", limit,
+                f"目标 {goal.id} 第 {index} 次续规划（{len(next_tasks)} 个任务）",
+            )
+            await self.scheduler.run_to_completion()
+        self._refresh_goal_from_dag(goal)
 
     # ---- 默认工具集 ----
     def _default_tools(self) -> ToolManager:
@@ -467,6 +748,7 @@ class AgentLoop:
     async def run(self, prompt: str, resume: bool = False,
                    dry_run: bool = False) -> LoopResult:
         self._current_prompt = prompt
+        self._goal_continue_count = 0
         # 主线一 1.3C：会话状态显式生命周期——新建 / 从 .agent_gate 恢复
         self.session_state = self._init_session_state(prompt, resume)
         # phase-barrier 门禁：任务启动钩子（默认检查阶段 1=Spec 设计），失败时把约束提示注入 System Prompt
@@ -584,6 +866,9 @@ class AgentLoop:
         # 主线一 1.1/1.2：项目状态感知 + 会话连续性（差异注入 / 续接提示）
         if not dry_run:
             self._begin_persistent_session(prompt, resume)
+        # 目标驱动：活跃目标注入 System Prompt，并作为本轮确定性任务计划
+        self._inject_goal_context()
+        goal = self.active_goal()
         skill = self._build_injected_context(prompt)
         if skill:
             self.prompt_builder.set_skill(skill)
@@ -631,6 +916,9 @@ class AgentLoop:
         restored = False
         if resume and not plan:
             plan, restored = self._restore_snapshot_plan()
+        if not plan and goal is not None and not resume:
+            plan = self._goal_plan(goal, persist=not dry_run)
+            restored = False
         if not plan:
             # 注入项目调用图与约定摘要到拆分提示（阶段一 1.2/1.3）；
             # 对不支持新参数的 Planner 实现自动降级
@@ -653,6 +941,9 @@ class AgentLoop:
         self.state.transition(AgentPhase.RUNNING)
         try:
             await self.scheduler.run_to_completion()
+            # 目标未完成但队列清空时，按剩余子目标续规划（有上限）
+            if not dry_run:
+                await self._maybe_continue_goal(prompt)
         except Exception as e:
             logger.exception("调度循环异常")
             self._emit("run_error", error=str(e))
@@ -666,6 +957,7 @@ class AgentLoop:
             self._maybe_counterfactual(prompt, result)
             self._maybe_self_improve(prompt, result)
             self._maybe_extract_benchmark(prompt, result)
+            await self._maybe_distill_session(prompt, result)
             self._last_result = result
             self._maybe_phase_barrier_epilogue(prompt, result)
             self._end_persistent_session(prompt, result)
@@ -704,6 +996,7 @@ class AgentLoop:
         self._maybe_counterfactual(prompt, result)
         self._maybe_self_improve(prompt, result)
         self._maybe_extract_benchmark(prompt, result)
+        await self._maybe_distill_session(prompt, result)
         self._last_result = result
         self._maybe_phase_barrier_epilogue(prompt, result)
         self._end_persistent_session(prompt, result)
@@ -968,6 +1261,7 @@ class AgentLoop:
         )
         self._load_task_memory(task)
         self._load_task_plugins(task)
+        self._mark_goal_task_started(task)
         parse_failures = 0
         degenerate_streak = 0  # 连续空参数工具调用计数（防无效循环）
 
@@ -2731,6 +3025,11 @@ class AgentLoop:
                 getattr(self, "_current_prompt", ""),
                 getattr(self, "_last_result", None),
             )
+        if self.goal_store is not None:
+            try:
+                self.goal_store.close()
+            except Exception:
+                logger.exception("目标台账关闭失败")
         self._flush_self_improve()
         closer = getattr(self.memory, "close", None)
         if closer is not None:
@@ -2995,6 +3294,8 @@ class AgentLoop:
                 self.benchmark = BenchmarkExtractor(
                     path=str(base / "benchmark_store.json"),
                     profile=self.capability,
+                    duplicate_threshold=self.config.agent.benchmark_duplicate_threshold,
+                    variant_threshold=self.config.agent.benchmark_variant_threshold,
                 )
             self._decision.record(
                 "self_improve.ready", "agent.self_improve_enabled", True,
@@ -3010,10 +3311,35 @@ class AgentLoop:
         if self.capability is None or not self.config.agent.capability_prompt_inject:
             return ""
         try:
-            return self.capability.profile_text()
+            text = self.capability.profile_text()
+            bias = self.capability.calibration_bias()
+            if bias:
+                text = (text + "\n[难度校准警告]\n"
+                        + "\n".join(f"- {item}" for item in bias[:3]))
+            return text
         except Exception as e:
             logger.warning("能力画像提示构建失败: %s", e)
             return ""
+
+    def _critic_difficulty(self, prompt: str,
+                           result: LoopResult) -> Optional[int]:
+        """任务完成后由过程 Critic 评估难度并记录依据（4.1）。"""
+        if not self.config.agent.difficulty_critic_enabled:
+            return None
+        try:
+            from agent.selfimprove.difficulty import assess_difficulty
+            assessment = assess_difficulty(prompt, result)
+            self._decision.record(
+                "capability.difficulty", "agent.difficulty_critic_enabled",
+                assessment.score,
+                f"过程 Critic 难度 {assessment.score}/5：{assessment.rationale}",
+            )
+            self._emit("difficulty_assessed", score=assessment.score,
+                       signals=assessment.signals)
+            return assessment.score
+        except Exception as e:
+            logger.warning("难度 Critic 评估失败（按未标注处理）: %s", e)
+            return None
 
     def _flush_self_improve(self) -> None:
         """关闭时落盘各台账。"""
@@ -3031,12 +3357,15 @@ class AgentLoop:
         """任务结束：更新能力画像、验证/登记失败改进提议（非阻塞）。"""
         try:
             ok = result.phase == AgentPhase.COMPLETED
+            difficulty = self._critic_difficulty(prompt, result)
             if self.capability is not None:
-                dims = self.capability.record(prompt, ok)
+                dims = self.capability.record(
+                    prompt, ok, difficulty=difficulty)
                 self._decision.record(
                     "capability.updated", "agent.capability_enabled", True,
                     f"能力画像更新: {'成功' if ok else '失败'}，"
-                    f"维度={','.join(dims)}",
+                    f"维度={','.join(dims)}"
+                    + (f"，难度={difficulty}" if difficulty is not None else ""),
                 )
                 for w in self.capability.trend_warnings()[:2]:
                     self._decision.record(
@@ -3084,6 +3413,40 @@ class AgentLoop:
                     self._register_proposal(prompt, result)
         except Exception as e:
             logger.warning("自我改进流程失败（不影响任务）: %s", e)
+
+    async def _maybe_distill_session(self, prompt: str,
+                                     result: LoopResult) -> None:
+        """会话结束：把跨会话有价值的状态提炼进项目记忆（1.3C）。"""
+        if not self.config.agent.session_distill_enabled:
+            return
+        if self.memory is None or getattr(self.memory, "disabled", False):
+            self._decision.record(
+                "session.distill_skipped", "memory.backend",
+                self.config.memory.backend, "记忆不可用，跳过会话知识提炼",
+            )
+            return
+        try:
+            from agent.memory.distill import distill_session
+            items = await distill_session(
+                self.llm, self.session_state, result, prompt)
+            for item in items:
+                self.memory.remember(
+                    "note", item,
+                    metadata={
+                        "layer": "project",
+                        "kind": "session_distilled",
+                        "source": "session_distill",
+                        "prompt": str(prompt)[:200],
+                    },
+                )
+            if items:
+                self._decision.record(
+                    "session.distilled", "agent.session_distill_enabled", True,
+                    f"会话知识提炼 {len(items)} 条并写入项目记忆（source=session_distill）",
+                )
+                self._emit("session_distilled", count=len(items), items=items)
+        except Exception as e:
+            logger.warning("会话知识提炼失败（不影响任务）: %s", e)
 
     def _register_proposal(self, prompt: str, result: LoopResult) -> None:
         """失败任务归因后登记/刷新改进提议（3.2）。"""

@@ -73,6 +73,7 @@ class PromptBuilder:
         self.project_state = ""
         self.exec_env = ""
         self.gate_notice = ""
+        self.goal_context = ""
 
     def _resolve_system_template(self) -> str:
         """按 llm.provider 选择系统提示风格并记录决策。"""
@@ -116,6 +117,10 @@ class PromptBuilder:
         """注入阶段门禁约束提示（phase-barrier）。"""
         self.gate_notice = context
 
+    def set_goal(self, context: str) -> None:
+        """注入当前目标（Goal 目标驱动；无活跃目标时为空）。"""
+        self.goal_context = context or ""
+
     def set_project_profile(self, context: str) -> None:
         """注入项目约定与技术栈摘要（阶段一 1.3）。"""
         self.project_profile = context
@@ -142,6 +147,7 @@ class PromptBuilder:
             project_state=self.project_state,
             exec_env=self.exec_env,
             gate_notice=self.gate_notice,
+            goal=self.goal_context,
         )
         upstream_text = ""
         if upstream:

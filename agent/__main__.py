@@ -130,6 +130,13 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                        help="干跑模式：生成执行计划并预览，不执行任何工具/写入")
     run_p.add_argument("--resume", action="store_true",
                        help="断点续跑：从最近任务快照恢复（无快照则重新规划）")
+    run_p.add_argument("--goal", action="store_true",
+                       help="把任务描述登记为目标并启用目标驱动（自动创建子任务）")
+    run_p.add_argument("--subgoal", action="append", default=[],
+                       metavar="TEXT",
+                       help="目标子任务（可重复；仅与 --goal 同用）")
+    run_p.add_argument("--goal-id", default=None,
+                       help="激活既有目标台账中的目标 ID（启用目标驱动）")
     run_p.add_argument("--version", action="version",
                        version="alpha-swe " + _version())
     return parser.parse_args(argv)
@@ -156,6 +163,8 @@ def build_config(args: argparse.Namespace) -> AppConfig:
         # 压缩阈值按 context.max_tokens * compression_threshold 计算
         cfg.context.max_tokens = int(args.max_tokens)
         cfg.agent.max_token_limit = int(args.max_tokens)
+    if getattr(args, "goal", False) or getattr(args, "goal_id", None):
+        cfg.agent.goal_enabled = True
     return cfg
 
 
@@ -422,6 +431,18 @@ def run_cli(args: argparse.Namespace,
             and getattr(args, "resume", False)):
         print("用法错误: --dry-run 与 --resume 不能同时使用", file=sys.stderr)
         return EXIT_INTERRUPT
+    if getattr(args, "goal", False) and getattr(args, "goal_id", None):
+        print("用法错误: --goal 与 --goal-id 不能同时使用", file=sys.stderr)
+        return EXIT_INTERRUPT
+    if getattr(args, "subgoal", None) and not getattr(args, "goal", False):
+        print("用法错误: --subgoal 需要与 --goal 同时使用", file=sys.stderr)
+        return EXIT_INTERRUPT
+    if (getattr(args, "dry_run", False)
+            and (getattr(args, "goal", False)
+                 or getattr(args, "goal_id", None))):
+        print("用法错误: --goal/--goal-id 不能与 --dry-run 同时使用",
+              file=sys.stderr)
+        return EXIT_INTERRUPT
     factory = loop_factory or _default_loop_factory
     try:
         cfg = build_config(args)
@@ -453,6 +474,18 @@ def run_cli(args: argparse.Namespace,
     except Exception as e:
         _report_fatal(e, args, phase="init")
         return EXIT_FAILED
+    # 目标驱动入口：创建新目标或激活既有目标；失败使用退出码 2（用法/状态错误）
+    try:
+        if getattr(args, "goal", False):
+            loop.create_goal(prompt, sub_goals=getattr(args, "subgoal", []))
+        elif getattr(args, "goal_id", None):
+            if loop.activate_goal(args.goal_id) is None:
+                print("用法错误: 目标不存在或已终结: %s" % args.goal_id,
+                      file=sys.stderr)
+                return EXIT_INTERRUPT
+    except ValueError as e:
+        print("用法错误: %s" % e, file=sys.stderr)
+        return EXIT_INTERRUPT
     started = time.time()
     try:
         exit_code, result, error = asyncio.run(

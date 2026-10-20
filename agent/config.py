@@ -337,6 +337,11 @@ class AgentConfig(BaseModel):
     # 主线一 1.1/1.2：项目状态感知与会话间工作流连续性（.swe-agent/）
     state_tracker_enabled: bool = True       # 项目状态快照与跨会话差异注入
     workspace_context_enabled: bool = True   # 会话间工作流续接（next_session_hint）
+    # 功能扩展：Goal 目标驱动（默认关闭，开启后由目标台账生成任务 DAG）
+    goal_enabled: bool = False               # 是否加载 .swe-agent/goals.json 并消费目标
+    goal_state_path: str = ".swe-agent/goals.json"  # 相对工作区的目标台账路径
+    goal_idle_continue_limit: int = 3        # 队列清空后最多续规划次数（防死循环）
+    goal_idle_continue_enabled: bool = True  # 目标未完成时允许空闲续规划
     # 多实例互斥：同一项目目录同一时刻只允许一个实例操作（跨进程）
     project_lock_enabled: bool = False       # 默认关闭；多实例部署时开启
     project_lock_timeout: float = 0.0        # 锁获取超时（秒，0=立即失败）
@@ -346,13 +351,18 @@ class AgentConfig(BaseModel):
     capability_enabled: bool = True            # 3.1 能力画像（EWMA 成功率 + 弱项提示）
     capability_prompt_inject: bool = True      # 规划时注入能力画像提示
     capability_routing_confidence: float = 1.0  # 角色路由置信加权：1=取95%区间下界，0=仅数据不足门槛
+    difficulty_critic_enabled: bool = True     # 任务完成后由过程 Critic 评估难度 1~5
     proposals_enabled: bool = True             # 3.2 失败驱动改进循环（提议队列）
     proposal_promote_threshold: int = 3        # 提议连续验证成功 N 次晋升自学策略
     proposal_reject_after: int = 5             # 应用 N 次未达标则丢弃
     proposal_require_generalization: bool = True  # 3.2A 晋升需相似+相关两个场景验证有效
     proposal_conflict_threshold: int = 5        # 3.2B 与已晋升策略冲突时需 N 次成功覆盖
     benchmark_extraction_enabled: bool = True  # 3.3 基准集自动提取（代表性任务）
+    benchmark_duplicate_threshold: float = 0.85  # 3.3A 语义重复阈值
+    benchmark_variant_threshold: float = 0.6     # 3.3A 相关变体阈值（标注不合并）
     self_improve_dir: str = "~/.swe-agent"     # 画像/提议/基准台账目录（跨会话）
+    # 主线一 1.3C：会话结束把有跨会话价值的临时状态提炼成项目记忆
+    session_distill_enabled: bool = False      # 默认关闭；开启后写 memory/project
     # SWE-bench 优化（方向一 3.1/3.4）：issue→文件推荐 + 相关测试自动选择
     recommend_files_enabled: bool = False   # 从 issue 关键词推荐候选文件并注入规划
     recommend_top_k: int = 8                # 推荐文件数上限

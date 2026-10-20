@@ -36,6 +36,7 @@ class AgentRunner:
         llm: Optional[BaseLLM] = None,
         planner: Optional[Planner] = None,
         mcp_manager: Optional[MCPManager] = None,
+        goal: bool = False,
     ) -> None:
         self.app = app
         self.prompt = prompt
@@ -43,6 +44,7 @@ class AgentRunner:
         self.llm = llm
         self.planner = planner
         self.mcp_manager = mcp_manager
+        self.goal = goal
         self.loop: Optional[AgentLoop] = None
         self.result: Optional[LoopResult] = None
         self.approve_rule: Optional[str] = None
@@ -66,6 +68,8 @@ class AgentRunner:
         self.app.post_message(AgentStartedMessage(self.prompt))
         self.loop = self.build_loop()
         try:
+            if self.goal and self.loop.goal_store is not None:
+                self.loop.create_goal(self.prompt)
             self.result = await self.loop.run(self.prompt)
             return self.result
         finally:

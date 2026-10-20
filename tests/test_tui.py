@@ -333,6 +333,10 @@ async def test_tui_cycle_views_and_render(ws_tmp):
         await pilot.press("f5")
         assert app.query_one("#gate-view").display is True
         await pilot.press("f5")
+        assert app.query_one("#capacity-view").display is True
+        assert "能力画像" in str(
+            app.query_one("#capacity-view", Static).render())
+        await pilot.press("f5")
         assert app.query_one("#main-log").display is True
         # F2 隐藏任务面板
         await pilot.press("f2")
@@ -1326,3 +1330,29 @@ async def test_tui_event_status_refresh_throttled(ws_tmp, monkeypatch):
         # 显式调用 refresh_status 不受节流影响（直调仍需立即生效）
         app.refresh_status()
         assert len(calls) > 0
+
+
+def test_goal_panel_renders_active_goal_and_subgoals():
+    """F8 目标面板：根目标、进度与子目标状态可读。"""
+    class Loop:
+        goal_store = object()
+
+        def goal_snapshot(self):
+            return {
+                "active": {
+                    "description": "交付登录功能",
+                    "status": "in_progress",
+                    "progress": 0.5,
+                    "sub_goals": [
+                        {"description": "实现登录接口", "status": "completed"},
+                        {"description": "补充回归测试", "status": "in_progress"},
+                    ],
+                },
+                "summary": {"active": 1, "completed": 0},
+            }
+
+    text = AlphaSWEApp._goal_panel_text(None, Loop())
+    assert "交付登录功能" in text
+    assert "50%" in text
+    assert "完成" in text and "进行>" in text
+    assert "补充回归测试" in text

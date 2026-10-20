@@ -59,7 +59,7 @@ _NARROW_WIDTH = 100
 # 排查方案 3.2：高频事件下状态刷新节流（≤ 每 0.1s 一次），
 # 渲染仍由 0.5s 定时器兜底，避免突发事件导致 TUI 卡顿。
 _EVENT_REFRESH_MIN_INTERVAL = 0.1
-_MAIN_VIEWS = ["log", "diff", "metrics", "timeline", "bg", "gate"]
+_MAIN_VIEWS = ["log", "diff", "metrics", "timeline", "bg", "gate", "capacity"]
 # diff 主区有界缓冲：视图隐藏时不直写 RichLog（否则 deferred renders 无限累积）
 _DIFF_BUFFER_MAX = 1000
 _PHASE_COLORS = {
@@ -129,11 +129,11 @@ Screen {
     layout: vertical;
 }
 
-#main-log, #diff-log, #metrics-view, #timeline-view, #gate-view {
+#main-log, #diff-log, #metrics-view, #timeline-view, #gate-view, #capacity-view {
     height: 1fr;
 }
 
-#diff-log, #metrics-view, #timeline-view, #gate-view {
+#diff-log, #metrics-view, #timeline-view, #gate-view, #capacity-view {
     display: none;
 }
 
@@ -513,6 +513,7 @@ class AlphaSWEApp(App[None]):
         Binding("d", "toggle_terminal_diff", "变更切换"),
         Binding("f6", "toggle_file_tree", "文件树"),
         Binding("f7", "show_regression_summary", "回归摘要"),
+        Binding("f8", "toggle_goal_panel", "目标面板"),
         Binding("ctrl+i", "focus_input", "注入指令"),
         Binding("ctrl+p", "toggle_pause", "暂停/继续"),
         Binding("ctrl+r", "retry_step", "重试"),
@@ -535,6 +536,7 @@ class AlphaSWEApp(App[None]):
         planner: Optional[Planner] = None,
         mcp_manager: Optional[MCPManager] = None,
         log_handler: Optional[TuiLogHandler] = None,
+        goal: bool = False,
     ) -> None:
         super().__init__()
         self.prompt = prompt
@@ -544,6 +546,7 @@ class AlphaSWEApp(App[None]):
         self._inject_planner = planner
         self._inject_mcp = mcp_manager
         self._log_handler = log_handler  # 日志桥（Ctrl+L 切换界面过滤级别）
+        self._start_as_goal = goal
         self.runner: Optional[AgentRunner] = None
         self._started_at = time.monotonic()
         self._finished: Optional[Any] = None
@@ -581,6 +584,7 @@ class AlphaSWEApp(App[None]):
             llm=self._inject_llm,
             planner=self._inject_planner,
             mcp_manager=self._inject_mcp,
+            goal=self._start_as_goal,
         )
 
     # ---- 生命周期 ----
@@ -601,6 +605,7 @@ class AlphaSWEApp(App[None]):
                     yield TimelineView(id="timeline-view")
                     yield Static("", id="bg-view", markup=True)
                     yield Static("", id="gate-view", markup=True)
+                    yield Static("", id="capacity-view", markup=True)
                     with Vertical(id="terminal-box"):
                         yield Label("终端输出", id="terminal-title")
                         yield RichLog(id="terminal-log", highlight=True,
@@ -842,7 +847,9 @@ class AlphaSWEApp(App[None]):
     def _apply_layout(self) -> None:
         compact = self._is_compact() or not self._task_panel_visible
         tree_visible = self._left_view == "tree" and not compact
-        self.query_one("#task-panel", Static).display = not compact and not tree_visible
+        task_visible = (self._left_view in ("tasks", "goal")
+                        and not compact)
+        self.query_one("#task-panel", Static).display = task_visible
         self.query_one("#file-tree-box", Vertical).display = tree_visible
         self.query_one("#compact-header", Static).display = compact
 
@@ -865,6 +872,9 @@ class AlphaSWEApp(App[None]):
         panel = self.query_one("#task-panel", Static)
         runner = self.runner
         loop = runner.loop if runner else None
+        if self._left_view == "goal":
+            panel.update(self._goal_panel_text(loop))
+            return
         phase = loop.state.phase.value if loop else "idle"
         lines = [f"[bold]任务[/bold]: {self.prompt[:26]}"]
         lines.append("-" * 26)
@@ -909,6 +919,42 @@ class AlphaSWEApp(App[None]):
         lines.append(f"耗时: {_fmt_elapsed(time.monotonic() - self._started_at)}")
         panel.update("\n".join(lines))
 
+    def _goal_panel_text(self, loop: Any) -> str:
+        """左侧「目标」面板：根目标 / 进度条 / 子目标状态。"""
+        if loop is None or getattr(loop, "goal_store", None) is None:
+            return ("[bold]目标[/bold]\n" + "-" * 26 +
+                    "\n（未启用目标驱动；F8 返回任务）")
+        snap = loop.goal_snapshot()
+        goal = snap.get("active")
+        lines = ["[bold]目标[/bold]", "-" * 26]
+        if not goal:
+            lines.extend(["（暂无活跃目标）",
+                          "CLI: --goal 或 --goal-id 启用"])
+            return "\n".join(lines)
+        percent = int(round(float(goal.get("progress", 0.0)) * 100))
+        lines.append(f"状态: {goal.get('status', '-')}")
+        lines.append(f"进度: {_progress_bar(percent)} {percent}%")
+        desc = str(goal.get("description", ""))
+        lines.append("目标: " + (desc[:60] + ("..." if len(desc) > 60 else "")))
+        subs = goal.get("sub_goals") or []
+        if subs:
+            lines.append("子目标:")
+            for item in subs[:8]:
+                mark = {"completed": ("完成 ", "green"),
+                        "in_progress": ("进行>", "yellow"),
+                        "failed": ("失败 ", "red"),
+                        "approved": ("待办 ", "cyan"),
+                        "pending": ("待办 ", "bright_black")}.get(
+                            str(item.get("status")), ("?    ", "white"))
+                text = str(item.get("description", ""))[:42]
+                lines.append(f" [{mark[1]}]{mark[0]}[/] {text}")
+        summary = snap.get("summary") or {}
+        if summary:
+            lines.append(f"台账: 活跃 {summary.get('active', 0)} / "
+                         f"完成 {summary.get('completed', 0)}")
+        lines.append("F8 返回任务面板")
+        return "\n".join(lines)
+
     def _update_status_bar(self) -> None:
         bar = self.query_one("#status-bar", Static)
         runner = self.runner
@@ -926,7 +972,7 @@ class AlphaSWEApp(App[None]):
         r_style = "yellow" if (max_rounds and rounds / max_rounds >= 0.9) else "white"
         view_names = {"log": "日志", "diff": "变更",
                       "metrics": "监控", "timeline": "时间线",
-                      "bg": "后台", "gate": "门禁"}
+                      "bg": "后台", "gate": "门禁", "capacity": "能力"}
         view_hint = f"[{view_names.get(self._main_view, self._main_view)}]"
         if self._main_view == "log":
             try:
@@ -956,7 +1002,7 @@ class AlphaSWEApp(App[None]):
                             f" | 预算: [{style}]{used:,}/{budget:,}"
                             f" ({pct}%)[/]")
                     break
-        left_names = {"tasks": "任务", "tree": "文件树"}
+        left_names = {"tasks": "任务", "tree": "文件树", "goal": "目标"}
         left_hint = f"[{left_names.get(self._left_view, '任务')}]"
         bar.update(
             f"tokens: [{t_style}]{tokens:,}[/] | "
@@ -1066,6 +1112,38 @@ class AlphaSWEApp(App[None]):
             self._update_bg_view()
         if self._main_view == "gate":
             self._update_gate_view()
+        if self._main_view == "capacity":
+            self._update_capacity_view()
+
+    def _update_capacity_view(self) -> None:
+        """主区「能力」视图：分数 / 95% 区间 / 难度校准 / 弱项建议。"""
+        try:
+            runner = self.runner
+            if runner is None or runner.loop is None:
+                return
+            view = self.query_one("#capacity-view", Static)
+            cap = getattr(runner.loop, "capability", None)
+            if cap is None:
+                view.update("能力画像未启用（agent.capability_enabled=false）")
+                return
+            lines = ["[bold]能力画像[/bold]"]
+            report = cap.confidence_report()
+            lines.extend(report or ["  （样本不足，暂无可信区间）"])
+            calibration = cap.calibration_report()
+            bias = cap.calibration_bias()
+            if calibration:
+                lines.extend(["", "[bold]难度校准[/bold]"])
+                lines.extend(f"  {line}" for line in calibration[:8])
+            if bias:
+                lines.extend(["", "[bold yellow]偏倚提示[/bold yellow]"])
+                lines.extend(f"  {line}" for line in bias[:5])
+            suggestions = cap.suggestions()
+            if suggestions:
+                lines.extend(["", "[bold]弱项建议[/bold]"])
+                lines.extend(f"  {line}" for line in suggestions[:5])
+            view.update("\n".join(lines))
+        except Exception:
+            pass
 
     def _update_gate_view(self) -> None:
         """刷新主区「门禁」视图（会话阶段 / 五道防线 / 风险 / 最近事件）。"""
@@ -1521,6 +1599,12 @@ class AlphaSWEApp(App[None]):
             self.query_one("#file-tree", FileTreeView).focus()
         self.refresh_status()
 
+    def action_toggle_goal_panel(self) -> None:
+        """F8：左侧面板切换到目标视图 / 返回任务视图。"""
+        self._left_view = "tasks" if self._left_view == "goal" else "goal"
+        self._apply_layout()
+        self.refresh_status()
+
     def _workspace_root(self) -> Optional[str]:
         """当前工作区根目录（沙箱配置）。"""
         sandbox = getattr(self.config, "sandbox", None)
@@ -1588,6 +1672,14 @@ class AlphaSWEApp(App[None]):
             self._main_view == "timeline")
         self.query_one("#bg-view", Static).display = self._main_view == "bg"
         self.query_one("#gate-view", Static).display = self._main_view == "gate"
+        self.query_one("#capacity-view", Static).display = (
+            self._main_view == "capacity")
+        if self._main_view == "capacity":
+            self._update_capacity_view()
+        elif self._main_view == "gate":
+            self._update_gate_view()
+        elif self._main_view == "bg":
+            self._update_bg_view()
         if self._main_view == "timeline":
             self.query_one("#timeline-view", TimelineView).focus()
         elif prev == "timeline":

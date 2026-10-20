@@ -11,6 +11,8 @@ import argparse
 import json
 from pathlib import Path
 
+import pytest
+
 from agent import __main__ as cli
 from agent.config import AppConfig
 from agent.core.loop import AgentLoop
@@ -136,6 +138,22 @@ def test_dry_run_and_resume_mutually_exclusive(ws_tmp, capsys):
     exit_code = cli.run_cli(args)
     assert exit_code == cli.EXIT_INTERRUPT
     assert "不能同时" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("overrides", [
+    {"goal": True},
+    {"goal_id": "goal_abc123"},
+])
+def test_dry_run_and_goal_mutually_exclusive_without_writes(
+        ws_tmp, capsys, overrides):
+    """目标入口会写台账，必须与承诺零写入的 dry-run 互斥。"""
+    cfg_path = write_cfg(ws_tmp)
+    args = make_cli_args(cfg_path, str(ws_tmp / "ws"),
+                         dry_run=True, **overrides)
+    exit_code = cli.run_cli(args)
+    assert exit_code == cli.EXIT_INTERRUPT
+    assert "dry-run" in capsys.readouterr().err
+    assert not (ws_tmp / ".swe-agent" / "goals.json").exists()
 
 
 def test_resume_restores_snapshot_without_replanning(ws_tmp, capsys):

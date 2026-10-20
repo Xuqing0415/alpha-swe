@@ -4,7 +4,7 @@
 定位：目标驱动能力的分层落点，链路为
 Goal（目标）-> Task（任务）-> 进度追踪 -> Prompt 注入。
 
-本模块只提供数据模型与转换能力，暂不接线到 AgentLoop：
+本模块提供数据模型与转换能力；AgentLoop 的接线位于 ``agent/core/loop.py``：
 - GoalStatus：目标生命周期状态与合法迁移表；
 - Goal：目标数据模型（受控状态迁移、子目标树、进度推导、序列化、Prompt 注入）；
 - GoalStore：目标台账，可选 JSON 原子持久化（不落盘时纯内存）。

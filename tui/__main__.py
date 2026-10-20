@@ -32,6 +32,8 @@ def main(argv=None) -> int:
                         help="启动 Web 观测面板（第 9 节）")
     parser.add_argument("--web-port", type=int, default=None,
                         help="Web 面板端口（默认读配置 agent.web_panel_port）")
+    parser.add_argument("--goal", action="store_true",
+                        help="把首个提示词登记为目标并启用目标驱动")
     args = parser.parse_args(argv)
 
     if args.replay:
@@ -39,6 +41,8 @@ def main(argv=None) -> int:
 
     prompt = " ".join(args.prompt).strip() or "分析当前项目结构并给出改进建议"
     config = load_config(args.config)
+    if args.goal:
+        config.agent.goal_enabled = True
 
     # 启动自检：任务开始前暴露配置/环境问题（关键项失败则终止启动）
     checks = run_selfcheck(config)
@@ -55,7 +59,7 @@ def main(argv=None) -> int:
         json_log_dir=config.agent.structured_log_dir or None)
 
     app = AlphaSWEApp(prompt, config=config, mcp_manager=mcp_manager,
-                      log_handler=bridge)
+                      log_handler=bridge, goal=args.goal)
 
     # 第 9 节：Web 观测面板（--web 或 config.agent.web_panel_enabled）
     web_server = None
