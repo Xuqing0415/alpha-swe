@@ -134,6 +134,9 @@ _HTML_PAGE = """<!doctype html>
       <button class="kind-filter" data-kind="state">state</button>
       <button class="kind-filter" data-kind="budget">budget</button>
       <button class="kind-filter" data-kind="barrier">barrier</button>
+      <button class="kind-filter" data-kind="goal">goal</button>
+      <button class="kind-filter" data-kind="memory">memory</button>
+      <button class="kind-filter" data-kind="metric">metric</button>
       <button class="kind-filter" data-kind="error">error</button>
       <button class="kind-filter" data-kind="other">other</button>
     </div>

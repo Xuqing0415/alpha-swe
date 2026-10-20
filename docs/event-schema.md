@@ -32,6 +32,9 @@ AgentLoop 在每个关键节点通过 `_emit(event_type, **data)` 产出一条�
 | `state` | 会话状态快照（阶段门禁 / 防线） |
 | `budget` | 预算告警与耗尽 |
 | `barrier` | 阶段栅栏 |
+| `goal` | 目标创建 / 更新 / 任务规划 / 空闲续规划 |
+| `memory` | 记忆写入与会话知识提炼 |
+| `metric` | 能力画像与难度评估等指标 |
 | `error` | 错误（当前预留，`run_error` 仍归 `lifecycle`） |
 | `other` | 未知类型兜底 |
 
@@ -46,6 +49,9 @@ AgentLoop 在每个关键节点通过 `_emit(event_type, **data)` 产出一条�
 | `state` | `session_state` |
 | `budget` | `budget_warning`、`budget_exhausted` |
 | `barrier` | `phase_barrier_task_start`、`phase_barrier_summary` |
+| `goal` | `goal_created`、`goal_updated`、`goal_plan`、`goal_idle_continue` |
+| `memory` | `session_distilled` |
+| `metric` | `difficulty_assessed` |
 
 未知类型不会报错：`kind_of()` 返回 `EventKind.OTHER`，消费方**不得**因未知类型丢弃事件。
 控制帧 `ping` / `done` / `snapshot` 不是业务事件，不登记在 `EVENT_TYPES` 中。

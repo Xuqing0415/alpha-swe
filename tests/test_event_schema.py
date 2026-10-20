@@ -74,6 +74,10 @@ def test_normalize_event_缺失data补空字典():
     ("session_state", EventKind.STATE),
     ("budget_exhausted", EventKind.BUDGET),
     ("phase_barrier_summary", EventKind.BARRIER),
+    ("goal_created", EventKind.GOAL),
+    ("goal_idle_continue", EventKind.GOAL),
+    ("session_distilled", EventKind.MEMORY),
+    ("difficulty_assessed", EventKind.METRIC),
     ("从未登记的类型", EventKind.OTHER),
     ("", EventKind.OTHER),
 ])
@@ -203,7 +207,9 @@ def test_known_types_覆盖全部登记类型且已排序():
                 "task_preempted", "task_interrupted", "think", "tool_call",
                 "budget_warning", "budget_exhausted",
                 "phase_barrier_task_start", "phase_barrier_summary",
-                "dry_run_plan", "session_state"]
+                "dry_run_plan", "session_state", "goal_created",
+                "goal_updated", "goal_plan", "goal_idle_continue",
+                "session_distilled", "difficulty_assessed"]
     for name in expected:
         assert name in types
         assert name in EVENT_TYPES

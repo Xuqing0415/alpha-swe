@@ -35,6 +35,9 @@ class EventKind(str, Enum):
     STATE = "state"           # 会话状态快照
     BUDGET = "budget"         # 预算告警 / 耗尽
     BARRIER = "barrier"       # 阶段栅栏
+    GOAL = "goal"             # 目标创建 / 更新 / 任务规划 / 空闲续规划
+    MEMORY = "memory"         # 记忆写入 / 会话知识提炼
+    METRIC = "metric"         # 能力画像 / 难度评估等指标
     ERROR = "error"           # 错误（run_error 归入 LIFECYCLE，此处保留给未来细分）
     OTHER = "other"           # 未知类型兜底
 
@@ -66,6 +69,14 @@ EVENT_TYPES: Dict[str, EventKind] = {
     # 阶段栅栏
     "phase_barrier_task_start": EventKind.BARRIER,
     "phase_barrier_summary": EventKind.BARRIER,
+    # 目标驱动
+    "goal_created": EventKind.GOAL,
+    "goal_updated": EventKind.GOAL,
+    "goal_plan": EventKind.GOAL,
+    "goal_idle_continue": EventKind.GOAL,
+    # 记忆与能力指标
+    "session_distilled": EventKind.MEMORY,
+    "difficulty_assessed": EventKind.METRIC,
     # 会话状态
     "session_state": EventKind.STATE,
 }

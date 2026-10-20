@@ -62,6 +62,9 @@ _KIND_STYLES: Dict[EventKind, Tuple[str, str]] = {
     EventKind.STATE: ("GATE", "magenta"),
     EventKind.BUDGET: ("WARN", "yellow"),
     EventKind.BARRIER: ("GATE", "magenta"),
+    EventKind.GOAL: ("GOAL", "yellow"),
+    EventKind.MEMORY: ("MEM", "bright_black"),
+    EventKind.METRIC: ("MET", "cyan"),
     EventKind.ERROR: ("ERROR", "red"),
     EventKind.OTHER: ("INFO", "bright_black"),
 }
