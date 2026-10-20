@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 """大项目增量快照：默认不全量哈希，仅跟踪 Agent 写入与关键配置。"""
+import os
+import time
 from pathlib import Path
 
 from agent.project_state import ProjectStateTracker
@@ -10,8 +12,10 @@ def test_large_tree_scan_hashes_only_tracked_and_key_configs(ws_tmp: Path):
     pkg = root / "src" / "pkg"
     pkg.mkdir(parents=True)
     for index in range(1050):
-        (pkg / f"file_{index:04d}.py").write_text(
-            f"VALUE = {index}\n", encoding="utf-8")
+        path = pkg / f"file_{index:04d}.py"
+        path.write_text(f"VALUE = {index}\n", encoding="utf-8")
+        old = time.time() - 3600
+        os.utime(path, (old, old))
     (root / "config").mkdir()
     (root / "config" / "agent.yaml").write_text("agent: {}\n",
                                                 encoding="utf-8")
@@ -67,3 +71,21 @@ def test_agent_written_file_hash_persists_and_detects_content_change(ws_tmp: Pat
     diff = tracker3.begin_session()
     assert "a.py" in diff["files"]["modified"]
     assert tracker3.state["dirs"]["."]["files"] == 1
+
+
+def test_recent_same_size_rewrite_detected_without_mtime_change(ws_tmp: Path):
+    root = ws_tmp / "project"
+    root.mkdir()
+    path = root / "a.py"
+    path.write_text("x = 1\n", encoding="utf-8")
+    tracker = ProjectStateTracker(str(root))
+    tracker.begin_session()
+    assert tracker.state["structure"]["a.py"]["sha1"]
+
+    before = path.stat()
+    path.write_text("x = 2\n", encoding="utf-8")
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+
+    tracker2 = ProjectStateTracker(str(root))
+    diff = tracker2.begin_session()
+    assert "a.py" in diff["files"]["modified"]

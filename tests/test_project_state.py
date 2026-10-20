@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """项目状态感知（主线一 1.1）：ProjectStateTracker 单测 + 跨会话注入集成测试。"""
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -80,7 +81,10 @@ def test_file_change_detected_across_sessions(ws_dir):
     tracker = ProjectStateTracker(str(ws_dir))
     tracker.begin_session()  # 基线含 a.py
 
+    before = (ws_dir / "a.py").stat()
     (ws_dir / "a.py").write_text("x = 2\n", encoding="utf-8")
+    # 固定 mtime，确定性覆盖 Windows 同尺寸快速改写不更新时间戳的情况。
+    os.utime(ws_dir / "a.py", ns=(before.st_atime_ns, before.st_mtime_ns))
     (ws_dir / "b.py").write_text("y = 1\n", encoding="utf-8")
     tracker2 = ProjectStateTracker(str(ws_dir))
     diff = tracker2.begin_session()

@@ -18,6 +18,7 @@ import hashlib
 import logging
 import os
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
@@ -37,6 +38,11 @@ _MAX_RECENT = 200
 _MAX_HISTORY = 200
 _MAX_DIFF_FILES = 40
 _MAX_HASH_PATHS = 500
+
+# 刚被创建或改写的文件在部分文件系统上可能落在同一 mtime 刻度内。对
+# 这类文件短暂回退到内容哈希，既避免漏检同尺寸快速改写，也不会让成熟
+# 的大项目每次会话都全量读盘。
+_RECENT_HASH_WINDOW_NS = 5_000_000_000
 
 # 内容哈希按需维护：只覆盖 Agent 写过的文件与关键配置。其余文件用
 # mtime/size 检测外部修改，避免在万级文件项目里每次会话全量读盘。
@@ -236,12 +242,14 @@ class ProjectStateTracker:
     def scan(self, full_hash: bool = False) -> Dict[str, Any]:
         """当前项目结构 + 目录统计 + 依赖清单 + 技术栈。
 
-        默认只对 Agent 写过的文件与关键配置计算内容哈希；``full_hash=True``
-        供显式全量校验使用，但不会把全量路径写回增量哈希集合。
+        默认只对 Agent 写过的文件、关键配置和近期修改过的文件计算内容
+        哈希；``full_hash=True`` 供显式全量校验使用，但不会把全量路径
+        写回增量哈希集合。
         """
         root = Path(self.workspace)
         structure: Dict[str, Dict[str, Any]] = {}
         dirs: Dict[str, Dict[str, int]] = {}
+        now_ns = time.time_ns()
         if root.is_dir():
             for p in root.rglob("*"):
                 if not p.is_file():
@@ -260,7 +268,7 @@ class ProjectStateTracker:
                     "mtime_ns": st.st_mtime_ns,
                     "size": st.st_size,
                 }
-                if full_hash or self._should_hash(rel):
+                if full_hash or self._should_hash(rel, st.st_mtime_ns, now_ns):
                     try:
                         entry["sha1"] = _sha1_file(p)
                     except OSError:
@@ -281,12 +289,18 @@ class ProjectStateTracker:
                 "tech_stack": self._tech_stack(root, list(structure)),
                 "hash_policy": "full" if full_hash else "incremental"}
 
-    def _should_hash(self, rel: str) -> bool:
-        """是否为此路径维护内容哈希（Agent 写入或关键配置）。"""
+    def _should_hash(self, rel: str, mtime_ns: Optional[int] = None,
+                     now_ns: Optional[int] = None) -> bool:
+        """是否为此路径维护内容哈希（Agent 写入、关键配置或近期修改）。"""
         if rel in self._hash_paths:
             return True
-        return (Path(rel).name in _KEY_CONFIG_NAMES
-                or rel in _KEY_CONFIG_PATHS)
+        if (Path(rel).name in _KEY_CONFIG_NAMES
+                or rel in _KEY_CONFIG_PATHS):
+            return True
+        if mtime_ns is None:
+            return False
+        current = time.time_ns() if now_ns is None else now_ns
+        return current - int(mtime_ns) <= _RECENT_HASH_WINDOW_NS
 
     # ---- 主线一 1.1A：三层快照对比（Last_known / Current_disk / Agent_intended） ----
     def _tech_stack(self, root: Path,
