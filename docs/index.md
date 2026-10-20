@@ -14,6 +14,7 @@
 ## 功能模块
 
 - [features/memory.md](features/memory.md) — 长期记忆（写入/检索/去重/衰减/多后端）
+- [features/goal.md](features/goal.md) — 目标驱动（Goal 台账、任务 DAG、进度回写、空闲续规划）
 - [features/code-semantics.md](features/code-semantics.md) — 代码语义理解（AST/调用图/项目画像）
 - [features/multilang.md](features/multilang.md) — 多语言支持与扩展工具（含 VS Code 扩展）
 - [features/skills-plugins.md](features/skills-plugins.md) — 技能与插件（动态注入/工作流/自然语言创建）

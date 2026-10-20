@@ -21,6 +21,24 @@ agent:
   state_tracker_enabled: true
   workspace_context_enabled: true
 
+  # 目标驱动（默认关闭；开启后 System Prompt 注入目标，并按目标生成确定性任务 DAG）
+  goal_enabled: false
+  goal_state_path: ".swe-agent/goals.json"
+  goal_idle_continue_limit: 3       # 队列清空后最多续规划次数
+  goal_idle_continue_enabled: true
+
+  # 自我改进与能力画像
+  self_improve_enabled: true
+  capability_enabled: true
+  capability_prompt_inject: true
+  difficulty_critic_enabled: true   # 任务结束后按实际过程评估难度 1~5
+  benchmark_extraction_enabled: true
+  benchmark_duplicate_threshold: 0.85  # 语义相似度达到即视为重复
+  benchmark_variant_threshold: 0.6     # 相似但不同，保留为变体
+
+  # 会话结束知识提炼（默认关闭；开启后写入 memory/project）
+  session_distill_enabled: false
+
 tools:
   terminal_execute:
     enabled: true

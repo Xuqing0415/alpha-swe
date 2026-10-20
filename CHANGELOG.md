@@ -6,6 +6,20 @@
 ## [Unreleased]
 
 ### 新增
+- Goal 目标驱动接线：`AgentLoop` 加载 `.swe-agent/goals.json`，System Prompt 注入
+  `[当前目标]`，目标/子目标转换为确定性任务 DAG，任务终结回写进度，队列清空后按
+  剩余子目标空闲续规划（默认上限 3 次）；CLI 新增 `--goal` / `--subgoal` /
+  `--goal-id`（与 `--dry-run` 互斥），TUI 新增 `--goal` 与 F8 目标面板。
+  测试：`tests/test_goal_wiring.py`；文档：`docs/features/goal.md`。
+- 能力画像难度接线：任务结束后由过程 Critic 按子任务数、轮次、工具调用、失败与
+  改动范围评估难度 1~5，写入 `CapabilityProfile.record(..., difficulty=...)`；
+  TUI 主区新增「能力」视图展示 95% 区间、难度校准与偏倚提示。
+- 基准集语义去重：离线词/字符 bigram 余弦相似度 ≥0.85 合并为重复并保留新变体，
+  0.6~0.85 新增条目并标注 `variant_of`/`similarity`。
+- 会话知识提炼（默认关闭）：`agent/memory/distill.py` 过滤行号、临时路径等一次性
+  状态，提炼项目约定并写入项目记忆；事件 `session_distilled`。
+- 大项目增量快照：普通文件只用 `mtime/size`，仅 Agent 写入文件与关键配置维护内容
+  哈希；新增目录统计 `dirs` 与 `hash_paths` 台账，避免万级文件每次全量读盘。
 - 主线一 1.3C：会话状态显式生命周期接线到 TUI 与新 API（接入 `loop.py` 主流程）——
   `agent/core/session_state.py` 提供 0-6 阶段 / 五道防线 / 风险评分 / 最近事件的
   `SessionState`（JSON 落盘 `workspace/.agent_gate/alpha_swe_session.json`），
@@ -52,8 +66,8 @@
 - 主线三 3.2C：改进提议晋升后观察期——晋升即挂 `watch_window`（默认 10）观察窗，分开记账 `proposal_ok`/`system_fail`；系统失败占比达 `watch_disable_threshold`（默认 0.5，fail≥3 提前触发）临时禁用（`suspend`），`resume` 重开观察窗或 `demote` 降回 `LOCAL`（`demoted_reason=watch_regression`）；`watch_report()`/`watch_status()` 供决策日志/TUI 展示。
 - 主线二 2.3：用户超级角色——新增 `agent/multiagent/user_role.py`（`UserRole`/`VetoReason`/`MilestoneKind`/`UserMilestone`）：结构化否决原因（方向错误/方案不当/风险不可接受/时机不对/其他，各带行为指引，避免盲目重试）；黑板高优用户通道（`post_user`/`pending_user_messages` 按收听者独立游标消费，`*` 全员收听）；决策里程碑（否决/批准/改派/中断记录决策日志 `user.milestone` 并收录进 `TeamResult.user_milestones`，`SessionReplay.milestones()` 供回放快速跳转）；Orchestrator `veto_task`/`approve_task`/`reassign_task`/`interrupt_task` 接线，评审自动重试前查询否决门 `_retry_blocked_by_user_veto` 停止盲目重试。
 - 主线三 3.1A：能力画像任务难度校准（默认关闭）——`CapabilityProfile.record(..., difficulty=1~5)` 显式标注难度后按难度加权更新（简单任务成功加分更少、困难任务失败更可容忍），不传难度权重恒为 1.0 保持既有行为；`avg_difficulty()`/`easy_share()`/`easy_success_share()`/`calibration_report()` 展示难度缩放，`calibration_bias()` 识别「高分来自简单任务」的维度，`calibration_adjusted_score()` 给出折减后的保守分供角色路由使用。测试：`tests/test_selfimprove.py` 新增 5 例。
-- 统一事件流 schema（功能扩展 P0）：新增 `agent/observability/event_schema.py`——`EventKind` 分组枚举（lifecycle/task/thought/tool/state/budget/barrier/error/other）、覆盖 21 个已知事件类型的 `EVENT_TYPES` 表、`normalize_event()`（不修改入参、缺省字段补齐）、`validate_event()`/`is_valid()`、与 `server/events.py` 格式一致的 `to_sse()`（含 ping 特例）、`describe()` 单行摘要与 `known_types()`，供 TUI / Web / SSE / CLI 共用同一套事件定义。测试：`tests/test_event_schema.py`（46 例）。
-- Goal 目标驱动基础（功能扩展 P0）：新增 `agent/core/goal.py`——`GoalStatus` 生命周期与合法迁移表（pending→approved→in_progress→completed/failed，failed 可回到 in_progress）、`Goal` 数据模型（受控迁移、子目标树、进度推导、递归序列化、`goal_prompt_block()` Prompt 注入、`to_tasks()` 转 `List[Task]`）、`GoalStore` JSON 原子持久化台账（损坏回退、`enabled=False` 纯内存）；暂不接线 AgentLoop，`to_tasks()` 产物即 Planner 接口所需类型。测试：`tests/test_goal.py`（12 例）。
+- 统一事件流 schema（功能扩展 P0）：新增 `agent/observability/event_schema.py`——`EventKind` 分组枚举（lifecycle/task/thought/tool/state/budget/barrier/goal/memory/metric/error/other）、覆盖 27 个已知事件类型的 `EVENT_TYPES` 表、`normalize_event()`（不修改入参、缺省字段补齐）、`validate_event()`/`is_valid()`、与 `server/events.py` 格式一致的 `to_sse()`（含 ping 特例）、`describe()` 单行摘要与 `known_types()`，供 TUI / Web / SSE / CLI 共用同一套事件定义。测试：`tests/test_event_schema.py`。
+- Goal 目标驱动基础（功能扩展 P0）：新增 `agent/core/goal.py`——`GoalStatus` 生命周期与合法迁移表（pending→approved→in_progress→completed/failed，failed 可回到 in_progress）、`Goal` 数据模型（受控迁移、子目标树、进度推导、递归序列化、`goal_prompt_block()` Prompt 注入、`to_tasks()` 转 `List[Task]`）、`GoalStore` JSON 原子持久化台账（损坏回退、`enabled=False` 纯内存）。测试：`tests/test_goal.py`（12 例）。
 
 - 统一事件流 schema 接线：`server/events.py` 的 SSE 生成器改用 `to_sse()` 序列化并新增 `strict_validation`（默认关闭；开启时逐条 `validate_event()` 记警告但仍发送，`ping`/`done` 控制帧跳过）；`agent/observability/web.py` 的 `_push()`/`events()`/SSE 统一经 `normalize_event()` 归一化并附 `kind` 分组字段，事件页新增按 `EventKind` 分组筛选；`tui/formatting.py` 中未登记 `_LOG_TYPES` 的已知事件改为按 `EventKind` 分组着色、正文用 `describe()` 兜底（已登记类型行为逐字不变）。文档：`docs/event-schema.md`。测试：`tests/test_event_schema_wiring.py`（18 例）、`tests/test_tui_event_schema.py`（26 例）。
 
