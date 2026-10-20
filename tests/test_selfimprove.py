@@ -309,6 +309,34 @@ def test_benchmark_dedup_on_same_instruction(ws_tmp):
     store.close()
 
 
+def test_benchmark_semantic_dedup_and_variant_marking(ws_tmp):
+    """3.3A：近义改写合并为重复；相关但不同标注 variant_of。"""
+    from agent.selfimprove.benchmark import semantic_similarity
+    assert semantic_similarity("修复登录接口空指针崩溃",
+                               "修复登录接口的空指针崩溃") >= 0.85
+    store = BenchmarkExtractor(path=str(ws_tmp / "bench.json"))
+    events = [{"type": "tool_call", "data": {"success": True,
+              "tool": "file_ops", "params": {"action": "edit", "path": "a.py"}}}]
+    tasks = [SimpleNamespace(id="s0"), SimpleNamespace(id="s1")]
+    first = store.evaluate("修复登录接口空指针崩溃", _result(events, tasks))
+    duplicate = store.evaluate("修复登录接口的空指针崩溃",
+                               _result(events, tasks))
+    assert first and duplicate
+    assert duplicate["duplicate"] is True
+    assert len(store.entries()) == 1
+    assert store.entries()[0].get("variants")
+
+    variant = store.evaluate("为数据层接口编写文档",
+                             _result(events, tasks, phase="failed"))
+    related = store.evaluate("为数据层接口编写使用文档",
+                             _result(events, tasks, phase="failed"))
+    assert variant and related
+    assert related["duplicate"] is False
+    assert related["variant_of"] == variant["id"]
+    assert 0.6 <= related["similarity"] < 0.85
+    store.close()
+
+
 def test_benchmark_confirm_and_reject(ws_tmp):
     store = BenchmarkExtractor(path=str(ws_tmp / "bench.json"))
     events = [{"type": "tool_call", "data": {"success": True, "tool": "file_ops",

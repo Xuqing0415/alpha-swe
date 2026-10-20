@@ -11,7 +11,10 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
+import re
 import time
+from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -28,6 +31,33 @@ _CATEGORY_LIMIT = 0.4  # 3.3B：某类别占比超过该阈值视为「过载」
 
 def _hash(prompt: str) -> str:
     return hashlib.sha1(str(prompt).strip().encode("utf-8")).hexdigest()[:16]
+
+
+def _semantic_features(text: str) -> Counter:
+    """离线语义特征：英文/数字词 + 归一化文本的字符 bigram。
+
+    不引入嵌入模型依赖；对中英文混合的指令，字符 bigram 能稳定捕获
+    「同义改写/增删虚词」的相似性，供重复与变体分桶使用。
+    """
+    lowered = str(text or "").lower()
+    words = re.findall(r"[a-z0-9_]+", lowered)
+    normalized = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", lowered)
+    grams = [normalized[i:i + 2] for i in range(max(0, len(normalized) - 1))]
+    return Counter(words + grams)
+
+
+def semantic_similarity(left: str, right: str) -> float:
+    """确定性文本相似度（0~1）：字符/词频余弦，用于离线语义去重。"""
+    a = _semantic_features(left)
+    b = _semantic_features(right)
+    if not a or not b:
+        return 0.0
+    dot = sum(count * b.get(key, 0) for key, count in a.items())
+    norm_a = math.sqrt(sum(count * count for count in a.values()))
+    norm_b = math.sqrt(sum(count * count for count in b.values()))
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return round(dot / (norm_a * norm_b), 4)
 
 
 def _has_real_change(events: List[Dict[str, Any]]) -> bool:
@@ -48,11 +78,15 @@ class BenchmarkExtractor:
     """基准集条目提取器：代表性评估 + 版本化台账 + 趋势告警。"""
 
     def __init__(self, path: Optional[str] = None, enabled: bool = True,
-                 profile=None, threshold: float = 0.6) -> None:
+                 profile=None, threshold: float = 0.6,
+                 duplicate_threshold: float = 0.85,
+                 variant_threshold: float = 0.6) -> None:
         self.enabled = enabled
         self.path = Path(path).expanduser() if path else None
         self.profile = profile
         self.threshold = float(threshold)
+        self.duplicate_threshold = float(duplicate_threshold)
+        self.variant_threshold = float(variant_threshold)
         self._data: Dict[str, Any] = self._load()
 
     def _load(self) -> Dict[str, Any]:
@@ -93,13 +127,34 @@ class BenchmarkExtractor:
             prompt, events, tasks, ok=ok)
         key = _hash(prompt)
         entries = self._data["entries"]
-        dup = next((e for e in entries if e["key"] == key), None)
+        dup = next((e for e in entries
+                    if e["key"] == key and e.get("status") != _STATUS_REJECTED),
+                   None)
         if dup:
             dup["seen_count"] = int(dup.get("seen_count", 0)) + 1
             dup["last_seen"] = time.time()
             self._save()
             return {"id": dup["id"], "score": score, "reason": reason,
-                    "duplicate": True}
+                    "duplicate": True, "similarity": 1.0}
+        # 3.3A：语义相似度分桶——>=重复阈值合并；>=变体阈值新增并标注变体源
+        similar_entry, similarity = None, 0.0
+        for item in entries:
+            if item.get("status") == _STATUS_REJECTED:
+                continue
+            sim = semantic_similarity(prompt, item.get("instruction", ""))
+            if sim > similarity:
+                similar_entry, similarity = item, sim
+        if similar_entry is not None and similarity >= self.duplicate_threshold:
+            similar_entry["seen_count"] = int(
+                similar_entry.get("seen_count", 0)) + 1
+            similar_entry["last_seen"] = time.time()
+            variants = similar_entry.setdefault("variants", [])
+            variants.insert(0, str(prompt)[:300])
+            del variants[5:]
+            self._save()
+            return {"id": similar_entry["id"], "score": score,
+                    "reason": reason, "duplicate": True,
+                    "similarity": similarity}
         if score < self.threshold:
             return None
         self._data["seq"] += 1
@@ -115,10 +170,15 @@ class BenchmarkExtractor:
             "created_at": time.time(),
             "seen_count": 1,
         }
+        if similar_entry is not None and similarity >= self.variant_threshold:
+            entry["variant_of"] = similar_entry["id"]
+            entry["similarity"] = similarity
         entries.append(entry)
         self._save()
         return {"id": entry["id"], "score": score, "reason": reason,
-                "duplicate": False}
+                "duplicate": False,
+                "variant_of": entry.get("variant_of"),
+                "similarity": similarity}
 
     def _representative_score(self, prompt: str, events, tasks,
                               ok: bool) -> tuple[float, str]:
